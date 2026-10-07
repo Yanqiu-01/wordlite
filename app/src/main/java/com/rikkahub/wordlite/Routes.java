@@ -104,6 +104,15 @@ final class Routes {
         lastGood = via;
     }
 
+    /** 找过的路全列出来：自检失败时用户最需要知道的是"到底试过哪几条"，而不是又一句"网络失败"。 */
+    static String candidateList(String explicitProxy) {
+        StringBuilder out = new StringBuilder(DIRECT);
+        Proxy explicit = parse(explicitProxy);
+        if (explicit != null) out.append("、").append(label(explicit));
+        for (Proxy auto : autodiscovered())
+            if (auto != explicit) out.append("、").append(label(auto));
+        return out.toString();
+    }
     /** 哪个源最后走了哪条路，自检和查重说明都用它。主机名不是文档内容，写出来不算泄露。 */
     static synchronized void note(String url, Proxy via) {
         String host = host(url);

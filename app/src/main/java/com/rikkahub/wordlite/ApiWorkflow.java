@@ -465,7 +465,8 @@ public final class ApiWorkflow {
                 appendProbe(lines, PaperSources.label(id), outcome,
                         (System.nanoTime() - started) / 1000000, Routes.routeFor(host));
             }
-            final String text = lines.toString().trim(), tail = usable + "/" + wanted.size() + " 个源可用";
+            final String text = lines.toString().trim() + hint(usable, options.proxy);
+            final String tail = usable + "/" + wanted.size() + " 个源可用";
             complete(task, () -> probeResult(text, tail));
         }, "wordlite-probe"); worker.start();
     }
@@ -481,6 +482,18 @@ public final class ApiWorkflow {
                 .append(millis).append("ms  ·  ").append(route).append("\n");
     }
 
+    /**
+     * 一个源都没连上时，光说"网络失败"等于什么都没说：这台手机在自己的网络上对十个检索主机
+     * 全部 ECONNREFUSED，而同一份代码经电脑上的代理就全通。所以把找过的路原样列出来，
+     * 再说一句该往哪儿填地址，用户才有下一步可做。
+     */
+    private static String hint(int usable, String proxy) {
+        if (usable > 0) return "";
+        return "\n\n找过的路：" + Routes.candidateList(proxy)
+                + "\n手机自己出不去时，把流量经电脑上的代理出去：检索设置里的\"HTTP 代理\"填电脑的地址与端口"
+                + "（例如 192.168.1.20:7897，代理端需允许局域网连接）。USB 连着电脑时先执行"
+                + " adb reverse tcp:7897 tcp:7897，这一格留空也能自动找到。";
+    }
     private void probeResult(String text, String tail) {
         LinearLayout box = column(); box.setPadding(dp(16), dp(8), dp(16), dp(8));
         box.addView(label(text.isEmpty() ? "没有完成任何一次自检" : text, 13));
