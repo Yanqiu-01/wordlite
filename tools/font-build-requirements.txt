@@ -1,0 +1,2 @@
+# Build-time only; not packaged in the APK.
+fonttools==4.60.1

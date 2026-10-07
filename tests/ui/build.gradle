@@ -1,0 +1,60 @@
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://dl.google.com/dl/android/maven2/' }
+}
+
+configurations {
+    androidTestAars
+}
+
+dependencies {
+    testImplementation files('../../artifacts/build/classes', '../../tools/android-35.jar')
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation('org.robolectric:robolectric:4.14.1') {
+        exclude group: 'androidx.test', module: 'monitor'
+        exclude group: 'androidx.test.espresso', module: 'espresso-idling-resource'
+    }
+    androidTestAars('androidx.test:monitor:1.7.2@aar') { transitive = false }
+    androidTestAars('androidx.test.espresso:espresso-idling-resource:3.6.1@aar') { transitive = false }
+}
+
+def aarJars = layout.buildDirectory.dir('aar-jars')
+tasks.register('extractAndroidTestAars') {
+    inputs.files(configurations.androidTestAars)
+    outputs.dir(aarJars)
+    doLast {
+        configurations.androidTestAars.each { aar ->
+            copy {
+                from zipTree(aar)
+                include 'classes.jar'
+                into aarJars.get().asFile
+                rename 'classes.jar', aar.name + '.jar'
+            }
+        }
+    }
+}
+
+tasks.register('printTestClasspath') {
+    dependsOn 'extractAndroidTestAars', 'testClasses'
+    doLast { println sourceSets.test.runtimeClasspath.asPath + ':' + files(fileTree(aarJars) { include '*.jar' }).asPath }
+}
+
+test {
+    dependsOn 'extractAndroidTestAars'
+    classpath += files(fileTree(aarJars) { include '*.jar' })
+    maxHeapSize = '768m'
+    // Paint shadows hold native/static caches; isolate class-specific shadow maps.
+    forkEvery = 1
+    maxParallelForks = 1
+    systemProperty 'robolectric.dependency.repo.url', 'https://repo.maven.apache.org/maven2'
+    systemProperty 'robolectric.enabledSdks', providers.gradleProperty('robolectricSdks').getOrElse('28')
+    systemProperty 'app.root', file('../..').absolutePath
+    testLogging {
+        events 'passed', 'failed', 'skipped'
+        exceptionFormat 'full'
+    }
+}

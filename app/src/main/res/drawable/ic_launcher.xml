@@ -1,0 +1,16 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- rounded jade tile -->
+    <path android:fillColor="#397C73"
+        android:pathData="M12,3 h24 a9,9 0 0 1 9,9 v24 a9,9 0 0 1 -9,9 h-24 a9,9 0 0 1 -9,-9 v-24 a9,9 0 0 1 9,-9 z" />
+    <!-- folded-corner document -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M15,11 h11 l7,7 v19 a2,2 0 0 1 -2,2 h-16 a2,2 0 0 1 -2,-2 v-24 a2,2 0 0 1 2,-2 z" />
+    <path android:fillColor="#BFD9D4"
+        android:pathData="M26,11 l7,7 h-7 z" />
+    <path android:fillColor="#397C73"
+        android:pathData="M18,23 h12 v1.8 h-12 z M18,28 h12 v1.8 h-12 z M18,33 h8 v1.8 h-8 z" />
+</vector>

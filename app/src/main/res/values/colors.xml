@@ -1,0 +1,25 @@
+<resources>
+    <!-- Surfaces -->
+    <color name="paper">#F4F3EE</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="surface_warm">#FFFEFB</color>
+    <color name="bg_top">#EEF2F0</color>
+    <color name="bg_bottom">#F6F6F3</color>
+    <color name="hairline">#14000000</color>
+
+    <!-- Ink -->
+    <color name="ink">#1E2A27</color>
+    <color name="ink_2">#25312E</color>
+    <color name="muted">#6D7773</color>
+    <color name="faint">#8A938F</color>
+
+    <!-- Jade brand -->
+    <color name="jade">#397C73</color>
+    <color name="jade_light">#43958B</color>
+    <color name="jade_dark">#2C655E</color>
+    <color name="jade_tint">#14397C73</color>
+
+    <!-- Status -->
+    <color name="amber">#B97718</color>
+    <color name="red">#B14B48</color>
+</resources>

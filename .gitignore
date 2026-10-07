@@ -1,0 +1,9 @@
+build/
+artifacts/
+resources/
+*.apk
+*.idsig
+checkpoints/
+reports/
+releases/
+tools/debug.keystore
