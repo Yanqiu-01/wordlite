@@ -9,7 +9,8 @@ param(
     [string]$Proxy = "http://127.0.0.1:7897",
     [switch]$SkipTests,
     [switch]$SkipBuild,
-    [switch]$NoPush
+    [switch]$NoPush,
+    [switch]$AllowEmpty
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -69,17 +70,20 @@ if (-not $CommitMessage) { $CommitMessage = "Release $Version" }
 if ($LASTEXITCODE -ne 0) { throw "git add failed" }
 $committed = & git commit -m $CommitMessage 2>&1
 if ($LASTEXITCODE -ne 0 -and (($committed -join " ") -notmatch "nothing to commit")) { throw ("git commit failed: " + ($committed -join " ")) }
-if (($committed -join " ") -match "nothing to commit") { throw "nothing to commit; this version has no change in it" }
+if (($committed -join " ") -match "nothing to commit") {
+    if (-not $AllowEmpty) { throw "nothing to commit; this version has no change in it" }
+    Write-Warning "-AllowEmpty: releasing the tree exactly as committed"
+}
 $sha = (& git rev-parse HEAD).Trim()
-# gh creates the tag itself; a stale local tag of the same name makes it refuse.
+# The release targets a commit that must already exist on the remote, so push first and let
+# gh cut the tag there; a stale local tag of the same name only makes gh refuse.
+if ($NoPush) { Write-Warning "-NoPush: the release step will fail unless $sha is already on the remote" }
+else {
+    & git -c ("http.proxy=" + $Proxy) -c ("https.proxy=" + $Proxy) push origin main
+    if ($LASTEXITCODE -ne 0) { throw "git push failed" }
+}
 & git tag -d ("v" + $Version) 2>&1 | Out-Null
 & gh release create ("v" + $Version) $apk $sums --target $sha --title ("Word Lite " + $Version) --notes-file $notesPath
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed (does v$Version already exist? use gh release upload)" }
-if (-not $NoPush) {
-    & git -c ("http.proxy=" + $Proxy) -c ("https.proxy=" + $Proxy) push origin main
-    if ($LASTEXITCODE -ne 0) { throw "git push failed" }
-    & git -c ("http.proxy=" + $Proxy) -c ("https.proxy=" + $Proxy) push origin ("refs/tags/v" + $Version + ":refs/tags/v" + $Version) --force
-    if ($LASTEXITCODE -ne 0) { throw "git push tag failed" }
-}
 Write-Host ("RELEASED {0} code {1} sha {2}" -f $Version, $newCode, $sha) -ForegroundColor Green
 Write-Host ("https://github.com/Yanqiu-01/wordlite/releases/tag/v" + $Version)
