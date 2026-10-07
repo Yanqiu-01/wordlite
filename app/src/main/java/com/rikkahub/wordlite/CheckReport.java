@@ -24,6 +24,7 @@ public final class CheckReport {
                 .append(report.hits.size()).append(" 处</p>");
         if (report.retrievalIncomplete) unfinished(out, report); else completed(out, report);
         engines(out, report);
+        sourcesLedger(out, report);
         candidates(out, report);
         snippets(out, report);
         aigc(out, report);
@@ -72,6 +73,107 @@ public final class CheckReport {
         }
         out.append("</tbody></table>");
     }
+    /**
+     * 来源榜：命中按文献聚合。排在"按检索源分布"与"候选文献"之间——读报告的顺序是
+     * 总量 → 哪个检索源命中最多 → 哪一篇 → 哪一段，来源榜补的是"哪一篇"这一级。
+     * 账本从 report.hits 现场反推（SourceLedger 是纯函数），DuplicateEngine.Report 不必为它加字段。
+     */
+    private static void sourcesLedger(StringBuilder out, DuplicateEngine.Report report) {
+        if (report == null || report.sourceText == null || report.sourceText.isEmpty()) return;
+        SourceLedger ledger = SourceLedger.aggregate(report.hits, TextCorpus.normalize(report.sourceText),
+                report.comparedChars);
+        if (ledger.rows.isEmpty()) {
+            // 什么都没比对成：头部已经是"未完成查重"，再排一张空来源榜会被读成"这篇很干净"。
+            if (report.retrievalIncomplete) return;
+            ledgerNoHit(out, report);
+            return;
+        }
+        out.append("<h2>来源榜 &#183; 按文献 &#183; 共 ").append(ledger.paperCount).append(" 篇命中</h2>");
+        out.append("<table><thead><tr><th>#</th><th>文献</th><th>检索源</th><th>重复字符</th>")
+                .append("<th>该篇重复率</th><th>处数</th><th>标识符</th></tr></thead><tbody>");
+        for (int i = 0; i < ledger.rows.size(); i++) {
+            SourceLedger.Row row = ledger.rows.get(i);
+            out.append("<tr><td>").append(row.others ? "&#8212;" : String.valueOf(i + 1)).append("</td><td>");
+            if (row.others) {
+                out.append(escape("其余 " + row.othersCount + " 篇合计"));
+            } else {
+                out.append(escape(row.title));
+                String meta = ledgerMeta(row);
+                if (meta.length() > 0) out.append("<br><span>").append(meta).append("</span>");
+            }
+            out.append("</td><td>").append(escape(row.engine)).append("</td><td>").append(row.duplicateChars)
+                    .append("</td><td>").append(percent(row.share(ledger.comparedChars)))
+                    .append("</td><td>").append(row.hitCount).append("</td><td>");
+            ledgerIdentifier(out, row);
+            out.append("</td></tr>");
+        }
+        out.append("</tbody></table>");
+        out.append("<p>各篇重复率用整篇有效字数 ").append(ledger.comparedChars)
+                .append(" 个有效字符当同分母，所以各行相加就是总相似度比；同一段字符只记给命中最长的那一篇。</p>");
+        for (int i = 0; i < LEDGER_SAMPLE_ROWS && i < ledger.rows.size(); i++)
+            ledgerSample(out, report.sourceText, ledger.rows.get(i), i + 1);
+    }
+
+    /** 比对过但一篇都没命中：把"未命中不等于全文没有重复"写死，别留一张空表让人自己脑补。 */
+    private static void ledgerNoHit(StringBuilder out, DuplicateEngine.Report report) {
+        int consulted = consultedCount(report);
+        out.append("<h2>来源榜</h2>");
+        if (consulted <= 0) {
+            out.append("<p>没有可比对文献命中，也没有来源榜可排。未命中不等于全文没有重复。</p>");
+            return;
+        }
+        out.append("<p>比对过 ").append(consulted).append(" 篇候选与自建库，没有一篇命中相似片段。未命中只说明这 ")
+                .append(consulted).append(" 篇里没有相似段落，未命中不等于全文没有重复。</p>");
+    }
+
+    /** 作者 &#183; 年份 &#183; 并自几条题录：并了两条题录这件事要在表里露出来，否则用户会以为库里真有两篇。 */
+    private static String ledgerMeta(SourceLedger.Row row) {
+        StringBuilder meta = new StringBuilder();
+        if (!row.authors.isEmpty()) meta.append(escape(row.authors));
+        if (!row.year.isEmpty()) {
+            if (meta.length() > 0) meta.append(" &#183; ");
+            meta.append(escape(row.year));
+        }
+        if (row.sourceCount > 1) {
+            if (meta.length() > 0) meta.append(" &#183; ");
+            meta.append(escape("并自 " + row.sourceCount + " 条题录"));
+        }
+        return meta.toString();
+    }
+
+    /** 标识符：只有字面以 https:// 开头的 locator 才配 <a href>。PMID:123、local:x.docx 这类一律纯文本。 */
+    private static void ledgerIdentifier(StringBuilder out, SourceLedger.Row row) {
+        String locator = row.locator == null ? "" : row.locator.trim();
+        String text = row.doi.isEmpty() ? locator : row.doi;
+        if (text.isEmpty()) return;
+        if (locator.startsWith("https://"))
+            out.append("<a href=\"").append(escape(locator)).append("\" rel=\"noopener\">")
+                    .append(escape(text)).append("</a>");
+        else out.append(escape(text));
+    }
+
+    /** 命中样例：该篇最长那一处用 <mark> 包住，左右各带 24 字上下文。只画前几行，导出报告的体积得有上限。 */
+    private static void ledgerSample(StringBuilder out, String text, SourceLedger.Row row, int index) {
+        if (row.others || row.longestEnd <= row.longestStart) return;
+        int from = Math.max(0, row.longestStart - LEDGER_SAMPLE_CONTEXT);
+        int to = Math.min(text.length(), row.longestEnd + LEDGER_SAMPLE_CONTEXT);
+        out.append("<details><summary>").append(escape("第 " + index + " 篇的命中样例")).append("</summary><p>");
+        if (from < row.longestStart) out.append("\u2026").append(escape(snippet(text, from, row.longestStart)));
+        out.append("<mark>").append(escape(snippet(text, row.longestStart, row.longestEnd))).append("</mark>");
+        if (row.longestEnd < to) {
+            out.append(escape(snippet(text, row.longestEnd, to)));
+            if (to < text.length()) out.append("\u2026");
+        }
+        out.append("</p></details>");
+    }
+
+    /** 比对过几篇题录：自建库加检索回来的候选。拿不到语料就退回候选篇数，宁可少说一个数。 */
+    private static int consultedCount(DuplicateEngine.Report report) {
+        int candidates = report.candidates == null ? 0 : report.candidates.size();
+        if (report.baseline == null) return candidates;
+        return Math.max(report.baseline.sourceCount(), candidates);
+    }
+
     private static void candidates(StringBuilder out, DuplicateEngine.Report report) {
         out.append("<h2>候选文献 ").append(report.candidates.size()).append(" 篇</h2>");
         if (report.candidates.isEmpty()) { out.append("<p>本次检测没有取回候选文献。</p>"); return; }
@@ -136,6 +238,9 @@ public final class CheckReport {
         String value = text.substring(lo, hi).trim();
         return value.length() > 240 ? value.substring(0, 240) + "\u2026" : value;
     }
+    /** 来源榜只为前几行画命中样例，导出成 HTML 文件的报告体积得有上限。 */
+    private static final int LEDGER_SAMPLE_ROWS = 6;
+    private static final int LEDGER_SAMPLE_CONTEXT = 24;
     private static final String REPORT_STYLE = "<style>body{font:16px sans-serif;max-width:960px;margin:32px auto;padding:16px;"
             + "color:#202020}h1{font-size:24px}h2{font-size:18px;margin:24px 0 8px}table{border-collapse:collapse;width:100%}"
             + "td,th{border:1px solid #ccc;padding:8px;text-align:left;white-space:pre-wrap;word-break:break-word}"

@@ -72,6 +72,11 @@ public final class DuplicateEngine {
             else {
                 step(progress, "比对语料", 2, 4);
                 matched = library.match(text, spans, structure.spanArray());
+                // 来源榜里出现 0 处命中的那一篇，多半是输在了"同一段字符只记给命中更长的那一篇"，
+                // 不把这件事说出来，用户会把那个 0 读成"这篇没抄"。
+                if (library.disputedChars() > 0)
+                    note(report, "有 " + library.disputedChars() + " 个字符同时被两篇以上文献命中，"
+                            + "只记给了命中更长的那一篇");
                 if (!structure.isEmpty())
                     note(report, "已排除结构性文本 " + structure.excludedChars + " 字：参考文献表 "
                             + structure.bibliographySections + " 节共 " + structure.citationLines

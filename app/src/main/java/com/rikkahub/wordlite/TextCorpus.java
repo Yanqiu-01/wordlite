@@ -121,6 +121,11 @@ public final class TextCorpus {
     /** 原文窗口折叠串 -> 句子 id：逐字相同的抄袭不依赖倒排，重复度极高的文本也不会漏报。 */
     private final HashMap<String, Integer> exact = new HashMap<String, Integer>();
     private int skippedSentences;
+    /**
+     * 上一次 match() 里同一段字符被两篇以上文献命中的字符数（有效字符口径，同一个字符只数一次）。
+     * 只供 DuplicateEngine 写一条注记，让用户能正确读出来源榜里那个 0：不参与判据、不进任何比率。
+     */
+    private int disputedOverlap;
 
     public TextCorpus() { }
 
@@ -180,7 +185,11 @@ public final class TextCorpus {
         fingerprintTokens += at.length;
     }
 
-    /** 指纹带：与断句无关的连续重复区间，长度不少于 Fingerprints.MIN_MATCH 个 token。 */
+    /**
+     * 指纹带：与断句无关的连续重复区间，长度不少于 Fingerprints.MIN_MATCH 个 token。
+     * 逐篇收集按 docId 升序（原来是 HashMap 的桶序），最后排成确定的 (长度降序, docId 升序)：
+     * 两篇近重复文献抢同一段字符时，谁赢不该取决于哈希桶落在哪一格。带子集合与总分子都不因此改变。
+     */
     private ArrayList<Hit> fingerprintHits(String norm, int[] excluded) {
         ArrayList<Hit> out = new ArrayList<Hit>();
         if (fingerprints.isEmpty()) return out;
@@ -202,12 +211,43 @@ public final class TextCorpus {
                 if (list.size() < MAX_ANCHORS_PER_DOC) list.add(new int[]{picked[i], postings.get(p)[1]});
             }
         }
-        for (Map.Entry<Integer, ArrayList<int[]>> entry : anchors.entrySet()) {
-            if (entry.getValue().size() < MIN_SHARED_FINGERPRINTS) continue;
-            collectRuns(norm, at, docNorms.get(entry.getKey().intValue()), docTokens.get(entry.getKey().intValue()),
-                    entry.getValue(), excluded, sources.get(docSource.get(entry.getKey().intValue()).intValue()), out);
+        ArrayList<Integer> order = new ArrayList<Integer>(anchors.keySet());
+        Collections.sort(order);
+        ArrayList<Integer> bandDocs = new ArrayList<Integer>();
+        for (int d = 0; d < order.size(); d++) {
+            Integer docId = order.get(d);
+            ArrayList<int[]> shared = anchors.get(docId);
+            if (shared.size() < MIN_SHARED_FINGERPRINTS) continue;
+            int before = out.size();
+            collectRuns(norm, at, docNorms.get(docId.intValue()), docTokens.get(docId.intValue()),
+                    shared, excluded, sources.get(docSource.get(docId.intValue()).intValue()), out);
+            for (int i = before; i < out.size(); i++) bandDocs.add(docId);
         }
+        sortBands(out, bandDocs);
         return out;
+    }
+
+    /**
+     * 带子的处理顺序：长度降序，同长度按入库序（docId 升序）。这是"最长命中优先、同长先到先得"的
+     * 显式写法，取代原来 anchors.entrySet() 的哈希桶序。docs 只在这次比较里用，不必跟着重排。
+     */
+    private static void sortBands(final ArrayList<Hit> bands, final ArrayList<Integer> docs) {
+        if (bands.size() < 2) return;
+        ArrayList<Integer> order = new ArrayList<Integer>();
+        for (int i = 0; i < bands.size(); i++) order.add(Integer.valueOf(i));
+        Collections.sort(order, new Comparator<Integer>() {
+            public int compare(Integer left, Integer right) {
+                Hit a = bands.get(left.intValue()), b = bands.get(right.intValue());
+                int lengthA = a.end - a.start, lengthB = b.end - b.start;
+                if (lengthA != lengthB) return lengthA > lengthB ? -1 : 1;
+                int docA = docs.get(left.intValue()).intValue(), docB = docs.get(right.intValue()).intValue();
+                return docA < docB ? -1 : (docA == docB ? 0 : 1);
+            }
+        });
+        ArrayList<Hit> sorted = new ArrayList<Hit>(bands.size());
+        for (int i = 0; i < order.size(); i++) sorted.add(bands.get(order.get(i).intValue()));
+        bands.clear();
+        bands.addAll(sorted);
     }
 
     /** 最长匹配优先、用过的 token 不再参与下一次匹配，这两条照抄 JPlag 的 GreedyStringTiling。 */
@@ -289,12 +329,16 @@ public final class TextCorpus {
     /** 因过短而被忽略的句子数，供自检与报告使用。 */
     int skippedSentenceCount() { return skippedSentences; }
 
+    /** 上一次 match() 里被两篇以上文献同时命中的字符数，只给报告的注记用。 */
+    int disputedChars() { return disputedOverlap; }
+
     /** citationSpans 是 {start,end} 成对数组，可为 null。 */
     public Report match(String text, int[] citationSpans) { return match(text, citationSpans, null); }
 
     /** excludedSpans 圈住的句子整体退出比对：参考文献表、致谢这类文本重复了也不是抄袭。 */
     public Report match(String text, int[] citationSpans, int[] excludedSpans) {
         Report report = new Report();
+        disputedOverlap = 0;
         if (text == null || text.length() == 0) return report;
         int[] citations = mergeSpans(citationSpans, text.length());
         int[] excluded = mergeSpans(excludedSpans, text.length());
@@ -357,6 +401,7 @@ public final class TextCorpus {
         int[] extra = addBandHits(report.hits, fingerprintHits(norm, excluded), norm, citations, engineChars);
         duplicate += extra[0];
         cited += extra[1];
+        disputedOverlap = extra[2];
         java.util.Collections.sort(report.hits, new Comparator<Hit>() {
             public int compare(Hit a, Hit b) { return a.start != b.start ? a.start - b.start : a.end - b.end; }
         });
@@ -376,17 +421,30 @@ public final class TextCorpus {
         return report;
     }
 
-    /** 指纹带只补句级比对没盖住的字符，来源记到带上的引擎，分子不会因为两套算法而翻倍。 */
+    /**
+     * 指纹带只补句级比对没盖住的字符，来源记到带上的引擎，分子不会因为两套算法而翻倍。
+     * 返回 {多出来的重复字符, 其中落在引用段内的字符, 被另一篇文献先占走的字符}：第三项不参与任何
+     * 判据、不进任何比率，只让 DuplicateEngine 能写一条"这段被两篇以上文献抢过"的注记。
+     * 注意：这里 push 进 hits 的区间与记进分子的 valid 必须是同一个区间，来源榜靠这一点从 hits 反推每篇的账。
+     */
     private int[] addBandHits(ArrayList<Hit> hits, ArrayList<Hit> bands, String norm, int[] citations,
                               HashMap<String, Integer> engineChars) {
-        int[] extra = new int[]{0, 0};
+        int[] extra = new int[]{0, 0, 0};
         if (bands.isEmpty()) return extra;
+        // covered 决定分子（一个字符只认一次）。subtract 内部的 mergeRanges 会就地改写它拿到的区间数组，
+        // 所以归属另记一份 claims：那份数组永远不会交给 subtract，"这段被谁占走"才不会被合并动作改写。
         ArrayList<int[]> covered = new ArrayList<int[]>();
-        for (int i = 0; i < hits.size(); i++) covered.add(new int[]{hits.get(i).start, hits.get(i).end});
+        ArrayList<Claim> claims = new ArrayList<Claim>();
+        for (int i = 0; i < hits.size(); i++) {
+            covered.add(new int[]{hits.get(i).start, hits.get(i).end});
+            claims.add(new Claim(hits.get(i).start, hits.get(i).end, hits.get(i).source));
+        }
+        ArrayList<int[]> lost = new ArrayList<int[]>();
         for (int b = 0; b < bands.size(); b++) {
             Hit band = bands.get(b);
             String engine = band.source == null || band.source.engine == null ? "" : band.source.engine;
             ArrayList<int[]> rest = subtract(covered, band.start, band.end);
+            claimFromOthers(lost, claims, band);
             for (int r = 0; r < rest.size(); r++) {
                 int[] range = rest.get(r);
                 int valid = validCount(norm, range[0], range[1]);
@@ -401,10 +459,37 @@ public final class TextCorpus {
                 trimmed.source = band.source;
                 hits.add(trimmed);
                 covered.add(new int[]{range[0], range[1]});
+                claims.add(new Claim(range[0], range[1], band.source));
             }
-            covered = mergeRanges(covered);
         }
+        // 同一个字符被三篇抢也只算一次，所以先并区间再数字符。subtract 每次都自己合并一遍 covered，
+        // 去掉原来的 covered = mergeRanges(covered) 不改变 rest 的结果，只是不再改写归属那份账。
+        ArrayList<int[]> merged = mergeRanges(lost);
+        for (int i = 0; i < merged.size(); i++) extra[2] += validCount(norm, merged.get(i)[0], merged.get(i)[1]);
         return extra;
+    }
+
+    /** 已占住的一段字符与抢到它的文献。只给归属注记用，不参与分子。 */
+    private static final class Claim {
+        final int start, end;
+        final Source source;
+        Claim(int start, int end, Source source) {
+            this.start = start;
+            this.end = end;
+            this.source = source;
+        }
+    }
+
+    /** 这条带子里被"另一篇文献"先占走的字符。同一篇自己的句级命中不算争抢，那只是两套算法撞在同一段上。 */
+    private static void claimFromOthers(ArrayList<int[]> lost, ArrayList<Claim> claims, Hit band) {
+        ArrayList<int[]> foreign = new ArrayList<int[]>();
+        for (int i = 0; i < claims.size(); i++) {
+            Claim claim = claims.get(i);
+            if (claim.source != band.source) foreign.add(new int[]{claim.start, claim.end});
+        }
+        if (foreign.isEmpty()) return;
+        // 两次 subtract：第一次取没被别篇占走的部分，第二次取它的补集，就是被别篇占走的那几段。
+        lost.addAll(subtract(subtract(foreign, band.start, band.end), band.start, band.end));
     }
 
     /** [from,to) 里还没被 covered 盖住的部分。 */
@@ -443,7 +528,10 @@ public final class TextCorpus {
         return out;
     }
 
-    /** 结束一段命中：写 Hit、算有效字符与引用重叠、把重复字符记到主导来源名下。 */
+    /**
+     * 结束一段命中：写 Hit、算有效字符与引用重叠、把重复字符记到主导来源名下。
+     * 注意：这里 push 的这条 Hit 与下面记进分子的 valid 必须是同一个区间，来源榜靠这一点从 hits 反推每篇的账。
+     */
     private int[] flush(int start, int end, int weight, double scoreSum, Source source,
                         HashMap<String, Integer> tally, Report report, String norm, int[] citations,
                         HashMap<String, Integer> engineChars) {

@@ -253,6 +253,11 @@ public final class CandidateRankerRegression {
         check(byTitle.merges.get(0).keyKind.equals("title"), "这种合并的账目记下用的是标题键");
         check(byTitle.kept.get(0) == longOne, "两条都没有可用 DOI 时按摘要长短定胜者");
         check(byTitle.kept.get(0).source.engine.equals("cqvip"), "胜者的来源身份不被改写，来源分布统计才不会漂移");
+        // 展示/排序键与分桶键同源：来源榜（SourceLedger）也问 CandidateRanker 要这两个键，不许长第二套。
+        check(CandidateRanker.paperKeyOf(withAbstract.source).equals(CandidateRanker.doiKey(withAbstract.source.locator)),
+                "有 DOI 时 paperKeyOf 就等于 doiKey 的值，展示键不是第三种键");
+        check(CandidateRanker.paperKeyOf(longOne.source).equals("t:" + CandidateRanker.titleKey(longOne.source.title)),
+                "没有 DOI 时 paperKeyOf 等于 \"t:\" 加 titleKey，题名键也不另起炉灶");
 
         CandidateRanker.Dedup sameTitle = CandidateRanker.dedup(poolOf(
                 candidate("crossref", "D1", "肺结节CT分割的比较研究", "第一条摘要内容。", "10.1000/a.111", ""),

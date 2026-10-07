@@ -51,6 +51,7 @@ function Add-Suite([string]$name, $argv) { [void]$suites.Add([pscustomobject]@{ 
 Add-Suite "Regression"             @("tests/fixture.docx", "$out/roundtrip")
 Add-Suite "ScriptRegression"       @()
 Add-Suite "TextCorpusRegression"   @()
+Add-Suite "SourceLedgerRegression" @()
 Add-Suite "CandidateRankerRegression" @()
 Add-Suite "AigcRegression"         @()
 Add-Suite "LocalRewriteRegression" @()

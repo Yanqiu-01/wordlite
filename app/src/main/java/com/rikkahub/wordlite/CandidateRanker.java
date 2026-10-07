@@ -524,8 +524,29 @@ public final class CandidateRanker {
 
     /** 一条候选的 DOI：locator 优先（openalex/crossref/europepmc 都写在这儿），再看 id。 */
     private static String doiOf(PaperSources.Candidate candidate) {
-        String key = doiKey(candidate.source.locator);
-        return key.isEmpty() ? doiKey(candidate.source.id) : key;
+        return doiOf(candidate.source);
+    }
+
+    /**
+     * 一条来源的 DOI 键。来源榜（SourceLedger）把跨检索源的同一条题录并成一行时问这里要，
+     * 全项目只此一处 DOI 取法，不许再长第二套。
+     */
+    static String doiOf(TextCorpus.Source source) {
+        if (source == null) return "";
+        String key = doiKey(source.locator);
+        return key.isEmpty() ? doiKey(source.id) : key;
+    }
+
+    /**
+     * 展示与排序用的文献键：有 DOI 就是 DOI，没有才退到题名指纹（带 "t:" 前缀，免得和 DOI 撞车），
+     * 两个都拿不到返回空串，兜底交给调用方。分区本身仍由 dedup / SourceLedger 的桶逻辑说了算。
+     */
+    static String paperKeyOf(TextCorpus.Source source) {
+        if (source == null) return "";
+        String doi = doiOf(source);
+        if (!doi.isEmpty()) return doi;
+        String title = titleKey(source.title);
+        return title.isEmpty() ? "" : "t:" + title;
     }
 
     /** 配额按检索源计，口径与 DuplicateEngine.candidateCount 用的 engine 字段一致。 */
