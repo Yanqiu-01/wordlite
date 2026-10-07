@@ -178,6 +178,7 @@ public final class DetectRegression {
             server.stop(0);
             PaperSources.resetEndpoints();
         }
+        rewriteEffect();
         System.out.println("SUMMARY " + checks + " assertions passed; loopback-only network");
     }
     private static void readQuietly(HttpExchange exchange) {
@@ -582,6 +583,35 @@ public final class DetectRegression {
         value.styleName = styleName;
         return value;
     }
+/** 改写效果对照：同一份基线，改没降下来由数字说话。 */
+    private static void rewriteEffect() {
+        TextCorpus corpus = new TextCorpus();
+        TextCorpus.Source source = new TextCorpus.Source();
+        source.title = "多孔铜连接研究";
+        corpus.add(source, "多孔铜在低温下即可与锡层反应，界面生成稳定的金属间化合物层。"
+                + "保温时间过长会让反应层增厚，接头强度反而下降。");
+        String copied = "多孔铜在低温下即可与锡层反应，界面生成稳定的金属间化合物层。";
+        String filler = "实验在三种温度下各重复五次，取样位置固定在接头中心两侧。";
+        String paraphrase = "把多孔铜片与锡层贴合后升温，两侧界面会生长出连续的金属间化合物。";
+        DuplicateEngine.RewriteDelta better = DuplicateEngine.compareRewrite(copied + filler, paraphrase + filler, corpus);
+        check(better.measured, "改写效果在两边都有字数时才算得出");
+        check(better.beforeRate > 0 && better.afterRate < better.beforeRate, "改写后相似率确实掉下来");
+        check(better.verdict.indexOf("下降") >= 0, "真降了就说下降");
+        check(better.delta() > 0, "差值为正表示降重有效");
+        DuplicateEngine.RewriteDelta same = DuplicateEngine.compareRewrite(copied + filler, copied + filler, corpus);
+        check(Math.abs(same.delta()) < 0.5d && same.verdict.indexOf("基本没动") >= 0, "改写没起作用时不报成功");
+        DuplicateEngine.RewriteDelta worse = DuplicateEngine.compareRewrite(filler, copied + filler + copied, corpus);
+        check(worse.verdict.indexOf("升高") >= 0, "改得更像原文要直说");
+        DuplicateEngine.RewriteDelta none = DuplicateEngine.compareRewrite(copied, paraphrase, new TextCorpus());
+        check(!none.measured && none.verdict.indexOf("查重") >= 0, "没有基线时让人先去查重");
+        DocxDocument document = new DocxDocument();
+        add(document, paragraph(0, copied + filler, "", ""));
+        DuplicateEngine.Report report = DuplicateEngine.scan(TextSelection.all(document), corpus,
+                false, null, null, null, null);
+        check(report.baseline == corpus, "扫描把真正比对的那份语料留在报告里");
+        check(report.overallRate > 0, "离线扫描照样给出相似率");
+    }
+
     private static void add(DocxDocument document, DocxDocument.ParagraphBlock paragraph) {
         document.blocks.add(paragraph);
         document.paragraphs.add(paragraph);

@@ -66,6 +66,7 @@ public final class ApiWorkflow {
     private LocalLibrary library;
     private EngineSettings engine = new EngineSettings();
     private DuplicateEngine.Report lastScan;
+    private String preRewriteText = "";
     private TextSelection lastScanned;
     private boolean scanShowsDuplicates = true;
     private TextView jobLabel;
@@ -505,6 +506,7 @@ public final class ApiWorkflow {
             if (targets.isEmpty()) throw new IllegalArgumentException("没有可改写内容");
         } catch (IllegalArgumentException error) { toast(error.getMessage()); return; }
         rewrites.clear(); rewrites.addAll(targets); rewriteConfig = null; rewriteCursor = 0;
+        preRewriteText = snapshotText();
         final ApiClient.Task task = begin("离线改写");
         final ArrayList<RewriteTask> jobs = new ArrayList<RewriteTask>(targets);
         worker = new Thread(() -> {
@@ -537,14 +539,42 @@ public final class ApiWorkflow {
         titles.add("离线改写当前段落"); ids.add("local-1");
         titles.add("离线改写全文"); ids.add("local-2");
         if (!rewrites.isEmpty()) { titles.add("改写建议"); ids.add("compare"); }
+        if (!preRewriteText.isEmpty() || lastScan != null) { titles.add("改写效果"); ids.add("delta"); }
         new AlertDialog.Builder(activity).setTitle("降重")
                 .setItems(titles.toArray(new String[titles.size()]), (dialog, which) -> {
             String id = ids.get(which);
             if ("compare".equals(id)) compare();
+            else if ("delta".equals(id)) rewriteDelta();
             else if (id.startsWith("local-")) rewriteLocal(Integer.parseInt(id.substring(6)));
             else rewrite(Integer.parseInt(id.substring(4)));
         }).setNegativeButton("取消", null).show();
     }
+/** 改写前的全文快照，用来和改写后各检一次。 */
+    private String snapshotText() {
+        try { return TextSelection.all(host.document()).text; } catch (Exception ignored) { return ""; }
+    }
+
+    /** 改写前后各检一次，同一份基线，效果由数字说话。 */
+    private void rewriteDelta() {
+        host.sync();
+        String after;
+        try {
+            after = TextSelection.all(host.document()).text;
+        } catch (IllegalArgumentException error) { toast(error.getMessage()); return; }
+        String before = !preRewriteText.isEmpty() ? preRewriteText
+                : lastScanned == null ? "" : lastScanned.text;
+        if (before.isEmpty()) { toast("先改写一段或先做一次查重，再来看效果"); return; }
+        TextCorpus corpus = lastScan == null ? null : lastScan.baseline;
+        if (corpus == null || corpus.isEmpty()) {
+            corpus = new TextCorpus();
+            try { library.index(corpus); } catch (Exception ignored) { }
+        }
+        if (corpus.isEmpty()) { toast("比对基线是空的：先导入自建库或做一次联网查重"); return; }
+        DuplicateEngine.RewriteDelta delta = DuplicateEngine.compareRewrite(before, after, corpus);
+        new AlertDialog.Builder(activity).setTitle("改写效果").setMessage(delta.verdict)
+                .setNeutralButton("关闭", null).show();
+    }
+
     private void rewrite(int scope) {
         final ApiConfig config = config(ApiConfig.Service.REWRITE); if (config == null) return;
         host.sync(); ArrayList<RewriteTask> targets = new ArrayList<RewriteTask>();
@@ -567,6 +597,7 @@ public final class ApiWorkflow {
             if (targets.isEmpty()) throw new IllegalArgumentException("没有可改写内容");
         } catch (IllegalArgumentException error) { toast(error.getMessage()); return; }
         rewrites.clear(); rewrites.addAll(targets); rewriteConfig = config; rewriteCursor = 0;
+        preRewriteText = snapshotText();
         requestRewrites(new ArrayList<RewriteTask>(targets));
     }
     private void requestRewrites(ArrayList<RewriteTask> targets) {

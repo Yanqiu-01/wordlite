@@ -25,6 +25,8 @@ public final class DuplicateEngine {
         public int comparedChars, duplicateChars, citedDuplicateChars;
         /** 按论文结构排除在比对之外的字数（参考文献表、致谢、附录、目录）。 */
         public int excludedChars;
+        /** 本次真正拿来比对的语料（自建库加检索到的候选），改写效果要用同一份基线。 */
+        public TextCorpus baseline;
         public long elapsedMillis;
         public String detectedAt = "";
         public final ArrayList<TextCorpus.Hit> hits = new ArrayList<TextCorpus.Hit>();
@@ -52,6 +54,7 @@ public final class DuplicateEngine {
         String text = selection == null || selection.text == null ? "" : selection.text;
         report.sourceText = text;
         TextCorpus library = corpus == null ? new TextCorpus() : corpus;
+        report.baseline = library;
         PaperSources.Limits safe = limits == null ? new PaperSources.Limits() : limits;
         ArrayList<String> wanted = new ArrayList<String>();
         boolean aborted = false;
@@ -148,6 +151,49 @@ public final class DuplicateEngine {
         System.arraycopy(first, 0, out, 0, a);
         if (b > 0) System.arraycopy(second, 0, out, a, b);
         return out;
+    }
+
+    /** 改写前后的相似率对照，必须用同一份比对基线，否则两个数字没有可比性。 */
+    public static final class RewriteDelta {
+        public double beforeRate, afterRate;
+        public int beforeCompared, afterCompared, beforeDuplicate, afterDuplicate;
+        public boolean measured;
+        public String reason = "";
+        public double delta() { return beforeRate - afterRate; }
+        public String verdict = "";
+    }
+
+    public static RewriteDelta compareRewrite(String before, String after, TextCorpus corpus) {
+        RewriteDelta delta = new RewriteDelta();
+        if (corpus == null || corpus.isEmpty() || before == null || after == null) {
+            delta.reason = "没有可比对的基线语料";
+            delta.verdict = "先做一次查重，才知道改写有没有用";
+            return delta;
+        }
+        TextCorpus.Report a = corpus.match(before, null, TextCorpus.structure(before).spanArray());
+        TextCorpus.Report b = corpus.match(after, null, TextCorpus.structure(after).spanArray());
+        delta.beforeRate = clamp(a.overallRate);
+        delta.afterRate = clamp(b.overallRate);
+        delta.beforeCompared = a.comparedChars;
+        delta.afterCompared = b.comparedChars;
+        delta.beforeDuplicate = a.duplicateChars;
+        delta.afterDuplicate = b.duplicateChars;
+        delta.measured = a.comparedChars > 0 && b.comparedChars > 0;
+        double shift = delta.delta();
+        if (!delta.measured) delta.verdict = "可比对字数不足，衡量不出改写效果";
+        else if (a.duplicateChars == 0 && b.duplicateChars == 0) delta.verdict = "两边都没有重复，衡量不出改写效果";
+        else if (Math.abs(shift) < 0.5d) delta.verdict = "改写后相似率基本没动（" + percent(delta.beforeRate)
+                + " → " + percent(delta.afterRate) + "），这一轮改写没有真的降重";
+        else if (shift > 0d) delta.verdict = "改写后相似率下降 " + percent(shift) + "（" + percent(delta.beforeRate)
+                + " → " + percent(delta.afterRate) + "）";
+        else delta.verdict = "改写后相似率反而升高 " + percent(-shift) + "（" + percent(delta.beforeRate)
+                + " → " + percent(delta.afterRate) + "），检查改写是不是把句子改得更像原文";
+        return delta;
+    }
+
+    static String percent(double value) {
+        double safe = Double.isNaN(value) || Double.isInfinite(value) ? 0d : value;
+        return String.format(java.util.Locale.US, "%.2f%%", safe < 0d ? 0d : safe > 100d ? 100d : safe);
     }
 
     private static double clamp(double value) {
