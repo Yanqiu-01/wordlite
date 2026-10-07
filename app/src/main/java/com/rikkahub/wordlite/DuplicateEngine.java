@@ -10,8 +10,10 @@ import java.util.Map;
 
 /** Duplication and AIGC orchestration: citation marking, bounded retrieval, corpus match, one report. */
 public final class DuplicateEngine {
-    static final int WINDOW_PARAGRAPHS = 3, MAX_WINDOWS = 24, MAX_PHRASE_CHARS = 160;
-    static final int MAX_REQUESTS = 40, MAX_FULL_TEXTS = 6, MAX_CANDIDATES = 120, MAX_NOTES = 40;
+    /* 检索短语上限 48 字：实测维普对 160 字的句子返回 0 条，同一篇摘要截到 40 字就返回 20 多条，
+       OpenAlex / Crossref 这类源在短查询上也没有变差。 */
+    static final int WINDOW_PARAGRAPHS = 3, MAX_WINDOWS = 24, MAX_PHRASE_CHARS = 48;
+    static final int MAX_REQUESTS = 72, MAX_FULL_TEXTS = 6, MAX_CANDIDATES = 120, MAX_NOTES = 40;
     /** Retrieval gaps phrased with the note(...) vocabulary so the headline and the notes never disagree. */
     static final String GAP_NOTHING_RETRIEVED = "联网检索没有取回可比对的候选文献";
     static final String GAP_CANCELLED = "检索已取消，没有联网取候选文献";
@@ -215,7 +217,18 @@ public final class DuplicateEngine {
         }
         return false;
     }
-    /** Paragraph windows of three, at most MAX_WINDOWS of them. */
+    /**
+     * 三个段落一组，最多 MAX_WINDOWS 组。封面行、目录行、图表注这类行拿去检索只会命中"毕业论文 专业
+     * 设计"这种通用词，实测会把候选池污染成教学管理论文：短于 20 字的段和不以句号结尾而以页码收尾的段
+     * （目录行就是"2.2.1 SiC高温封装与TLP互连技术4"这个形状）都不进窗口。
+     */
+    static final int MIN_WINDOW_PARAGRAPH_CHARS = 20;
+
+    /** 目录行、图表注的共同形状：结尾是一个裸页码。 */
+    static boolean retrievable(String paragraph) {
+        return paragraph.length() >= MIN_WINDOW_PARAGRAPH_CHARS
+                && !Character.isDigit(paragraph.charAt(paragraph.length() - 1));
+    }
     static ArrayList<String> windows(String text) {
         ArrayList<String> paragraphs = new ArrayList<String>();
         StringBuilder current = new StringBuilder();
@@ -223,7 +236,7 @@ public final class DuplicateEngine {
             boolean cut = i == text.length() || text.charAt(i) == '\n';
             if (!cut) { current.append(text.charAt(i)); continue; }
             String value = current.toString().trim();
-            if (!value.isEmpty()) paragraphs.add(value);
+            if (retrievable(value)) paragraphs.add(value);
             current.setLength(0);
         }
         ArrayList<String> out = new ArrayList<String>();

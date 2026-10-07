@@ -241,6 +241,7 @@ public final class ApiWorkflow {
                 limits.timeoutSeconds = options.timeoutSeconds;
                 limits.perEngine = options.perEngine;
                 limits.coreKey = options.coreKey;
+                limits.proxy = options.proxy;
                 ArrayList<String> engines = new ArrayList<String>();
                 if (wantWeb) for (String id : options.engines) engines.add(id);
                 final DuplicateEngine.Report result = DuplicateEngine.scan(selection, corpus, wantWeb,
@@ -431,7 +432,8 @@ public final class ApiWorkflow {
         final EditText timeout = field(String.valueOf(engine.timeoutSeconds), "超时秒数（5-120）");
         final EditText windows = field(String.valueOf(engine.windows), "检索窗口数（1-24）");
         final EditText core = field(engine.coreKey, "CORE API Key（可留空）");
-        box.addView(perEngine); box.addView(timeout); box.addView(windows); box.addView(core);
+        final EditText proxy = field(engine.proxy, "HTTP 代理 host:port（海外检索源需经电脑代理时填写，可留空）");
+        box.addView(perEngine); box.addView(timeout); box.addView(windows); box.addView(core); box.addView(proxy);
         ScrollView scroll = new ScrollView(activity); scroll.addView(box);
         new AlertDialog.Builder(activity).setTitle("检索设置").setView(scroll)
                 .setNegativeButton("取消", null)
@@ -445,6 +447,7 @@ public final class ApiWorkflow {
                     value.timeoutSeconds = number(timeout.getText().toString(), engine.timeoutSeconds);
                     value.windows = number(windows.getText().toString(), engine.windows);
                     value.coreKey = core.getText().toString().trim();
+                    value.proxy = proxy.getText().toString().trim();
                     try { value.validate(); settings.saveEngine(value); engine = value; toast("已保存检索设置"); }
                     catch (Exception error) { toast(error instanceof IllegalArgumentException
                             ? error.getMessage() : "设置保存失败"); }
@@ -466,6 +469,8 @@ public final class ApiWorkflow {
         try { return Integer.parseInt(value.trim()); } catch (Exception error) { return fallback; }
     }
     private static String engineTitle(String id) {
+        if ("cqvip".equals(id)) return "维普（中文期刊摘要，服务端只给第一页）";
+        if ("ncpssd".equals(id)) return "国家哲学社会科学文献中心（含摘要）";
         if ("openalex".equals(id)) return "OpenAlex（题录与开放获取全文）";
         if ("crossref".equals(id)) return "Crossref（题录与摘要）";
         if ("semantic-scholar".equals(id)) return "Semantic Scholar";

@@ -3,6 +3,8 @@ package com.rikkahub.wordlite;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.SocketTimeoutException;
@@ -24,15 +26,47 @@ public final class HttpTransport {
 
     public static ApiClient.Response get(String url, Map<String, String> headers, int timeoutSeconds,
                                          ApiClient.Cancellation cancellation) throws IOException {
-        return get(url, headers, timeoutSeconds, MAX_BODY, cancellation);
+        return get(url, headers, timeoutSeconds, MAX_BODY, cancellation, null);
+    }
+
+    public static ApiClient.Response get(String url, Map<String, String> headers, int timeoutSeconds,
+                                         ApiClient.Cancellation cancellation, java.net.Proxy proxy) throws IOException {
+        return get(url, headers, timeoutSeconds, MAX_BODY, cancellation, proxy);
     }
 
     /** A shared anonymous quota is usually a momentary crowd, not a dead end: one patient retry
      *  keeps Semantic Scholar usable, while every other failure is reported straight away. */
     public static ApiClient.Response get(String url, Map<String, String> headers, int timeoutSeconds,
                                          int maxBytes, ApiClient.Cancellation cancellation) throws IOException {
+        return get(url, headers, timeoutSeconds, maxBytes, cancellation, null);
+    }
+
+    /**
+     * Some mobile networks only let this traffic out through a proxy, so the caller may hand one
+     * over. The URL stays HTTPS and the proxy just tunnels it, because a proxy that could read the
+     * request would be no better than the network we are trying to escape.
+     */
+    public static ApiClient.Response get(String url, Map<String, String> headers, int timeoutSeconds,
+                                         int maxBytes, ApiClient.Cancellation cancellation,
+                                         java.net.Proxy proxy) throws IOException {
+        return send(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, null);
+    }
+
+    /**
+     * A search form for the sources that only answer POST, under the same guardrails. They are all
+     * read-only searches, so a throttle gets the same single patient retry a GET would get.
+     */
+    public static ApiClient.Response post(String url, String form, Map<String, String> headers, int timeoutSeconds,
+                                          int maxBytes, ApiClient.Cancellation cancellation,
+                                          java.net.Proxy proxy) throws IOException {
+        return send(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, form == null ? "" : form);
+    }
+
+    private static ApiClient.Response send(String url, Map<String, String> headers, int timeoutSeconds,
+                                           int maxBytes, ApiClient.Cancellation cancellation,
+                                           java.net.Proxy proxy, String form) throws IOException {
         try {
-            return once(url, headers, timeoutSeconds, maxBytes, cancellation);
+            return once(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, form);
         } catch (ApiClient.Failure throttled) {
             if (throttled.status != 429 || Thread.currentThread().isInterrupted()
                     || (cancellation != null && cancellation.cancelled())) throw throttled;
@@ -47,28 +81,33 @@ public final class HttpTransport {
                 Thread.currentThread().interrupt();
                 throw throttled;
             }
-            ApiClient.Response retry = once(url, headers, timeoutSeconds, maxBytes, cancellation);
+            ApiClient.Response retry = once(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, form);
             retry.attempts = 2;
             return retry;
         }
     }
 
+    /** Only https, no redirects, and the request line never carries document text. */
+
     private static ApiClient.Response once(String url, Map<String, String> headers, int timeoutSeconds,
-                                           int maxBytes, ApiClient.Cancellation cancellation) throws IOException {
+                                           int maxBytes, ApiClient.Cancellation cancellation,
+                                           java.net.Proxy proxy, String form) throws IOException {
         int limit = maxBytes <= 0 ? MAX_BODY : Math.min(maxBytes, MAX_BODY);
         int seconds = timeoutSeconds <= 0 ? 20 : Math.min(timeoutSeconds, 120);
         HttpURLConnection connection = null;
         long started = System.nanoTime();
         try {
             URL target = parse(url);
-            connection = (HttpURLConnection) target.openConnection();
+            connection = (HttpURLConnection) (proxy == null ? target.openConnection() : target.openConnection(proxy));
             if (cancellation != null) cancellation.connection(connection);
             guard(cancellation);
             connection.setConnectTimeout(seconds * 1000);
             connection.setReadTimeout(seconds * 1000);
             connection.setInstanceFollowRedirects(false);
-            connection.setRequestMethod("GET");
+            connection.setRequestMethod(form == null ? "GET" : "POST");
             connection.setUseCaches(false);
+            if (form != null)
+                connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
             connection.setRequestProperty("Accept", "application/json, application/xml, text/xml, text/plain;q=0.8, */*;q=0.5");
             connection.setRequestProperty("User-Agent", USER_AGENT);
             if (headers != null) for (Map.Entry<String, String> header : headers.entrySet()) {
@@ -77,6 +116,7 @@ public final class HttpTransport {
                     throw new ApiClient.Failure("请求头无效", 0);
                 connection.setRequestProperty(name, value);
             }
+            if (form != null) writeForm(connection, form, cancellation);
             int status = connection.getResponseCode();
             if (status >= 300 && status < 400) throw new ApiClient.Failure("检索源发生重定向", status);
             if (status < 200 || status >= 300) {
@@ -121,6 +161,19 @@ public final class HttpTransport {
         if (protocol.equals("http") && loopback) return target;
         throw new ApiClient.Failure("检索源必须使用 HTTPS", 0);
     }
+    /** The search form is built here, never taken from the document, so its length is not a leak. */
+    private static void writeForm(HttpURLConnection connection, String form,
+                                  ApiClient.Cancellation cancellation) throws IOException {
+        byte[] payload = form.getBytes(StandardCharsets.UTF_8);
+        connection.setFixedLengthStreamingMode(payload.length);
+        connection.setDoOutput(true);
+        try (OutputStream out = connection.getOutputStream()) {
+            guard(cancellation);
+            out.write(payload);
+            out.flush();
+        }
+    }
+
     private static boolean unsafe(String value) {
         for (int i = 0; i < value.length(); i++) { char c = value.charAt(i); if (c == '\r' || c == '\n' || c == 0) return true; }
         return false;

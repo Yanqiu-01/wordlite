@@ -20,6 +20,8 @@ public final class DetectRegression {
     private static final LinkedHashMap<String, String> TARGETS = new LinkedHashMap<String, String>();
     private static final LinkedHashMap<String, AtomicInteger> HITS = new LinkedHashMap<String, AtomicInteger>();
     private static volatile String lastApiKey = "";
+    private static volatile String lastMethod = "", lastForm = "";
+    private static String cqvipFixture = "", ncpssdFixture = "";
     private static void check(boolean ok, String message) {
         if (!ok) throw new AssertionError(message);
         checks++;
@@ -98,6 +100,8 @@ public final class DetectRegression {
             + "<p>Brazing gaps below 0.2 mm produced the strongest joints.</p></sec></body></article>";
 
     public static void main(String[] args) throws Exception {
+        cqvipFixture = fixture(args.length > 0 ? args[0] : "tests/samples/cqvip-search.html");
+        ncpssdFixture = fixture(args.length > 1 ? args[1] : "tests/samples/ncpssd-search.json");
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/openalex", exchange -> { record("/openalex", queryOf(exchange)); respond(exchange, 200, OPENALEX); });
         server.createContext("/crossref", exchange -> { record("/crossref", queryOf(exchange)); respond(exchange, 200, CROSSREF); });
@@ -109,6 +113,13 @@ public final class DetectRegression {
             record("/core", queryOf(exchange));
             lastApiKey = exchange.getRequestHeaders().getFirst("api-key");
             respond(exchange, 200, CORE);
+        });
+        server.createContext("/cqvip", exchange -> { record("/cqvip", queryOf(exchange)); respond(exchange, 200, cqvipFixture); });
+        server.createContext("/ncpssd", exchange -> {
+            record("/ncpssd", queryOf(exchange));
+            lastMethod = exchange.getRequestMethod();
+            lastForm = body(exchange);
+            respond(exchange, 200, ncpssdFixture);
         });
         server.createContext("/notfound", exchange -> { record("/notfound", queryOf(exchange)); respond(exchange, 404, "{\"error\":\"missing\"}"); });
         server.createContext("/error", exchange -> { record("/error", queryOf(exchange)); respond(exchange, 500, "{\"error\":\"boom\"}"); });
@@ -147,6 +158,9 @@ public final class DetectRegression {
         try {
             engines(base);
             guardrails(base);
+            viaProxy(base);
+            domestic(base);
+            windowing();
             phrase();
             marking();
             scan(base);
@@ -181,6 +195,8 @@ public final class DetectRegression {
     }
     /** The loopback fixtures stand in for every built-in connector. */
     private static void loopback(String base) {
+        PaperSources.setEndpoint("cqvip", base + "/cqvip");
+        PaperSources.setEndpoint("ncpssd", base + "/ncpssd");
         PaperSources.setEndpoint("openalex", base + "/openalex");
         PaperSources.setEndpoint("crossref", base + "/crossref");
         PaperSources.setEndpoint("semantic-scholar", base + "/semantic-scholar");
@@ -188,6 +204,75 @@ public final class DetectRegression {
         PaperSources.setEndpoint("arxiv", base + "/arxiv");
         PaperSources.setEndpoint("core", base + "/core");
     }
+    /**
+     * 中文论文最常命中的两个库：维普的检索页是服务端渲染的 HTML（题名由脚本后填），哲社中心只接
+     * POST 且检索式必须带字段码。夹具取自两家真实返回，防的是自己的解析器在页面改版后静默给出空结果。
+     */
+    private static void domestic(String base) throws Exception {
+        loopback(base);
+        PaperSources.Limits limits = limits();
+        ArrayList<PaperSources.Candidate> vip = PaperSources.search("cqvip", "碳纤维增强铝基复合材料", limits, null);
+        check(vip.size() == 2, "维普检索页的两条记录都被读出来");
+        check(vip.get(0).source.engine.equals("cqvip")
+                        && vip.get(0).source.locator.equals("https://www.cqvip.com/doc/journal/673069239"),
+                "维普记录以文献页地址为标识");
+        check(vip.get(0).source.title.equals("《机械与电子》 2017年第8期") && vip.get(0).source.year.equals("2017")
+                        && vip.get(0).source.authors.contains("李克新"),
+                "题名缺失时用刊名与年期署名，作者与年份照旧");
+        check(vip.get(0).abstractText.contains("图像处理算法") && vip.get(0).abstractText.indexOf('<') < 0,
+                "维普摘要去掉高亮标签后才是可比对文本");
+        check(query("/cqvip").startsWith("/cqvip?k=") && !query("/cqvip").contains("page="),
+                "维普只请求服务端会给的第一页");
+        ArrayList<PaperSources.Candidate> nssd = PaperSources.search("ncpssd", "碳纤维 复合材料", limits, null);
+        check(nssd.size() == 2 && nssd.get(0).source.title.equals("碳纤维及复合材料回收现状及其研究"),
+                "哲社中心读 data.rows 的干净题名");
+        check(nssd.get(0).source.authors.equals("李晓林, 黄海超, 李杨, 王宝铭, 郭庆山")
+                        && nssd.get(0).source.year.equals("2020"),
+                "机构序号从作者里去掉");
+        check(nssd.get(1).source.authors.equals("李雪娇, 孙墨珑, 赵朋远"),
+                "用空格而不是分号隔开的中文姓名也能拆开");
+        check(nssd.get(0).source.locator.equals("ncpssd:7101188468"),
+                "HtmlUrl 为 null 时退回记录号，不编造一个链接");
+        check(!nssd.get(0).abstractText.contains("<font") && nssd.get(0).abstractText.contains("碳纤维复合材料"),
+                "带高亮标签的 ik_* 字段不会进入比对文本");
+        String form = java.net.URLDecoder.decode(lastForm, "UTF-8");
+        check(lastMethod.equals("POST") && form.startsWith("pageNum=1&pageSize=5&sType=0&search=")
+                        && form.contains("IKTE=\"") && form.contains("IKST=\"") && form.contains("碳纤维"),
+                "哲社中心收到带字段码的 POST 检索式");
+        check(!query("/ncpssd").contains("IKTE") && form.length() < 320,
+                "检索式只装得下短语，正文不参与");
+    }
+
+    private static String fixture(String path) {
+        try {
+            return new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path)),
+                    StandardCharsets.UTF_8);
+        } catch (IOException error) {
+            throw new IllegalStateException("missing fixture " + path, error);
+        }
+    }
+
+    private static String body(HttpExchange exchange) {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            InputStream input = exchange.getRequestBody();
+            byte[] buffer = new byte[4096];
+            int count;
+            while ((count = input.read(buffer)) > 0) out.write(buffer, 0, count);
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        } catch (IOException error) {
+            return "";
+        }
+    }
+
+    private static void windowing() {
+        ArrayList<String> picked = DuplicateEngine.windows("本科毕业论文（设计）\n题目：多孔铜\n\n"
+                + "本研究以多孔铜为中间层，TLP 过程中孔道内 Si 与母材反应生成硅化物，接头剪切强度提高到 187 MPa。\n"
+                + "目录\n2.2.1  SiC高温封装与TLP互连技术4\n图 1 接头形貌 12\n");
+        check(picked.size() == 1 && picked.get(0).contains("多孔铜为中间层") && !picked.get(0).contains("SiC高温封装"),
+                "封面行与带页码的目录行不参与检索窗口");
+    }
+
     private static void everyEndpointAt(String url) {
         ArrayList<String> all = PaperSources.engines();
         for (String engine : all) PaperSources.setEndpoint(engine, url);
@@ -195,8 +280,10 @@ public final class DetectRegression {
 
     private static void engines(String base) throws Exception {
         ArrayList<String> engines = PaperSources.engines();
-        check(engines.size() == 6 && engines.contains("openalex") && engines.contains("semantic-scholar")
-                && engines.contains("europepmc") && engines.contains("core"), "six built-in engines are registered");
+        check(engines.size() == 8 && engines.contains("openalex") && engines.contains("semantic-scholar")
+                        && engines.contains("europepmc") && engines.contains("core")
+                        && engines.contains("cqvip") && engines.contains("ncpssd"),
+                "eight built-in engines are registered, the two Chinese ones first");
         loopback(base);
         PaperSources.Limits limits = limits();
 
@@ -296,6 +383,73 @@ public final class DetectRegression {
         try { PaperSources.search("openalex", "   ", limits, null); } catch (IllegalArgumentException error) { rejected = true; }
         check(rejected, "blank retrieval phrase rejected before any request");
         limits.coreKey = "";
+    }
+
+    /**
+     * A network that resets these hosts leaves the user no way out but their own proxy, so the
+     * transport has to hand it the absolute URL a proxy routes on and read the answer back. The stub
+     * proxy is the only witness of that request line, and the fixture server is the witness that a
+     * proxied pass does not also dial out on its own.
+     */
+    private static void viaProxy(String base) throws Exception {
+        loopback(base);
+        final ArrayList<String> requestLines = new ArrayList<String>();
+        final ServerSocket proxy = new ServerSocket(0, 4, InetAddress.getByName("127.0.0.1"));
+        Thread acceptor = new Thread(() -> {
+            try (java.net.Socket socket = proxy.accept()) {
+                socket.setSoTimeout(5000);
+                ByteArrayOutputStream head = new ByteArrayOutputStream();
+                int read = -1;
+                while ((read = socket.getInputStream().read()) >= 0) {
+                    head.write(read);
+                    if (read == '\n' && new String(head.toByteArray(), StandardCharsets.UTF_8).endsWith("\r\n\r\n"))
+                        break;
+                }
+                requestLines.add(new String(head.toByteArray(), StandardCharsets.UTF_8).split("\\r?\\n")[0]);
+                byte[] body = OPENALEX.getBytes(StandardCharsets.UTF_8);
+                OutputStream out = socket.getOutputStream();
+                out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                        + body.length + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+                out.write(body);
+                out.flush();
+            } catch (IOException ignored) { }
+        });
+        acceptor.start();
+        PaperSources.Limits proxied = limits();
+        proxied.proxy = "127.0.0.1:" + proxy.getLocalPort();
+        int before = hits("/openalex");
+        PaperSources.Candidate through = PaperSources.search("openalex", "brazing temperature", proxied, null).get(0);
+        acceptor.join(5000);
+        proxy.close();
+        check(through.source.title.equals("Brazing of SiC ceramic with Ag-Cu-Ti filler")
+                        && hits("/openalex") == before,
+                "a proxied retrieval is answered by the proxy instead of reaching the source twice");
+        String routed = requestLines.isEmpty() ? "<none>" : requestLines.get(0);
+        check(requestLines.size() == 1 && routed.startsWith("GET " + base + "/openalex?") && routed.contains("brazing+temperature"),
+                "the proxy is given the absolute URL it needs to route on: " + routed);
+        PaperSources.Limits portless = limits();
+        portless.proxy = "127.0.0.1";
+        int beforeDirect = hits("/openalex");
+        check(PaperSources.search("openalex", "brazing temperature", portless, null).size() == 1
+                        && hits("/openalex") == beforeDirect + 1,
+                "a proxy without a port dials out directly instead of failing the pass");
+        EngineSettings via = new EngineSettings();
+        via.proxy = "127.0.0.1:7890";
+        via.validate();
+        check(EngineSettings.deserialize(EngineSettings.serialize(via)).proxy.equals("127.0.0.1:7890"),
+                "the proxy survives the settings codec");
+        boolean refused = false;
+        try { EngineSettings junk = new EngineSettings(); junk.proxy = "http://127.0.0.1:7890/"; junk.validate(); }
+        catch (IllegalArgumentException error) { refused = true; }
+        check(refused, "a proxy written as a URL is refused rather than guessed at");
+        EngineSettings upgraded = EngineSettings.deserialize(
+                "{\"version\":1,\"web\":true,\"engines\":[\"openalex\",\"crossref\"],\"perEngine\":12,\"timeout\":20,\"windows\":12}");
+        check(upgraded.engines.contains("openalex") && upgraded.engines.contains("cqvip")
+                        && upgraded.engines.contains("ncpssd"),
+                "旧设置里没见过的中文检索源按新装一起打开");
+        upgraded.engines.remove("cqvip");
+        EngineSettings trimmed = EngineSettings.deserialize(EngineSettings.serialize(upgraded));
+        check(!trimmed.engines.contains("cqvip"), "2 号格式里勾掉的源不会被重新打开");
     }
 
     private static ApiClient.Failure fail(String url, java.util.Map<String, String> headers, int seconds, int maxBytes,

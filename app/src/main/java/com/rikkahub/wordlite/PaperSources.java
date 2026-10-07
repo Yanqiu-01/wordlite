@@ -19,6 +19,8 @@ public final class PaperSources {
         public int timeoutSeconds = 20;
         public int perEngine = 12;
         public String coreKey = "";
+        /** host:port of an HTTP proxy for this retrieval pass, empty to dial out directly. */
+        public String proxy = "";
     }
     static final int MAX_TEXT = 64 * 1024, MAX_AUTHORS = 6;
     private static final LinkedHashMap<String, String> ENDPOINTS = defaults();
@@ -26,6 +28,8 @@ public final class PaperSources {
 
     private static LinkedHashMap<String, String> defaults() {
         LinkedHashMap<String, String> map = new LinkedHashMap<String, String>();
+        map.put("cqvip", "https://www.cqvip.com/search");
+        map.put("ncpssd", "https://www.ncpssd.org/searchHandler/search");
         map.put("openalex", "https://api.openalex.org/works");
         map.put("crossref", "https://api.crossref.org/works");
         map.put("semantic-scholar", "https://api.semanticscholar.org/graph/v1/paper/search");
@@ -40,6 +44,8 @@ public final class PaperSources {
     /** Display name for notes, progress and reports; the engine id itself stays lowercase. */
     public static String label(String engine) {
         String name = key(engine);
+        if (name.equals("cqvip")) return "维普（中文期刊）";
+        if (name.equals("ncpssd")) return "国家哲社文献中心";
         if (name.equals("openalex")) return "OpenAlex";
         if (name.equals("crossref")) return "Crossref";
         if (name.equals("semantic-scholar")) return "Semantic Scholar";
@@ -73,10 +79,15 @@ public final class PaperSources {
         int per = Math.max(1, Math.min(safe.perEngine, 50));
         LinkedHashMap<String, String> headers = new LinkedHashMap<String, String>();
         if (name.equals("core")) headers.put("api-key", safe.coreKey.trim());
-        ApiClient.Response response = HttpTransport.get(endpoint(name) + "?" + queryFor(name, phrase, per),
-                headers, safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation);
+        /* 国家哲社文献中心只接 POST，检索式必须带字段码；维普的检索页是服务端渲染的 HTML。
+           其余源仍是一次 GET 加查询串。 */
+        ApiClient.Response response = name.equals("ncpssd")
+                ? HttpTransport.post(endpoint(name), formFor(phrase, per), headers,
+                        safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation, proxyFor(safe))
+                : HttpTransport.get(endpoint(name) + "?" + queryFor(name, phrase, per),
+                        headers, safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation, proxyFor(safe));
         Object root;
-        try { root = name.equals("arxiv") ? response.body : ApiJson.parse(response.body); }
+        try { root = name.equals("arxiv") || name.equals("cqvip") ? response.body : ApiJson.parse(response.body); }
         catch (RuntimeException error) { throw new IOException("检索响应格式无效"); }
         ArrayList<Candidate> found;
         try {
@@ -85,9 +96,31 @@ public final class PaperSources {
             else if (name.equals("semantic-scholar")) found = parseSemantic(root, per);
             else if (name.equals("europepmc")) found = parseEuropePmc(root, per);
             else if (name.equals("arxiv")) found = parseArxiv(String.valueOf(root), per);
+            else if (name.equals("cqvip")) found = parseCqvip(String.valueOf(root), per);
+            else if (name.equals("ncpssd")) found = parseNcpssd(root, per);
             else found = parseCore(root, per);
         } catch (RuntimeException error) { throw new IOException("检索响应格式无效"); }
         return found;
+    }
+
+    /**
+
+     * Turns the saved host:port into a proxy for the transport. Bracketed IPv6 literals lose
+     * the brackets, which java.net.InetSocketAddress does not accept, and anything unusable
+     * means "dial out directly" rather than a failed retrieval.
+     */
+    static java.net.Proxy proxyFor(Limits limits) {
+        String value = limits == null ? "" : limits.proxy.trim();
+        int colon = value.lastIndexOf(':');
+        if (colon < 1 || colon == value.length() - 1) return null;
+        int port;
+        try { port = Integer.parseInt(value.substring(colon + 1).trim()); }
+        catch (NumberFormatException error) { return null; }
+        if (port < 1 || port > 65535) return null;
+        String host = value.substring(0, colon).trim();
+        if (host.startsWith("[") && host.endsWith("]")) host = host.substring(1, host.length() - 1);
+        return new java.net.Proxy(java.net.Proxy.Type.HTTP,
+                new java.net.InetSocketAddress(host, port));
     }
 
     /** Only the retrieval phrase travels in the query string, never document text. */
@@ -102,9 +135,22 @@ public final class PaperSources {
                 .append("&fields=title,abstract,year,authors,externalIds,openAccessPdf");
         else if (name.equals("europepmc")) out.append("query=").append(query).append("&resultType=core&format=json&pageSize=").append(perEngine);
         else if (name.equals("arxiv")) out.append("search_query=all:").append(query).append("&start=0&max_results=").append(perEngine);
+        /* 维普的服务端渲染只给第一页，page 类参数一律被忽略，所以这里不假装能翻页。 */
+        else if (name.equals("cqvip")) out.append("k=").append(query);
         else out.append("q=").append(query).append("&limit=").append(perEngine);
         return out.toString();
     }
+    /**
+     * 国家哲社文献中心的检索式必须写成带字段码的表达式，裸词一律返回 0 条。题名/关键词优先、摘要兜底，
+     * 表达式自身的引号和括号从短语里去掉，免得检索式被检索词改写。
+     */
+    static String formFor(String phrase, int perEngine) throws IOException {
+        String term = narrowing(phrase, 6, 30).replace('"', ' ').replace('(', ' ').replace(')', ' ').trim();
+        if (term.isEmpty()) throw new IllegalArgumentException("检索短语为空");
+        return "pageNum=1&pageSize=" + perEngine + "&sType=0&search="
+                + encode("(IKTE=\"" + term + "\" OR IKST=\"" + term + "\" OR IKRK=\"" + term + "\")");
+    }
+
     private static String encode(String value) throws IOException {
         try { return URLEncoder.encode(value, "UTF-8"); }
         catch (UnsupportedEncodingException error) { throw new IOException("检索短语无法编码"); }
@@ -117,7 +163,8 @@ public final class PaperSources {
         if (url.isEmpty() || pdf(url)) return "";
         try {
             ApiClient.Response response = HttpTransport.get(url, null,
-                    limits == null ? 20 : limits.timeoutSeconds, HttpTransport.MAX_FULL_TEXT, cancellation);
+                    limits == null ? 20 : limits.timeoutSeconds, HttpTransport.MAX_FULL_TEXT, cancellation,
+                    proxyFor(limits));
             String body = response.body == null ? "" : response.body;
             if (binary(body)) return "";
             String text = body.indexOf('<') >= 0 ? Xml.stripTags(body) : collapse(body);
@@ -233,6 +280,124 @@ public final class PaperSources {
             if (space && out.length() > 0) out.append(' ');
             space = false;
             out.append(c);
+        }
+        return out.toString();
+    }
+
+    private static final String CQVIP_ABSTRACT = "class=\"abstr\"";
+    private static final java.util.regex.Pattern CQVIP_DOCUMENT =
+            java.util.regex.Pattern.compile("href=\"/doc/([^\"?]+)");
+    private static final java.util.regex.Pattern CQVIP_AUTHOR =
+            java.util.regex.Pattern.compile("class=\"author-name[^\"]*\"[^>]*>(?s)(.*?)</a>");
+    private static final java.util.regex.Pattern CQVIP_JOURNAL =
+            java.util.regex.Pattern.compile("href=\"/journal/[^\"]*\"[^>]*>(?s)(.*?)</a>");
+    private static final java.util.regex.Pattern CQVIP_YEAR =
+            java.util.regex.Pattern.compile("(\\d{4})\\s*年");
+    private static final java.util.regex.Pattern CQVIP_ISSUE =
+            java.util.regex.Pattern.compile("第\\s*(\\d+)\\s*期");
+    private static final java.util.regex.Pattern CQVIP_ORGAN =
+            java.util.regex.Pattern.compile("href=\"/organization/[^\"]*\"[^>]*>(?s)(.*?)</a>");
+
+    /**
+     * 维普不给匿名程序留 API，检索结果是服务端渲染在 HTML 里的，题名由客户端脚本后填，服务端只给
+     * 摘要、作者、刊名、年期和文献页地址。查重比对要的是可比对的正文，摘要够用；报告里这一行以
+     * "《刊名》 年 期"署名并带上文献页地址，仍然能人工核到出处。
+     */
+    private static ArrayList<Candidate> parseCqvip(String html, int limit) {
+        ArrayList<Candidate> out = new ArrayList<Candidate>();
+        int cursor = 0, recordStart = 0;
+        while (out.size() < limit) {
+            int at = html.indexOf(CQVIP_ABSTRACT, cursor);
+            if (at < 0) break;
+            int open = html.indexOf('>', at), close = html.indexOf("</span>", at);
+            if (open < 0 || close < 0) break;
+            String head = html.substring(recordStart, at);
+            cursor = recordStart = close;
+            String document = lastMatch(CQVIP_DOCUMENT, head);
+            String journal = Xml.stripTags(lastMatch(CQVIP_JOURNAL, head)).trim();
+            String year = lastMatch(CQVIP_YEAR, head);
+            String issue = lastMatch(CQVIP_ISSUE, head);
+            Candidate candidate = new Candidate();
+            candidate.source.engine = "cqvip";
+            candidate.source.id = document;
+            candidate.source.locator = document.isEmpty() ? "" : "https://www.cqvip.com/doc/" + document;
+            candidate.source.authors = nameList(CQVIP_AUTHOR, head);
+            candidate.source.year = year;
+            String venue = journal;
+            if (venue.isEmpty()) {
+                /* 学位论文没有期刊链接，署名退到培养单位，报告里至少看得出是谁的学校。 */
+                String organ = Xml.stripTags(lastMatch(CQVIP_ORGAN, head)).replaceAll("^\\[[0-9]+]\\s*", "").trim();
+                if (!organ.isEmpty()) venue = document.startsWith("degree") ? "学位论文 " + organ : organ;
+            }
+            candidate.source.title = venue.isEmpty() ? "维普记录 " + document
+                    : venue + (year.isEmpty() ? "" : " " + year + "年") + (issue.isEmpty() ? "" : "第" + issue + "期");
+            candidate.abstractText = clip(Xml.stripTags(html.substring(open + 1, close)));
+            add(out, candidate, limit);
+        }
+        return out;
+    }
+
+    /** 哲社中心的 ik_* 字段带着高亮标签，所以只读干净字段；摘要即 remark。 */
+    private static ArrayList<Candidate> parseNcpssd(Object root, int limit) {
+        ArrayList<Candidate> out = new ArrayList<Candidate>();
+        for (Object item : listAt(root, "data.rows")) {
+            String id = text(item, "id", "data_id");
+            String page = text(item, "HtmlUrl");
+            Candidate candidate = new Candidate();
+            candidate.source.engine = "ncpssd";
+            candidate.source.id = id;
+            candidate.source.title = text(item, "title", "title_auto");
+            candidate.source.authors = splitAuthors(text(item, "creator"));
+            candidate.source.year = year(text(item, "years", "date"));
+            candidate.source.locator = page.startsWith("http") ? page : "ncpssd:" + id;
+            candidate.abstractText = clip(text(item, "remark"));
+            add(out, candidate, limit);
+        }
+        return out;
+    }
+
+    /**
+     * 作者写成"名字[机构序号]"用分号串起来，序号对读者没有意义；也有记录用空格而不是分号隔开中文
+     * 姓名，所以中文串按空格再切一刀（拉丁姓名带空格是真名，不动）。
+     */
+    private static String splitAuthors(String creator) {
+        ArrayList<String> names = new ArrayList<String>();
+        for (String group : (creator == null ? "" : creator).split("[;；]")) {
+            String cleaned = group.replaceAll("\\[[^\\]]*]", "").trim();
+            if (cleaned.isEmpty()) continue;
+            String[] parts = cleaned.matches("(?s).*[\\u4e00-\\u9fa5].*") ? cleaned.split("\\s+")
+                    : new String[]{cleaned};
+            for (String part : parts) {
+                String name = part.trim();
+                if (!name.isEmpty() && names.size() < MAX_AUTHORS && !names.contains(name)) names.add(name);
+            }
+        }
+        return join(names);
+    }
+
+    private static String lastMatch(java.util.regex.Pattern pattern, String text) {
+        java.util.regex.Matcher matcher = pattern.matcher(text);
+        String out = "";
+        while (matcher.find()) out = matcher.group(1);
+        return out == null ? "" : out.trim();
+    }
+
+    private static String nameList(java.util.regex.Pattern pattern, String text) {
+        java.util.regex.Matcher matcher = pattern.matcher(text);
+        ArrayList<String> names = new ArrayList<String>();
+        while (matcher.find() && names.size() < MAX_AUTHORS) {
+            /* 学位论文的那一个链接里串着"作者 • 导师 • 培养单位"，只有第一段是作者。 */
+            String name = Xml.stripTags(matcher.group(1)).replaceAll("\\s+", " ").split("•")[0].trim();
+            if (!name.isEmpty() && !names.contains(name)) names.add(name);
+        }
+        return join(names);
+    }
+
+    private static String join(ArrayList<String> values) {
+        StringBuilder out = new StringBuilder();
+        for (String value : values) {
+            if (out.length() > 0) out.append(", ");
+            out.append(value);
         }
         return out.toString();
     }
