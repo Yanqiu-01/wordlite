@@ -52,6 +52,7 @@ public class EditorActivity extends Activity {
     private static final int REQUEST_SAVE = 71;
     private static final int REQUEST_PICK = 72;
     private static final int REQUEST_PDF = 73;
+    private static final int REQUEST_LIBRARY = 75;
     private PdfExportOptions pendingPdf;
     private boolean busy;
     private static final int PAPER = 0xFFFFFEFB;
@@ -140,6 +141,7 @@ public class EditorActivity extends Activity {
                 navigateReview(paragraph, start);
                 if (activeEditor != null) activeEditor.setSelection(Math.min(start, activeEditor.length()), Math.min(end, activeEditor.length()));
             }
+            public void pickLibrary() { pickLibraryDocuments(); }
         });
         load();
     }
@@ -193,13 +195,18 @@ public class EditorActivity extends Activity {
         checkPanel = new LinearLayout(this);
         checkPanel.setGravity(Gravity.CENTER_VERTICAL);
         checkPanel.setPadding(dp(4), 0, dp(4), 0);
-        Button checkNow = button("查重", 13), rewrite = button("降重", 13), apiSettings = button("接口设置", 13);
-        checkNow.setTextColor(viewInk); rewrite.setTextColor(viewInk); apiSettings.setTextColor(viewInk);
-        checkNow.setTag("bottom-check-now"); rewrite.setTag("bottom-rewrite"); apiSettings.setTag("bottom-api-settings");
+        Button checkNow = button("查重", 13), aigc = button("AIGC", 13), rewrite = button("降重", 13),
+                apiSettings = button("设置", 13);
+        checkNow.setTextColor(viewInk); aigc.setTextColor(viewInk); rewrite.setTextColor(viewInk);
+        apiSettings.setTextColor(viewInk);
+        checkNow.setTag("bottom-check-now"); aigc.setTag("bottom-aigc"); rewrite.setTag("bottom-rewrite");
+        apiSettings.setTag("bottom-api-settings");
         checkNow.setOnClickListener(v -> api.checkMenu());
+        aigc.setOnClickListener(v -> api.aigc());
         rewrite.setOnClickListener(v -> api.rewriteMenu());
         apiSettings.setOnClickListener(v -> api.settings(ApiConfig.Service.CHECK));
         checkPanel.addView(checkNow, new LinearLayout.LayoutParams(0, dp(40), 1));
+        checkPanel.addView(aigc, new LinearLayout.LayoutParams(0, dp(40), 1));
         checkPanel.addView(rewrite, new LinearLayout.LayoutParams(0, dp(40), 1));
         checkPanel.addView(apiSettings, new LinearLayout.LayoutParams(0, dp(40), 1));
         checkPanel.setVisibility(View.GONE);
@@ -884,6 +891,19 @@ public class EditorActivity extends Activity {
                 }).show();
     }
 
+    /** The comparison library takes any number of .docx/.txt documents. */
+    private void pickLibraryDocuments() {
+        if (busy) return;
+        Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        pick.addCategory(Intent.CATEGORY_OPENABLE);
+        pick.setType("*/*");
+        pick.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "text/plain", "text/markdown"});
+        pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        startActivityForResult(pick, REQUEST_LIBRARY);
+    }
+
     private void saveAs() {
         if (document == null || busy) return;
         syncAll();
@@ -897,6 +917,15 @@ public class EditorActivity extends Activity {
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (api != null && api.activityResult(requestCode, resultCode, data)) return;
+        if (requestCode == REQUEST_LIBRARY) {
+            ArrayList<Uri> picked = new ArrayList<Uri>();
+            if (data != null && data.getClipData() != null)
+                for (int i = 0; i < data.getClipData().getItemCount(); i++)
+                    if (data.getClipData().getItemAt(i).getUri() != null) picked.add(data.getClipData().getItemAt(i).getUri());
+            else if (data != null && data.getData() != null) picked.add(data.getData());
+            if (resultCode == RESULT_OK && api != null) api.libraryImport(picked);
+            return;
+        }
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         if (requestCode == REQUEST_PDF && pendingPdf != null) {
             final Uri target = data.getData(); final PdfExportOptions options = pendingPdf;

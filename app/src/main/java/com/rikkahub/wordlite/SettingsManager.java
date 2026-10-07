@@ -37,6 +37,18 @@ public final class SettingsManager {
         String payload = preferences.getString(service.name(), ""); if (payload.isEmpty()) return new ApiConfig();
         return deserialize(SecretCipher.decrypt(key(), service.name(), Base64.decode(payload, Base64.NO_WRAP)));
     }
+    /** Scan engines and the optional CORE key ride the same encrypted channel. */
+    public void saveEngine(EngineSettings value) throws Exception {
+        value.validate();
+        byte[] payload = SecretCipher.encrypt(key(), "ENGINE", EngineSettings.serialize(value));
+        if (!preferences.edit().putString("ENGINE", Base64.encodeToString(payload, Base64.NO_WRAP)).commit())
+            throw new java.io.IOException("设置保存失败");
+    }
+    public EngineSettings loadEngine() throws Exception {
+        String payload = preferences.getString("ENGINE", "");
+        if (payload.isEmpty()) return new EngineSettings();
+        return EngineSettings.deserialize(SecretCipher.decrypt(key(), "ENGINE", Base64.decode(payload, Base64.NO_WRAP)));
+    }
     public static String serialize(ApiConfig config) {
         LinkedHashMap<String, Object> value = new LinkedHashMap<String, Object>();
         value.put("version", 1); value.put("url", config.url); value.put("key", config.key); value.put("method", config.method);

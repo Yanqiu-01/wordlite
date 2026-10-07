@@ -71,6 +71,8 @@ public final class A4Paginator {
     public static final class CellParagraph {
         public DocxTextLayout.Paragraph text;
         public float x, y;
+        /** Owning cell box, so a tap lands on the right column whatever its width is. */
+        public float cellLeft, cellWidth;
     }
     public static final class CellImage {
         public DocxDocument.EmbeddedImage image;
@@ -79,6 +81,9 @@ public final class A4Paginator {
     public static final class TableRow {
         public int columns;
         public float cellWidth, height;
+        /** Left edge and width of every cell, in document pixels, w:gridSpan already folded in. */
+        public float[] cellLeft = new float[0];
+        public float[] cellWidths = new float[0];
         public final List<CellParagraph> paragraphs = new ArrayList<CellParagraph>();
         public final List<CellImage> images = new ArrayList<CellImage>();
     }
@@ -241,40 +246,21 @@ public final class A4Paginator {
                 }
             } else if (block instanceof DocxDocument.TableBlock) {
                 DocxDocument.TableBlock table = (DocxDocument.TableBlock) block;
-                for (ArrayList<DocxDocument.Cell> cells : table.rows) {
-                    TableRow row = new TableRow();
-                    row.columns = Math.max(1, Math.max(cells.size(), table.columns));
-                    row.cellWidth = blockGeometry.contentWidth / row.columns;
-                    row.height = 8;
-                    for (int c = 0; c < cells.size(); c++) {
-                        float y = 4;
-                        for (DocxDocument.ParagraphBlock p : cells.get(c).paragraphs) {
-                            int cellGrid = sectionGrid(document, sectionIndex);
-                            y += PageGeometry.twips(effectiveSpacingTwips(p, true, cellGrid));
-                            CellParagraph cp = new CellParagraph();
-                            cp.text = DocxTextLayout.measure(p, Math.max(1, row.cellWidth - 8), null,
-                                    batch.sectionIndex >= 0 ? sectionOf(document, batch.sectionIndex).lineGridPitchTwips : -1);
-                            cp.x = c * row.cellWidth + 4; cp.y = y;
-                            row.paragraphs.add(cp);
-                            y += cp.text.layout.getHeight() + PageGeometry.twips(effectiveSpacingTwips(p, false, cellGrid));
-                            for (DocxDocument.EmbeddedImage image : p.images) {
-                                float iw = image.widthEmu > 0 ? image.widthEmu / 9525f : row.cellWidth - 8;
-                                float ih = image.heightEmu > 0 ? image.heightEmu / 9525f : 144;
-                                float imageScale = Math.min(1f, Math.min((row.cellWidth - 8) / Math.max(1f, iw), blockGeometry.contentHeight / Math.max(1f, ih)));
-                                CellImage ci = new CellImage();
-                                ci.image = image; ci.x = c * row.cellWidth + 4; ci.y = y;
-                                ci.width = iw * imageScale; ci.height = ih * imageScale;
-                                row.images.add(ci);
-                                y += ci.height + 4;
-                            }
-                        }
-                        row.height = Math.max(row.height, y + 4);
-                    }
+                TableGrid grid = tableGrid(table, blockGeometry);
+                int cellGrid = sectionGrid(document, sectionIndex);
+                for (int r = 0; r < table.rows.size(); r++) {
+                    DocxDocument.RowFormat format = r < table.rowFormats.size()
+                            ? table.rowFormats.get(r) : null;
+                    TableRow row = layoutRow(document, table, table.rows.get(r), format, grid,
+                            batch.sectionIndex, cellGrid, blockGeometry.contentHeight);
                     ParagraphLayout layout = new ParagraphLayout();
                     layout.blockIndex = table.index;
                     layout.sectionIndex = sectionIndex;
                     layout.row = row;
                     PageBreaker.Item item = new PageBreaker.Item(table.index, row.height);
+                    // One row is one indivisible block, exactly like w:cantSplit. Word only
+                    // breaks inside a row that is taller than the page, which still lands here
+                    // as its own overflowing page.
                     item.widowControl = false; item.keepLines = true;
                     item.sectionIndex = sectionIndex;
                     batch.items.add(item); measured.put(item, layout);
@@ -333,6 +319,166 @@ public final class A4Paginator {
         }
         assignPageNumbers(result, document);
         return result;
+    }
+
+    /** A table's column edges in document pixels, measured from the content-area left edge. */
+    private static final class TableGrid {
+        final float[] left;
+        final float[] width;
+        TableGrid(float[] left, float[] width) { this.left = left; this.width = width; }
+    }
+
+    /**
+     * Word's fixed layout takes column widths from w:tblGrid, re-scales them when w:tblW
+     * disagrees, and then places the table per its w:jc. A table wider than the text column
+     * spills past the margins instead of being squeezed back into it, so no clamping here.
+     */
+    private static TableGrid tableGrid(DocxDocument.TableBlock table, PageGeometry geometry) {
+        int gridColumns = table.gridColumns.size();
+        int columns = Math.max(1, Math.max(gridColumns, table.columns));
+        float[] widths = new float[columns];
+        float natural = 0f;
+        for (int i = 0; i < gridColumns; i++) {
+            widths[i] = Math.max(0f, PageGeometry.twips(table.gridColumns.get(i).intValue()));
+            natural += widths[i];
+        }
+        if (gridColumns == 0) {
+            // No grid to read: fall back to the widest row of w:tcW values, then to an even split.
+            float declared = 0f;
+            int declaredCells = 0;
+            for (ArrayList<DocxDocument.Cell> row : table.rows) {
+                float rowWidth = 0f;
+                for (DocxDocument.Cell cell : row)
+                    if ("dxa".equals(cell.widthType)) rowWidth += PageGeometry.twips(cell.widthTwips);
+                if (row.size() > declaredCells || rowWidth > declared) {
+                    declared = rowWidth;
+                    declaredCells = row.size();
+                }
+            }
+            declaredCells = Math.max(1, Math.max(declaredCells, columns));
+            float each = declared > 0f ? declared / declaredCells
+                    : Math.max(1f, geometry.contentWidth) / declaredCells;
+            for (int i = 0; i < columns; i++) widths[i] = each;
+            natural = columns * each;
+        } else if (columns > gridColumns) {
+            // A row holds more cells than the grid declares; share the mean width out to them.
+            float each = natural / gridColumns;
+            for (int i = gridColumns; i < columns; i++) widths[i] = each;
+            natural = columns * each;
+        }
+        float indent = Math.max(0f, PageGeometry.twips(table.indentTwips));
+        float available = Math.max(1f, geometry.contentWidth - indent);
+        float tableWidth = natural;
+        if ("dxa".equals(table.widthType) && table.widthTwips > 0 && natural > 0f)
+            tableWidth = PageGeometry.twips(table.widthTwips);
+        else if ("pct".equals(table.widthType) && table.widthTwips > 0 && natural > 0f)
+            tableWidth = available * Math.min(1f, table.widthTwips / 5000f);
+        if (natural <= 0f) {
+            // w:tblGrid present but all-zero (a table the app itself inserted): split evenly.
+            tableWidth = available;
+            for (int i = 0; i < columns; i++) widths[i] = tableWidth / columns;
+        } else if (Math.abs(tableWidth - natural) > 0.01f) {
+            float scale = tableWidth / natural;
+            for (int i = 0; i < columns; i++) widths[i] *= scale;
+        }
+        float left = indent;
+        float slack = available - tableWidth;
+        if ("center".equals(table.alignment)) left += slack / 2f;
+        else if ("right".equals(table.alignment)) left += slack;
+        float[] edges = new float[columns];
+        float cursor = left;
+        for (int i = 0; i < columns; i++) { edges[i] = cursor; cursor += widths[i]; }
+        return new TableGrid(edges, widths);
+    }
+
+    /** One table row with real cell boxes, real padding and the declared w:trHeight honoured. */
+    private static TableRow layoutRow(DocxDocument document, DocxDocument.TableBlock table,
+                                      ArrayList<DocxDocument.Cell> cells, DocxDocument.RowFormat format,
+                                      TableGrid grid, int sectionIndex, int cellGrid, float maxImageHeight) {
+        TableRow row = new TableRow();
+        row.columns = Math.max(1, grid.width.length);
+        row.cellLeft = new float[cells.size()];
+        row.cellWidths = new float[cells.size()];
+        ArrayList<ArrayList<CellParagraph>> perCellText = new ArrayList<ArrayList<CellParagraph>>();
+        ArrayList<ArrayList<CellImage>> perCellImages = new ArrayList<ArrayList<CellImage>>();
+        // left, width, top padding, bottom padding, measured content height.
+        ArrayList<float[]> boxes = new ArrayList<float[]>();
+        ArrayList<String> verticalAligns = new ArrayList<String>();
+        int gridColumn = 0;
+        for (int c = 0; c < cells.size(); c++) {
+            DocxDocument.Cell cell = cells.get(c);
+            int span = Math.max(1, cell.gridSpan);
+            int anchor = Math.min(gridColumn, grid.width.length - 1);
+            float left = grid.left[anchor];
+            float width = 0f;
+            for (int i = 0; i < span && gridColumn + i < grid.width.length; i++) width += grid.width[gridColumn + i];
+            gridColumn += span;
+            row.cellLeft[c] = left;
+            row.cellWidths[c] = width;
+            float top = cellMargin(cell.marginTopTwips, table.cellMarginTopTwips);
+            float bottom = cellMargin(cell.marginBottomTwips, table.cellMarginBottomTwips);
+            float inset = cellMargin(cell.marginLeftTwips, table.cellMarginLeftTwips);
+            float outset = cellMargin(cell.marginRightTwips, table.cellMarginRightTwips);
+            float textWidth = Math.max(1f, width - inset - outset);
+            ArrayList<CellParagraph> texts = new ArrayList<CellParagraph>();
+            ArrayList<CellImage> images = new ArrayList<CellImage>();
+            float y = 0f;
+            // A vMerge continuation owns no text: the cell above already renders it.
+            if (!cell.mergeContinues) {
+                for (DocxDocument.ParagraphBlock p : cell.paragraphs) {
+                    y += PageGeometry.twips(effectiveSpacingTwips(p, true, cellGrid));
+                    CellParagraph cp = new CellParagraph();
+                    cp.text = DocxTextLayout.measure(p, textWidth, null,
+                            sectionIndex >= 0 ? sectionOf(document, sectionIndex).lineGridPitchTwips : -1);
+                    cp.x = left + inset; cp.y = y;
+                    cp.cellLeft = left; cp.cellWidth = width;
+                    texts.add(cp);
+                    y += cp.text.layout.getHeight() + PageGeometry.twips(effectiveSpacingTwips(p, false, cellGrid));
+                    for (DocxDocument.EmbeddedImage image : p.images) {
+                        float iw = image.widthEmu > 0 ? image.widthEmu / 9525f : textWidth;
+                        float ih = image.heightEmu > 0 ? image.heightEmu / 9525f : 144;
+                        float imageScale = Math.min(1f, Math.min(textWidth / Math.max(1f, iw),
+                                maxImageHeight / Math.max(1f, ih)));
+                        CellImage ci = new CellImage();
+                        ci.image = image; ci.x = left + inset; ci.y = y;
+                        ci.width = iw * imageScale; ci.height = ih * imageScale;
+                        images.add(ci);
+                        y += ci.height + 4;
+                    }
+                }
+            }
+            perCellText.add(texts);
+            perCellImages.add(images);
+            boxes.add(new float[]{left, width, top, bottom, y});
+            verticalAligns.add(cell.verticalAlign);
+        }
+        float natural = 8f;
+        for (float[] box : boxes) natural = Math.max(natural, box[4] + box[2] + box[3]);
+        float height = natural;
+        if (format != null && format.heightTwips > 0) {
+            float declared = PageGeometry.twips(format.heightTwips);
+            // exact pins the row and clips what does not fit; atLeast can only raise it.
+            height = "exact".equals(format.heightRule) ? declared : Math.max(natural, declared);
+        }
+        float widthTotal = 0f;
+        for (int c = 0; c < boxes.size(); c++) {
+            float[] box = boxes.get(c);
+            float slack = height - box[4] - box[2] - box[3];
+            float offset = 0f;
+            if ("center".equals(verticalAligns.get(c))) offset = Math.max(0f, slack / 2f);
+            else if ("bottom".equals(verticalAligns.get(c))) offset = Math.max(0f, slack);
+            for (CellParagraph cp : perCellText.get(c)) { cp.y += box[2] + offset; row.paragraphs.add(cp); }
+            for (CellImage ci : perCellImages.get(c)) { ci.y += box[2] + offset; row.images.add(ci); }
+            widthTotal += box[1];
+        }
+        row.height = height;
+        row.cellWidth = boxes.isEmpty() ? 0f : widthTotal / boxes.size();
+        return row;
+    }
+
+    /** w:tcMar wins over w:tblCellMar; both are twips. */
+    private static float cellMargin(int cellValue, int tableValue) {
+        return PageGeometry.twips(Math.max(0, cellValue >= 0 ? cellValue : tableValue));
     }
 
     private static int sectionIndex(DocxDocument.Block block, DocxDocument document) {

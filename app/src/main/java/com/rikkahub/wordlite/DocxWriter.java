@@ -597,14 +597,62 @@ public final class DocxWriter {
 
     private static String tableXml(DocxDocument.TableBlock table, DocxDocument document) {
         StringBuilder xml = new StringBuilder("<w:tbl>");
-        xml.append("<w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/>" +
+        // Child order follows CT_TblPrBase: tblW, jc, tblInd, tblBorders, tblLayout, tblCellMar.
+        xml.append("<w:tblPr>");
+        if (table.widthTwips > 0)
+            xml.append("<w:tblW w:w=\"").append(table.widthTwips)
+                    .append("\" w:type=\"").append(xmlEscape(table.widthType)).append("\"/>");
+        else xml.append("<w:tblW w:w=\"0\" w:type=\"auto\"/>");
+        if (table.alignment != null && !"left".equals(table.alignment))
+            xml.append("<w:jc w:val=\"").append(xmlEscape(table.alignment)).append("\"/>");
+        if (table.indentTwips != 0) xml.append("<w:tblInd w:w=\"").append(table.indentTwips).append("\" w:type=\"dxa\"/>");
+        xml.append("<w:tblBorders><w:top w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/>" +
                 "<w:left w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/><w:bottom w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/>" +
                 "<w:right w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/><w:insideH w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/>" +
-                "<w:insideV w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/></w:tblBorders></w:tblPr>");
-        for (ArrayList<DocxDocument.Cell> row : table.rows) {
+                "<w:insideV w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/></w:tblBorders>");
+        if (table.fixedLayout) xml.append("<w:tblLayout w:type=\"fixed\"/>");
+        xml.append("<w:tblCellMar>").append(twipsElement("top", table.cellMarginTopTwips))
+                .append(twipsElement("left", table.cellMarginLeftTwips))
+                .append(twipsElement("bottom", table.cellMarginBottomTwips))
+                .append(twipsElement("right", table.cellMarginRightTwips)).append("</w:tblCellMar>");
+        xml.append("</w:tblPr>");
+        // Word reads w:tblGrid for fixed layout, so dropping it would let the columns drift on re-open.
+        xml.append("<w:tblGrid>");
+        for (Integer width : table.gridColumns) xml.append("<w:gridCol w:w=\"").append(width.intValue()).append("\"/>");
+        for (int i = table.gridColumns.size(); i < Math.max(1, table.columns); i++) xml.append("<w:gridCol w:w=\"0\"/>");
+        xml.append("</w:tblGrid>");
+        for (int r = 0; r < table.rows.size(); r++) {
             xml.append("<w:tr>");
-            for (DocxDocument.Cell cell : row) {
-                xml.append("<w:tc><w:tcPr><w:tcW w:w=\"0\" w:type=\"auto\"/></w:tcPr>");
+            DocxDocument.RowFormat format = r < table.rowFormats.size() ? table.rowFormats.get(r) : null;
+            if (format != null && (format.cantSplit || format.heightTwips > 0)) {
+                xml.append("<w:trPr>");
+                if (format.cantSplit) xml.append("<w:cantSplit/>");
+                if (format.heightTwips > 0) xml.append("<w:trHeight w:val=\"").append(format.heightTwips)
+                        .append("\" w:hRule=\"").append(xmlEscape(format.heightRule)).append("\"/>");
+                if (format.repeatAsHeader) xml.append("<w:tblHeader/>");
+                xml.append("</w:trPr>");
+            }
+            for (DocxDocument.Cell cell : table.rows.get(r)) {
+                // CT_TcPr order: tcW, gridSpan, vMerge, tcMar, vAlign.
+                xml.append("<w:tc><w:tcPr>");
+                if (cell.widthTwips > 0)
+                    xml.append("<w:tcW w:w=\"").append(cell.widthTwips)
+                            .append("\" w:type=\"").append(xmlEscape(cell.widthType)).append("\"/>");
+                else xml.append("<w:tcW w:w=\"0\" w:type=\"auto\"/>");
+                if (cell.gridSpan > 1) xml.append("<w:gridSpan w:val=\"").append(cell.gridSpan).append("\"/>");
+                if (cell.mergeContinues) xml.append("<w:vMerge/>");
+                if (cell.marginLeftTwips >= 0 || cell.marginRightTwips >= 0
+                        || cell.marginTopTwips >= 0 || cell.marginBottomTwips >= 0) {
+                    xml.append("<w:tcMar>");
+                    if (cell.marginTopTwips >= 0) xml.append(twipsElement("top", cell.marginTopTwips));
+                    if (cell.marginLeftTwips >= 0) xml.append(twipsElement("left", cell.marginLeftTwips));
+                    if (cell.marginBottomTwips >= 0) xml.append(twipsElement("bottom", cell.marginBottomTwips));
+                    if (cell.marginRightTwips >= 0) xml.append(twipsElement("right", cell.marginRightTwips));
+                    xml.append("</w:tcMar>");
+                }
+                if (cell.verticalAlign != null)
+                    xml.append("<w:vAlign w:val=\"").append(xmlEscape(cell.verticalAlign)).append("\"/>");
+                xml.append("</w:tcPr>");
                 for (DocxDocument.ParagraphBlock paragraph : cell.paragraphs) xml.append(paragraphXml(paragraph, document));
                 if (cell.paragraphs.isEmpty()) xml.append("<w:p/>");
                 xml.append("</w:tc>");
@@ -613,6 +661,10 @@ public final class DocxWriter {
         }
         xml.append("</w:tbl>");
         return xml.toString();
+    }
+
+    private static String twipsElement(String name, int twips) {
+        return "<w:" + name + " w:w=\"" + twips + "\" w:type=\"dxa\"/>";
     }
 
     private static String commentsXml(DocxDocument document) {

@@ -216,7 +216,12 @@ public class ViewportTest {
 
     @Test public void recentFileCanBeReopened() {
         java.io.File document = new java.io.File(System.getProperty("app.root"), "tests/fixture.docx");
-        android.net.Uri uri = android.net.Uri.fromFile(document);
+        // Uri.fromFile() on a Windows host produces file://E%3A\path, whose getPath() is not a
+        // filesystem path, so openRecent() rightly decides the entry is dead. Android only ever
+        // stores absolute POSIX paths, so build the URI in that shape and test the real behaviour.
+        String slashPath = document.getAbsolutePath().replace(java.io.File.separatorChar, '/');
+        android.net.Uri uri = android.net.Uri.parse("file://"
+                + (slashPath.startsWith("/") ? "" : "/") + slashPath);
         context.getSharedPreferences("wordlite", Context.MODE_PRIVATE).edit()
                 .putString("last_name", "fixture.docx").putString("last_uri", uri.toString()).commit();
         Activity activity = Robolectric.buildActivity(MainActivity.class).setup().get();

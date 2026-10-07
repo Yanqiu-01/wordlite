@@ -11,9 +11,13 @@ public final class RewriteTask {
     public boolean accepted, rejected;
     public String error = "";
     public RewriteTask(DocxDocument.ParagraphBlock paragraph, int start, int end, ApiConfig config) {
+        this(paragraph, start, end, config.terms);
+    }
+    /** Offline rewrites keep the same protected islands without any endpoint config. */
+    public RewriteTask(DocxDocument.ParagraphBlock paragraph, int start, int end, java.util.List<String> terms) {
         if (TextProtection.referenceParagraph(paragraph)) throw new IllegalArgumentException("参考文献未改写");
         paragraphIndex = paragraph.index; this.start = start; this.end = end;
-        mask = TextProtection.mask(paragraph, start, end, config.terms);
+        mask = TextProtection.mask(paragraph, start, end, terms);
     }
     public boolean unchanged(DocxDocument document) {
         DocxDocument.ParagraphBlock p = TextSelection.find(document, paragraphIndex);

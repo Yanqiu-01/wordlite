@@ -66,7 +66,10 @@ public final class DocxTextLayout {
         float right = PageGeometry.twips(f.rightIndentTwips == -1 ? 0 : f.rightIndentTwips);
         float first = PageGeometry.twips(f.firstLineIndentTwips == -1 ? 0 : f.firstLineIndentTwips);
         float x = left + Math.min(0, first);
-        int width = Math.max(1, (int) Math.floor(availableWidth - right - x));
+        // StaticLayout only takes an int width. Rounding to the nearest pixel keeps the break
+        // threshold within a hair of Word's fractional text width; flooring handed Word a free
+        // glyph on every tight line (measured: 0.9 px of unused width on 20+ break deltas).
+        int width = Math.max(1, Math.round(availableWidth - right - x));
         SpannableStringBuilder text = display != null && display.changed
                 ? styledText(paragraph, display) : styledText(paragraph);
         int firstMargin = Math.round(Math.max(0, first));
@@ -109,6 +112,13 @@ public final class DocxTextLayout {
         // pass; a second pass narrows exactly the marks Word would hang.
         if (f.alignment == 3 && f.overflowPunct)
             layout = hangTrailingPunctuation(text, paint, layout, width, alignment, allowWordWrap);
+        // No Android release closes a Chinese line on its own, so this pass runs on every version:
+        // API 29 (the target phone) leaves a CJK line exactly where JUSTIFICATION_MODE_NONE puts
+        // it, and the API 34 framework, the first with INTER_CHARACTER, still leaves 7-23 px of a
+        // 567 px column unspread on a Chinese paragraph (JustifyApi34Test). Only the slack the
+        // platform pass left over gets spread, so a line Android already filled stays filled.
+        if (f.alignment == 3 && hasEastAsian(text))
+            layout = justifyEastAsian(text, paint, layout, width, alignment, allowWordWrap);
         return new Paragraph(paragraph, layout, x, display);
     }
 
@@ -120,12 +130,13 @@ public final class DocxTextLayout {
                 .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
                 .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE);
         if (Build.VERSION.SDK_INT >= 26) {
-            // CJK body text has no spaces, so INTER_WORD cannot stretch those
-            // lines and the right edge stays ragged; INTER_CHARACTER (API 34+)
-            // matches Word's flush justified edge. Below 34 keep INTER_WORD.
+            // The mode only decides how the platform spreads Latin word spaces: INTER_WORD below
+            // API 34, INTER_CHARACTER from 34 up, where it may also take gaps inside a run. Neither
+            // mode is what lands a Chinese line on the right edge -- justifyEastAsian does that on
+            // every version, from whatever slack this pass leaves.
             int mode = !justify ? Layout.JUSTIFICATION_MODE_NONE
                     : Build.VERSION.SDK_INT >= 34 ? Layout.JUSTIFICATION_MODE_INTER_CHARACTER
-                    : Layout.JUSTIFICATION_MODE_INTER_WORD;
+                            : Layout.JUSTIFICATION_MODE_INTER_WORD;
             builder.setJustificationMode(mode);
         }
         if (wordWrap && Build.VERSION.SDK_INT >= 33) {
@@ -198,6 +209,214 @@ public final class DocxTextLayout {
             layout = build(text, paint, width, alignment, true, wordWrap);
         }
         return layout;
+    }
+
+    /**
+     * Word justifies East Asian text by opening the gaps between characters. Android only learned
+     * that in API 34: measured on the target phone (API 29), INTER_CHARACTER leaves a Chinese line
+     * exactly where NONE puts it and letterSpacing is quantised to whole pixels. A ReplacementSpan
+     * is the only way to add a fractional-free gap on the older platforms, and it reports whole
+     * pixels, so each line's slack is dithered across its candidate gaps. The right edge then lands
+     * on Word's x and no single gap is more than a pixel off, which is what pixel hinting already
+     * does to Word's own sub-pixel glyph origins.
+     */
+    private static StaticLayout justifyEastAsian(Spannable text, TextPaint paint,
+                                                 StaticLayout laidOut, int width,
+                                                 Layout.Alignment alignment, boolean wordWrap) {
+        final int lines = laidOut.getLineCount();
+        if (lines < 2) return laidOut;
+        SpannableStringBuilder copy = new SpannableStringBuilder(text);
+        int widened = 0;
+        for (int line = 0; line < lines - 1; line++) widened += spreadLine(copy, laidOut, width, line);
+        if (widened == 0) return laidOut;
+        // Widening may never move a line break: pagination and the measured Word parity both rest on
+        // the same breaks. Slack is restated from the laid-out geometry, so a break that still moved
+        // means the shaping changed underneath us; take that single line's slack back out and lay the
+        // paragraph out again, rather than throwing away every line's justification.
+        for (int attempt = 0, budget = 2 * lines + 4; attempt < budget; attempt++) {
+            // Justify stays on: the platform still owns the word spaces of Latin runs, while the CJK
+            // gaps here are sized from the slack that pass left over, so nothing is stretched twice.
+            StaticLayout spread = build(copy, paint, width, alignment, true, wordWrap);
+            int blocked = lineToClear(laidOut, spread, lines, width);
+            if (blocked < 0) return spread;
+            // A line that just gained or lost a whole row is not necessarily the one holding the
+            // slack that tipped it over, and neither is a break whose cause sits further up: take the
+            // pixel out of the lowest line that still has one rather than abandoning the paragraph.
+            if (!shrinkLine(copy, laidOut, blocked) && !shrinkLine(copy, laidOut, lastLooseLine(copy, laidOut)))
+                break;
+        }
+        return laidOut;
+    }
+
+    /** Opens one line's slack across its own gaps; returns how many gaps were opened. */
+    private static int spreadLine(SpannableStringBuilder copy, StaticLayout laidOut, int width, int line) {
+        int start = laidOut.getLineStart(line);
+        int end = laidOut.getLineEnd(line);
+        while (end - start > 1 && Character.isWhitespace(copy.charAt(end - 1))) end--;
+        float slack = width - laidOut.getLineLeft(line) - laidOut.getLineWidth(line);
+        if (slack < 1f) return 0;
+        int[][] gaps = gapOffsets(copy, laidOut, line, start, end);
+        if (gaps.length == 0) return 0;
+        // Floor, never round: overshooting the column by a fraction of a pixel would push the last
+        // character onto the next line, and a moved break is far worse than an edge that is short by
+        // a pixel. MAX_GAP_STRETCH_PX is only a sanity bound -- Word's widest measured single-gap
+        // stretch on the reference document is 2.3 pt (~3 px).
+        int total = Math.min((int) Math.floor(slack + 0.001f), gaps.length * MAX_GAP_STRETCH_PX);
+        // Word opens only a handful of seams per line, by up to 2.3 pt (~3 px) each. That shape was
+        // tried and reads wrong on the phone: three pixels at one seam is three device pixels of hole
+        // in the middle of a Chinese sentence. One pixel per seam is invisible and is the nearest the
+        // platform can get to Word's 0.767 pt step, but it restates the most characters and every
+        // restated character is another chance for a break to move. Two pixels reads as flush and
+        // leaves the ragged-line count on the reference document at half what one pixel leaves.
+        int seams = Math.max(1, (int) Math.ceil(total / (float) MAX_GAP_STRETCH_STEP_PX));
+        if (seams > gaps.length) seams = gaps.length;
+        int widened = 0;
+        for (int j = 0; j < seams && total > 0; j++) {
+            // Bresenham-style over the chosen seams, which sit centred and evenly across the line.
+            int slot = (int) (((long) (2 * j + 1) * gaps.length) / (2L * seams));
+            int before = (int) ((long) j * total / seams);
+            int after = (int) ((long) (j + 1) * total / seams);
+            if (after > before) {
+                // Hand the range over in full. Two ReplacementSpans on one range leaves the platform
+                // free to size it with the other one, and the widening would silently not happen.
+                int at = gaps[slot][0];
+                for (AutoGap gap : copy.getSpans(at, at + 1, AutoGap.class)) copy.removeSpan(gap);
+                copy.setSpan(new WidenGap(gaps[slot][1], after - before), at, at + 1,
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                widened++;
+            }
+        }
+        return widened;
+    }
+
+    /** The lowest laid-out line that still holds justification slack, or -1 when none does. */
+    private static int lastLooseLine(SpannableStringBuilder copy, StaticLayout laidOut) {
+        for (int line = laidOut.getLineCount() - 1; line >= 0; line--) {
+            int start = laidOut.getLineStart(line), end = laidOut.getLineEnd(line);
+            if (end > start && copy.getSpans(start, end, WidenGap.class).length > 0) return line;
+        }
+        return -1;
+    }
+
+    /** True when a replaced range that is not the CJK/Latin auto-space owns this character. */
+    private static boolean ownsReplacedRange(Spannable text, int offset) {
+        for (ReplacementSpan owner : text.getSpans(offset, offset + 1, ReplacementSpan.class))
+            if (!(owner instanceof AutoGap)) return true;
+        return false;
+    }
+
+    /** The line whose slack has to come back out, or -1 when every break and edge survived. */
+    private static int lineToClear(StaticLayout laidOut, StaticLayout spread, int lines, int width) {
+        if (spread.getLineCount() != lines) return lines - 2;
+        for (int line = 0; line < lines; line++) {
+            // A break moved: the widening on the line ABOVE it pushed a character over.
+            if (spread.getLineStart(line) != laidOut.getLineStart(line)) return Math.max(0, line - 1);
+            if (spread.getLineWidth(line) > width - spread.getLineLeft(line) + 0.5f) return line;
+        }
+        return -1;
+    }
+
+    /**
+     * Takes one whole pixel of slack out of one line -- the line whose break just moved is over the
+     * limit by less than a character, so a pixel is enough. False when that line holds no slack
+     * left to give, which means something else moved the break and the paragraph is left alone.
+     */
+    private static boolean shrinkLine(SpannableStringBuilder copy, StaticLayout laidOut, int line) {
+        if (line < 0 || line >= laidOut.getLineCount()) return false;
+        int start = laidOut.getLineStart(line), end = laidOut.getLineEnd(line);
+        WidenGap widest = null;
+        int at = -1, extra = 0;
+        for (WidenGap gap : copy.getSpans(start, end, WidenGap.class)) {
+            int from = copy.getSpanStart(gap);
+            if (from < start || copy.getSpanEnd(gap) > end || gap.extraPx <= extra) continue;
+            widest = gap; at = from; extra = gap.extraPx;
+        }
+        if (widest == null) return false;
+        copy.removeSpan(widest);
+        if (extra > 1) copy.setSpan(new WidenGap(widest.basePx, extra - 1), at, at + 1,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return true;
+    }
+
+    /**
+     * The gaps that may open, each with the whole-pixel advance the widened character has to
+     * restate. Word opens a seam when either side is East Asian; a seam inside a Latin word stays
+     * closed. Word stretches the automatic CJK/Latin gap as well, so a character carrying only that
+     * gap stays a candidate; any other ReplacementSpan takes the character out, since it sizes and
+     * draws the range itself, and so does a decoration, which would lose its underline or get its
+     * highlight slit. The advance comes from
+     * the laid-out line rather than from a fresh measureText: only restating the SAME number keeps
+     * the break where it was, and a shaped run is not always the sum of its per-character measures.
+     */
+    private static int[][] gapOffsets(Spannable text, StaticLayout laidOut, int line,
+                                      int start, int end) {
+        java.util.ArrayList<int[]> gaps = new java.util.ArrayList<>();
+        for (int i = start; i < end - 1; i++) {
+            char left = text.charAt(i), right = text.charAt(i + 1);
+            if (!isCjk(left) && !isCjk(right)) continue;
+            if (ownsReplacedRange(text, i)) continue;
+            if (text.getSpans(i, i + 1, android.text.style.UnderlineSpan.class).length > 0) continue;
+            if (text.getSpans(i, i + 1, android.text.style.StrikethroughSpan.class).length > 0) continue;
+            if (text.getSpans(i, i + 1, android.text.style.BackgroundColorSpan.class).length > 0) continue;
+            if (laidOut.getLineForOffset(i + 1) != line) continue;
+            float from = laidOut.getPrimaryHorizontal(i), next = laidOut.getPrimaryHorizontal(i + 1);
+            float raw = next - from;
+            float advance = (float) Math.round(raw);
+            if (raw <= 0f || Math.abs(raw - advance) > 0.01f) continue;
+            gaps.add(new int[]{i, (int) advance});
+        }
+        return gaps.toArray(new int[gaps.size()][]);
+    }
+
+    /** Any Han / CJK punctuation / fullwidth form, i.e. text Word justifies between characters. */
+    static boolean hasEastAsian(CharSequence text) {
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c >= 0x2E80 && c <= 0x9FFF) return true;   // CJK radicals .. Han
+            if (c >= 0xF900 && c <= 0xFAFF) return true;   // compatibility ideographs
+            if (c >= 0xFE30 && c <= 0xFE4F) return true;   // CJK compatibility forms
+            if (c >= 0xFF00 && c <= 0xFF60) return true;   // fullwidth forms
+            if (c >= 0x20000) return true;                 // supplementary planes (surrogates)
+        }
+        return false;
+    }
+
+    /**
+     * Laid-out width of [from, to) honouring the spans that really shape it: run fonts and sizes
+     * through MetricAffectingSpan, and replaced ranges (auto-space gaps, hanging punctuation)
+     * through their own reported size. paint.measureText on the fallback paint would miss both.
+     */
+    private static float spannedWidth(CharSequence text, TextPaint base, int from, int to) {
+        if (from >= to) return 0f;
+        if (!(text instanceof Spanned)) return base.measureText(text, from, to);
+        Spanned spanned = (Spanned) text;
+        TextPaint paint = new TextPaint(base);
+        float total = 0f;
+        int i = from;
+        while (i < to) {
+            ReplacementSpan replacement = null;
+            int replacementEnd = i + 1;
+            for (ReplacementSpan span : spanned.getSpans(i, i + 1, ReplacementSpan.class)) {
+                int start = spanned.getSpanStart(span), end = spanned.getSpanEnd(span);
+                if (start <= i && end > i) {
+                    replacement = span;
+                    replacementEnd = Math.min(to, end);
+                    break;
+                }
+            }
+            if (replacement != null) {
+                paint.set(base);
+                total += replacement.getSize(paint, text, i, replacementEnd, null);
+                i = replacementEnd;
+                continue;
+            }
+            paint.set(base);
+            for (MetricAffectingSpan span : spanned.getSpans(i, i + 1, MetricAffectingSpan.class))
+                span.updateMeasureState(paint);
+            total += paint.measureText(text, i, i + 1);
+            i++;
+        }
+        return total;
     }
 
     private static float ceilInk(float advance, float fraction) {
@@ -335,9 +554,14 @@ public final class DocxTextLayout {
             float pt = half / 2f;
             String ea = run.style.eastAsiaFontFamily != null ? run.style.eastAsiaFontFamily : baseEA;
             String latin = run.style.asciiFontFamily != null ? run.style.asciiFontFamily : baseLatin;
-            float eaRatio = ea != null ? metricsFor(ea).lineHeightRatio : 1.0f;
-            float latinRatio = latin != null ? metricsFor(latin).lineHeightRatio : 1.0f;
-            float runH = pt * Math.max(eaRatio, latinRatio);
+            FontScriptMetrics mEA = ea != null ? metricsFor(ea) : FontScriptMetrics.DEFAULT;
+            FontScriptMetrics mLatin = latin != null ? metricsFor(latin) : FontScriptMetrics.DEFAULT;
+            float runH = pt * Math.max(mEA.lineHeightRatio, mLatin.lineHeightRatio);
+            if (run.style.superscript || run.style.subscript)
+                // A script run is typeset at its OS/2 script size, so an 8 pt
+                // reference inside 12 pt text cannot lift the paragraph box.
+                runH *= ScriptGeometry.of(run.style.superscript,
+                        mLatin.lineHeightRatio >= mEA.lineHeightRatio ? mLatin : mEA).scale;
             if (runH > maxH) maxH = runH;
         }
         if (maxH <= 0) {
@@ -374,6 +598,11 @@ public final class DocxTextLayout {
             FontScriptMetrics mEA = ea != null ? metricsFor(ea) : FontScriptMetrics.DEFAULT;
             FontScriptMetrics mLatin = latin != null ? metricsFor(latin) : FontScriptMetrics.DEFAULT;
             float hEA = pt * mEA.lineHeightRatio, hLatin = pt * mLatin.lineHeightRatio;
+            if (run.style.superscript || run.style.subscript) {
+                float scriptScale = ScriptGeometry.of(run.style.superscript,
+                        hLatin >= hEA ? mLatin : mEA).scale;
+                hEA *= scriptScale; hLatin *= scriptScale;
+            }
             float h = Math.max(hEA, hLatin);
             if (h > maxH) {
                 maxH = h;
@@ -558,6 +787,8 @@ public final class DocxTextLayout {
     public static final class PointSizeSpan extends AbsoluteSizeSpan {
         public final int halfPoints;
         private final float pixels;
+        /** Run size in document pixels, not the scaled-pixel value the base keeps. */
+        public float pixels() { return pixels; }
         public PointSizeSpan(int halfPoints) { this(halfPoints, PageGeometry.points(1)); }
         public PointSizeSpan(int halfPoints, float pxPerPoint) {
             super(Math.max(1, Math.round(halfPoints / 2f * pxPerPoint)));
@@ -571,6 +802,7 @@ public final class DocxTextLayout {
     public static final class PositionSpan extends ReplacementSpan {
         public final int halfPoints;
         private final float shiftPx;
+        public float shiftPx() { return shiftPx; }
         public PositionSpan(int halfPoints, float pxPerPoint) {
             this.halfPoints = halfPoints;
             this.shiftPx = halfPoints / 2f * pxPerPoint;
@@ -609,6 +841,9 @@ public final class DocxTextLayout {
         public boolean isSubscript() { return !superscript; }
         public boolean isUnicode() { return unicode; }
         public int baseHalfPoints() { return baseHalfPoints; }
+        public String family() { return family; }
+        /** Base run size in document pixels; the script box is measured from it. */
+        public float baseSizePx() { return baseHalfPoints / 2f * pxPerPoint; }
         public float renderedSize(Paint paint) {
             return paint.getTextSize() * metricsFor(family).scale(superscript);
         }
@@ -629,12 +864,12 @@ public final class DocxTextLayout {
                 return (int) Math.ceil(paint.measureText(text, start, end));
             }
             Paint copy = new Paint(paint);
-            // Word changes the glyph size and baseline for w:vertAlign, but keeps
-            // the run's original advance for line breaking. Measuring with the
-            // base paint here while draw() uses the reduced paint prevents a
-            // superscript citation from pulling the following CJK glyph left.
-            copy.setTextSize(paint.getTextSize());
-            return (int) Math.ceil(copy.measureText(value(text, start, end)));
+            // Word scales the run to the OS/2 script size and breaks the line on
+            // the scaled advance, so a superscript citation costs only its small
+            // glyph width. Charging the base size here wrapped lines one
+            // character early and moved whole paragraphs to the next page.
+            copy.setTextSize(renderedSize(paint));
+            return Math.max(1, (int) Math.ceil(copy.measureText(value(text, start, end))));
         }
         @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
                                    float x, int top, int y, int bottom, Paint paint) {
@@ -830,6 +1065,8 @@ public final class DocxTextLayout {
         private final int lineGridPitchTwips;
         private boolean computed;
         private int desiredHeight;
+        private int gridPitchPx;
+        private boolean clipScripts;
 
         Spacing(DocxDocument.ParagraphFormat f, float coordinateScale,
                 float singleLineHeightPt, float ascentFrac, int lineGridPitchTwips) {
@@ -867,8 +1104,12 @@ public final class DocxTextLayout {
                 // document-coordinate pixel after the grid conversion; the
                 // fractional remainder is carried by A4Paginator below.
                 if (f.snapToGrid && !tocLeaderGrid) gridHeight += 1;
+                gridPitchPx = gridHeight;
                 if (desiredHeight < gridHeight) desiredHeight = gridHeight;
             }
+            // Word clips raised text under exact line spacing and grows the line
+            // for it under auto, multiple and at-least spacing.
+            clipScripts = "exact".equalsIgnoreCase(rule);
             computed = true;
         }
 
@@ -876,11 +1117,58 @@ public final class DocxTextLayout {
                                            int spanstartv, int v, Paint.FontMetricsInt fm) {
             // Distribute line box: baseline at ascentFraction from top
             int ascent = Math.max(1, Math.round(desiredHeight * ascentFraction));
-            fm.ascent = -ascent;
-            fm.descent = desiredHeight - ascent;
+            int[] need = scriptSpace(text, start, end);
+            int[] box = ScriptGeometry.lineBox(ascent, Math.max(0, desiredHeight - ascent),
+                    need[0], need[1], gridPitchPx, clipScripts);
+            fm.ascent = -box[0];
+            fm.descent = box[1];
             fm.top = fm.ascent;
             fm.bottom = fm.descent;
         }
+    }
+
+    /**
+     * Line-box demand of the raised and lowered runs on one line, in document
+     * pixels. Zero keeps the paragraph's own box, so plain text never grows.
+     */
+    private static int[] scriptSpace(CharSequence text, int start, int end) {
+        int ascent = 0, descent = 0;
+        if (!(text instanceof Spanned) || end <= start) return new int[]{0, 0};
+        Spanned spanned = (Spanned) text;
+        for (WordScriptSpan span : spanned.getSpans(start, end, WordScriptSpan.class)) {
+            // Unicode super/subscript glyphs carry their own height and are drawn
+            // full size, so the ordinary line box already contains them.
+            if (span.isUnicode()) continue;
+            float base = span.baseSizePx();
+            ScriptGeometry g = ScriptGeometry.of(span.isSuperscript(), metricsFor(span.family()));
+            ascent = Math.max(ascent, Math.round(g.ascentPx(base)));
+            descent = Math.max(descent, Math.round(g.descentPx(base)));
+        }
+        for (PositionSpan span : spanned.getSpans(start, end, PositionSpan.class)) {
+            int at = spanned.getSpanStart(span);
+            float base = runSizePx(spanned, at, 0f);
+            if (base <= 0f) continue;
+            ScriptGeometry g = ScriptGeometry.raised(span.shiftPx() / base, metricsFor(familyAt(spanned, at)));
+            ascent = Math.max(ascent, Math.round(g.ascentPx(base)));
+            descent = Math.max(descent, Math.round(g.descentPx(base)));
+        }
+        return new int[]{ascent, descent};
+    }
+
+    private static float runSizePx(Spanned text, int offset, float fallback) {
+        if (offset < 0 || offset >= text.length()) return fallback;
+        for (PointSizeSpan size : text.getSpans(offset, offset + 1, PointSizeSpan.class))
+            return size.pixels();
+        return fallback;
+    }
+
+    private static String familyAt(Spanned text, int offset) {
+        if (offset < 0 || offset >= text.length()) return "Times New Roman";
+        for (MeasuredFontSpan span : text.getSpans(offset, offset + 1, MeasuredFontSpan.class))
+            return span.family();
+        for (FontSpan span : text.getSpans(offset, offset + 1, FontSpan.class))
+            if (span.getFamily() != null && span.getFamily().length() > 0) return span.getFamily();
+        return "Times New Roman";
     }
 
     /**
@@ -929,6 +1217,27 @@ public final class DocxTextLayout {
         return 0;
     }
 
+    /** A share of a justified line's slack, added after the spanned character. */
+    /** A character holding its laid-out advance plus the whole pixels of justification slack. */
+    /** Ceiling on how far one seam may open, in whole pixels. */
+    private static final int MAX_GAP_STRETCH_PX = 6;
+    /** How far one seam may go before the line opens another one: two pixels still reads as flush. */
+    private static final int MAX_GAP_STRETCH_STEP_PX = 2;
+
+    private static final class WidenGap extends ReplacementSpan {
+        private final int basePx;
+        private final int extraPx;
+        WidenGap(int basePx, int extraPx) { this.basePx = basePx; this.extraPx = extraPx; }
+        @Override public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
+            if (fm != null) paint.getFontMetricsInt(fm);
+            return basePx + extraPx;
+        }
+        @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
+                                   float x, int top, int y, int bottom, Paint paint) {
+            canvas.drawText(text, start, end, x, y, paint);
+        }
+    }
+
     /** Adds one quarter of the current East Asian em after the spanned character. */
     private static final class AutoGap extends ReplacementSpan {
         @Override public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
@@ -963,9 +1272,15 @@ public final class DocxTextLayout {
      * Word TOC leader: a right-aligned tab fills the gap with dots and pins
      * the page number to the declared tab stop.
      */
+    /**
+     * Word TOC leader: a right-aligned tab fills the gap with dots and pins the page number so
+     * that it ENDS on the declared stop. Reserving only the heading leaves the number starting at
+     * the stop and hanging past it, which is what Word does not do.
+     */
     private static final class LeaderTab extends ReplacementSpan {
         private final int stopPx;
         private final char leader;
+        private float gap = 1f;   // laid-out dot run, from the heading end to the number start
         LeaderTab(int stopTwips, String leaderName, float indentPx) {
             stopPx = Math.max(1, Math.round(PageGeometry.twips(stopTwips) - indentPx));
             leader = "dot".equalsIgnoreCase(leaderName) ? '.'
@@ -975,15 +1290,18 @@ public final class DocxTextLayout {
         }
         @Override public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
             if (fm != null) paint.getFontMetricsInt(fm);
-            float before = start == 0 ? 0 : paint.measureText(text, 0, start);
-            return Math.max(1, Math.round(stopPx - before));
+            float heading = spannedWidth(text, (TextPaint) paint, 0, start);
+            // Everything after the tab is the page number: a right tab right-aligns it on the stop.
+            float number = spannedWidth(text, (TextPaint) paint, end, text.length());
+            gap = Math.max(1f, stopPx - heading - number);
+            return Math.round(gap);
         }
         @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
                                    float x, int top, int y, int bottom, Paint paint) {
             if (leader == ' ') return;
             float width = paint.measureText(String.valueOf(leader));
             if (width < 0.5f) return;
-            float limit = stopPx;
+            float limit = x + gap;
             for (float cursor = x; cursor + width <= limit; cursor += width)
                 canvas.drawText(String.valueOf(leader), cursor, y, paint);
         }

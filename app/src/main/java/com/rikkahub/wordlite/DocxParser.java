@@ -504,10 +504,66 @@ public final class DocxParser {
         DocxDocument.TableBlock table = new DocxDocument.TableBlock();
         table.index = nextBlockIndex++;
         output.tableCount++;
+        Element tableProperties = directChild(tableElement, "tblPr");
+        if (tableProperties != null) {
+            Element tableWidth = directChild(tableProperties, "tblW");
+            if (tableWidth != null) {
+                table.widthTwips = intValue(attr(tableWidth, "w"), 0);
+                if (attr(tableWidth, "type").length() > 0) table.widthType = attr(tableWidth, "type");
+            }
+            table.indentTwips = twipsAttribute(directChild(tableProperties, "tblInd"), 0);
+            Element layout = directChild(tableProperties, "tblLayout");
+            table.fixedLayout = layout != null && "fixed".equals(attr(layout, "type"));
+            Element alignment = directChild(tableProperties, "jc");
+            if (attr(alignment, "val").length() > 0) table.alignment = attr(alignment, "val");
+            Element tableMargins = directChild(tableProperties, "tblCellMar");
+            if (tableMargins != null) {
+                table.cellMarginTopTwips = twipsAttribute(directChild(tableMargins, "top"), table.cellMarginTopTwips);
+                table.cellMarginLeftTwips = twipsAttribute(directChild(tableMargins, "left"), table.cellMarginLeftTwips);
+                table.cellMarginBottomTwips = twipsAttribute(directChild(tableMargins, "bottom"), table.cellMarginBottomTwips);
+                table.cellMarginRightTwips = twipsAttribute(directChild(tableMargins, "right"), table.cellMarginRightTwips);
+            }
+        }
+        for (Element grid : directChildren(tableElement, "tblGrid"))
+            for (Element column : directChildren(grid, "gridCol"))
+                table.gridColumns.add(Integer.valueOf(intValue(attr(column, "w"), 0)));
         for (Element rowElement : directChildren(tableElement, "tr")) {
+            DocxDocument.RowFormat format = new DocxDocument.RowFormat();
+            Element rowProperties = directChild(rowElement, "trPr");
+            if (rowProperties != null) {
+                format.cantSplit = directChild(rowProperties, "cantSplit") != null;
+                format.repeatAsHeader = directChild(rowProperties, "tblHeader") != null;
+                Element height = directChild(rowProperties, "trHeight");
+                if (height != null) {
+                    format.heightTwips = intValue(attr(height, "val"), 0);
+                    if (attr(height, "hRule").length() > 0) format.heightRule = attr(height, "hRule");
+                }
+            }
+            table.rowFormats.add(format);
             ArrayList<DocxDocument.Cell> row = new ArrayList<DocxDocument.Cell>();
             for (Element cellElement : directChildren(rowElement, "tc")) {
                 DocxDocument.Cell cell = new DocxDocument.Cell();
+                Element cellProperties = directChild(cellElement, "tcPr");
+                if (cellProperties != null) {
+                    Element cellWidth = directChild(cellProperties, "tcW");
+                    if (cellWidth != null) {
+                        cell.widthTwips = intValue(attr(cellWidth, "w"), 0);
+                        if (attr(cellWidth, "type").length() > 0) cell.widthType = attr(cellWidth, "type");
+                    }
+                    cell.gridSpan = Math.max(1,
+                            intValue(attr(directChild(cellProperties, "gridSpan"), "val"), 1));
+                    Element merge = directChild(cellProperties, "vMerge");
+                    cell.mergeContinues = merge != null && !"restart".equals(attr(merge, "val"));
+                    Element vertical = directChild(cellProperties, "vAlign");
+                    if (attr(vertical, "val").length() > 0) cell.verticalAlign = attr(vertical, "val");
+                    Element cellMargins = directChild(cellProperties, "tcMar");
+                    if (cellMargins != null) {
+                        cell.marginTopTwips = twipsAttribute(directChild(cellMargins, "top"), -1);
+                        cell.marginLeftTwips = twipsAttribute(directChild(cellMargins, "left"), -1);
+                        cell.marginBottomTwips = twipsAttribute(directChild(cellMargins, "bottom"), -1);
+                        cell.marginRightTwips = twipsAttribute(directChild(cellMargins, "right"), -1);
+                    }
+                }
                 for (Element child : childElements(cellElement)) {
                     if ("p".equals(localName(child))) {
                         cell.paragraphs.add(parseParagraph(child));
@@ -1107,6 +1163,18 @@ public final class DocxParser {
         if (value == null || value.length() == 0) value = element.getAttribute("r:" + local);
         if (value == null) return "";
         return value;
+    }
+
+    /** A w:w attribute in twips. Word only writes dxa for table indents and cell margins. */
+    private static int twipsAttribute(Element element, int fallback) {
+        if (element == null) return fallback;
+        String value = attr(element, "w");
+        if (value.length() == 0) return fallback;
+        try {
+            return (int) Math.round(Double.parseDouble(value.trim()));
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
     }
 
     private static ArrayList<Element> childElements(Element parent) {

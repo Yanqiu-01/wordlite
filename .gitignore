@@ -9,3 +9,5 @@ releases/
 tools/debug.keystore
 
 .gradle/
+*.apk.1
+base.apk*

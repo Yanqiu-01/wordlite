@@ -16,7 +16,7 @@ import static org.junit.Assert.*;
 
 /** Only invoke explicitly on a native-capable host; never use legacy empty PDF as evidence. */
 @RunWith(RobolectricTestRunner.class)
-@Config(manifest = Config.NONE, sdk = 35)
+@Config(manifest = Config.NONE, sdk = 28)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @ConscryptMode(ConscryptMode.Mode.OFF)
 public class PdfNativeTest {

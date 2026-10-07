@@ -12,7 +12,8 @@ if [ ! -d "$ROOT/artifacts/build/classes" ]; then
 fi
 mkdir -p "$OUT/classes" "$OUT/roundtrip" "$OUT/original" "$REPORT"
 javac -encoding UTF-8 -classpath "$CLASSPATH" -d "$OUT/classes" \
-  tests/Regression.java tests/OriginalDocxRegression.java tests/FontAssetsRegression.java
+  tests/Regression.java tests/OriginalDocxRegression.java tests/TableGeometryRegression.java \
+  tests/FontAssetsRegression.java
 CLASSPATH="$OUT/classes:$CLASSPATH"
 java -classpath "$CLASSPATH" com.rikkahub.wordlite.Regression \
   "$ROOT/tests/fixture.docx" "$OUT/roundtrip" > "$REPORT/regression.log"
@@ -24,6 +25,9 @@ if [ -f "$REAL_DOCX" ]; then
   java -classpath "$CLASSPATH" com.rikkahub.wordlite.OriginalDocxRegression \
     "$REAL_DOCX" "$OUT/original/roundtrip.docx" > "$REPORT/original-docx.log"
   tail -1 "$REPORT/original-docx.log"
+  java -classpath "$CLASSPATH" com.rikkahub.wordlite.TableGeometryRegression \
+    "$REAL_DOCX" "$OUT/original/table-geometry.docx" "$ROOT/tests/fixture.docx" > "$REPORT/table-geometry.log"
+  tail -1 "$REPORT/table-geometry.log"
 else
   echo "SKIP real-document test: $REAL_DOCX not found" >&2
 fi

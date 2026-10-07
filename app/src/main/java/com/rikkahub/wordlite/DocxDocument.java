@@ -89,10 +89,50 @@ public final class DocxDocument {
     public static final class TableBlock extends Block {
         public final ArrayList<ArrayList<Cell>> rows = new ArrayList<ArrayList<Cell>>();
         public int columns;
+        /** w:tblGrid/w:gridCol/@w:w in twips; empty when the document omits the grid. */
+        public final ArrayList<Integer> gridColumns = new ArrayList<Integer>();
+        /** w:tblW: @w:w plus @w:type (auto / dxa / pct). */
+        public int widthTwips;
+        public String widthType = "auto";
+        /** w:tblInd, in twips. */
+        public int indentTwips;
+        /** w:tblLayout type="fixed" keeps the declared widths instead of fitting contents. */
+        public boolean fixedLayout;
+        /** w:tblCellMar defaults; Word ships 108 twips of left/right padding. */
+        public int cellMarginTopTwips;
+        public int cellMarginLeftTwips = 108;
+        public int cellMarginBottomTwips;
+        public int cellMarginRightTwips = 108;
+        /** w:jc on the table itself: left / center / right. */
+        public String alignment = "left";
+        public final ArrayList<RowFormat> rowFormats = new ArrayList<RowFormat>();
+    }
+
+    /** The w:trPr facts that a plain row of cells cannot carry. */
+    public static final class RowFormat {
+        /** w:trHeight/@w:val in twips, 0 when unset. */
+        public int heightTwips;
+        /** w:trHeight/@w:hRule: atLeast (default) / exact / auto. */
+        public String heightRule = "atLeast";
+        /** w:cantSplit: the row must never break across pages. */
+        public boolean cantSplit;
+        /** w:tblHeader: Word repeats this row at the top of every page the table continues on. */
+        public boolean repeatAsHeader;
     }
 
     public static final class Cell {
         public final ArrayList<ParagraphBlock> paragraphs = new ArrayList<ParagraphBlock>();
+        /** w:tcW: @w:w plus @w:type. */
+        public int widthTwips;
+        public String widthType = "auto";
+        /** w:gridSpan: how many w:tblGrid columns this cell covers. */
+        public int gridSpan = 1;
+        /** w:vMerge without @w:val="restart" continues the cell above, so it holds no content. */
+        public boolean mergeContinues;
+        /** w:vAlign: top (default) / center / bottom. */
+        public String verticalAlign;
+        /** w:tcMar in twips, -1 inherits the table default. */
+        public int marginTopTwips = -1, marginLeftTwips = -1, marginBottomTwips = -1, marginRightTwips = -1;
     }
 
     public static final class Run {

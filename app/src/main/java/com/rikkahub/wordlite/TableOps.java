@@ -87,6 +87,14 @@ public final class TableOps {
 
     private static DocxDocument.Cell copyCell(DocxDocument document, DocxDocument.Cell source) {
         DocxDocument.Cell cell = new DocxDocument.Cell();
+        cell.widthTwips = source.widthTwips;
+        cell.widthType = source.widthType;
+        cell.gridSpan = source.gridSpan;
+        cell.verticalAlign = source.verticalAlign;
+        cell.marginTopTwips = source.marginTopTwips;
+        cell.marginLeftTwips = source.marginLeftTwips;
+        cell.marginBottomTwips = source.marginBottomTwips;
+        cell.marginRightTwips = source.marginRightTwips;
         for (DocxDocument.ParagraphBlock p : source.paragraphs)
             cell.paragraphs.add(copyParagraph(document, p));
         if (cell.paragraphs.isEmpty()) cell.paragraphs.add(emptyParagraph(document));
@@ -99,8 +107,19 @@ public final class TableOps {
         int at = Math.max(0, Math.min(row, table.rows.size() - 1));
         ArrayList<DocxDocument.Cell> cells = new ArrayList<DocxDocument.Cell>();
         for (DocxDocument.Cell cell : table.rows.get(at)) cells.add(copyCell(document, cell));
-        table.rows.add(before ? at : Math.min(at + 1, table.rows.size()), cells);
+        int insertedAt = before ? at : Math.min(at + 1, table.rows.size());
+        table.rows.add(insertedAt, cells);
         table.columns = Math.max(table.columns, cells.size());
+        // A new row inherits its neighbour's w:trPr, the same way Word extends a table.
+        if (!table.rowFormats.isEmpty()) {
+            DocxDocument.RowFormat source = table.rowFormats.get(Math.min(at, table.rowFormats.size() - 1));
+            DocxDocument.RowFormat copy = new DocxDocument.RowFormat();
+            copy.heightTwips = source.heightTwips;
+            copy.heightRule = source.heightRule;
+            copy.cantSplit = source.cantSplit;
+            copy.repeatAsHeader = source.repeatAsHeader;
+            table.rowFormats.add(Math.min(insertedAt, table.rowFormats.size()), copy);
+        }
         return true;
     }
 
@@ -110,6 +129,7 @@ public final class TableOps {
         for (DocxDocument.Cell cell : table.rows.get(at))
             for (DocxDocument.ParagraphBlock p : cell.paragraphs) document.paragraphs.remove(p);
         table.rows.remove(at);
+        if (at < table.rowFormats.size()) table.rowFormats.remove(at);
         return true;
     }
 
@@ -125,6 +145,13 @@ public final class TableOps {
         }
         for (ArrayList<DocxDocument.Cell> row : table.rows)
             table.columns = Math.max(table.columns, row.size());
+        // w:tblGrid is what fixes the column widths, so the new column needs a grid entry too.
+        if (!table.gridColumns.isEmpty()) {
+            int at = Math.max(0, Math.min(col, table.gridColumns.size() - 1));
+            int insertAt = before ? at : Math.min(at + 1, table.gridColumns.size());
+            table.gridColumns.add(insertAt,
+                    Integer.valueOf(table.gridColumns.get(Math.min(at, table.gridColumns.size() - 1)).intValue()));
+        }
         return added;
     }
 
@@ -140,6 +167,8 @@ public final class TableOps {
         }
         table.columns = 1;
         for (ArrayList<DocxDocument.Cell> row : table.rows) table.columns = Math.max(table.columns, row.size());
+        if (table.gridColumns.size() > 1)
+            table.gridColumns.remove(Math.max(0, Math.min(col, table.gridColumns.size() - 1)));
         return true;
     }
 }

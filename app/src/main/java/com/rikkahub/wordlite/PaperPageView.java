@@ -67,13 +67,28 @@ public final class PaperPageView extends View {
         drawHeader(canvas);
 
         canvas.save();
-        canvas.clipRect(geometry.left, geometry.top,
-                geometry.width - geometry.right, geometry.height - geometry.bottom);
+        // Clip the body band vertically and the physical page horizontally. Every fragment sets its
+        // own horizontal clip below, which is what lets a table wider than the text column keep
+        // spilling into the margins the way Word leaves it.
+        canvas.clipRect(0f, geometry.top, geometry.width, geometry.height - geometry.bottom);
         canvas.translate(geometry.left, geometry.top);
         for (A4Paginator.ParagraphLayout f : page.paragraphs) {
             canvas.save();
             canvas.translate(0, f.top);
-            canvas.clipRect(0, 0, geometry.contentWidth, f.height);
+            float clipLeft = 0f;
+            float clipRight = geometry.contentWidth;
+            if (f.row != null && f.row.cellLeft.length > 0) {
+                // Clipping such a row at the column would erase its outer border.
+                for (int i = 0; i < f.row.cellLeft.length; i++) {
+                    clipLeft = Math.min(clipLeft, f.row.cellLeft[i]);
+                    clipRight = Math.max(clipRight, f.row.cellLeft[i] + f.row.cellWidths[i]);
+                }
+                // A stroke straddles the row edge, so a clip exactly on that edge would halve its
+                // coverage and leave a pale line instead of the declared border.
+                clipLeft = Math.max(clipLeft - 1f, -geometry.left);
+                clipRight = Math.min(clipRight + 1f, geometry.width - geometry.left);
+            }
+            canvas.clipRect(clipLeft, 0, clipRight, f.height);
             if (f.text != null) {
                 canvas.translate(f.text.x, -f.text.layout.getLineTop(f.startLine));
                 drawParagraph(canvas, f.text);
@@ -99,9 +114,15 @@ public final class PaperPageView extends View {
                 paint.setColor(0xFF888888);
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(0.6f);
-                for (int i = 0; i < f.row.columns; i++)
-                    canvas.drawRect(i * f.row.cellWidth, 0,
-                            (i + 1) * f.row.cellWidth, f.height, paint);
+                if (f.row.cellLeft.length > 0) {
+                    for (int i = 0; i < f.row.cellLeft.length; i++)
+                        canvas.drawRect(f.row.cellLeft[i], 0,
+                                f.row.cellLeft[i] + f.row.cellWidths[i], f.height, paint);
+                } else {
+                    for (int i = 0; i < f.row.columns; i++)
+                        canvas.drawRect(i * f.row.cellWidth, 0,
+                                (i + 1) * f.row.cellWidth, f.height, paint);
+                }
                 paint.setStyle(Paint.Style.FILL);
                 for (A4Paginator.CellParagraph cp : f.row.paragraphs) {
                     canvas.save();
@@ -326,7 +347,9 @@ public final class PaperPageView extends View {
                 }
                 if (f.image != null) { listener.image(f.blockIndex, f.image); return true; }
                 if (f.row != null) for (A4Paginator.CellParagraph cp : f.row.paragraphs) {
-                    if (x < cp.x - 4 || x >= cp.x - 4 + f.row.cellWidth
+                    float cellLeft = cp.cellWidth > 0f ? cp.cellLeft : cp.x - 4;
+                    float cellWidth = cp.cellWidth > 0f ? cp.cellWidth : f.row.cellWidth;
+                    if (x < cellLeft || x >= cellLeft + cellWidth
                             || y - f.top < cp.y || y - f.top > cp.y + cp.text.layout.getHeight()) continue;
                     int line = cp.text.layout.getLineForVertical((int) (y - f.top - cp.y));
                     listener.edit(cp.text.source.index,

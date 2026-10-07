@@ -7,6 +7,9 @@ repositories {
     maven { url 'https://dl.google.com/dl/android/maven2/' }
 }
 
+// Windows javac defaults to the platform codepage; every Chinese literal in app/ and tests/ is UTF-8.
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+
 configurations {
     androidTestAars
 }
