@@ -36,9 +36,17 @@ public final class DuplicateEngine {
     static final String GAP_CANCELLED = "检索已取消，没有联网取候选文献";
     static final String GAP_NO_SOURCE = "没有可用的检索源，本次没有执行联网检索";
     static final String GAP_EMPTY_LIBRARY = "未启用联网检索，自建库为空，没有可比对的语料";
+    /** 「机器腔均分」那一栏的名字：它是一条 0-100 的分而不是占比，所以不许挂"比例"两个字。 */
+    public static final String AIGC_SCORE_LABEL = "机器腔均分";
+    private static final String AIGC_TIER_INSUFFICIENT = "样本不足";
+    private static final String AIGC_NOT_RUN = "本机 AIGC 分析未执行";
     public interface Progress { void step(String label, int done, int total); }
     public static final class Report {
+        /* 0.7.1 起这三个比率全部出自 ledger 那一次划分：分子分母同一把尺，自编率已减掉已判重复的字符，
+           三个互斥桶闭合 100%。字段名与语义对下游（CheckReport、ApiWorkflow、TextCorpus、SourceLedger）不动。 */
         public double overallRate, excludingCitationsRate, selfWrittenRate, aigcRate;
+        /** 这把尺子的原始账目：字符绝对量与闭合残差都在里面，报告里每个数都查得出处。 */
+        public CharLedger.Balance ledger;
         public int comparedChars, duplicateChars, citedDuplicateChars;
         /** 按论文结构排除在比对之外的字数（参考文献表、致谢、附录、目录）。 */
         public int excludedChars;
@@ -139,7 +147,7 @@ public final class DuplicateEngine {
                 if (report.aigc.excludedChars > 0)
                     note(report, "AIGC 分析跳过引用与结构性文本 " + report.aigc.excludedChars + " 字");
             }
-            rates(report, matched);
+            rates(report, matched, spans, structure.spanArray());
             step(progress, "汇总报告", 4, 4);
         } catch (RuntimeException error) {
             note(report, "检测中断：" + message(error));
@@ -171,15 +179,19 @@ public final class DuplicateEngine {
         report.retrievalReason = reason;
     }
 
-    private static void rates(Report report, TextCorpus.Report matched) {
+    /**
+     * 三个比率一律走 {@link CharLedger}（0.7.1）：分子分母同一把尺，自编率是"减掉已判重复字符之后剩下的"，
+     * 未标引用的重复 + 引用区间内的重复 + 自编三个桶闭合 100%。
+     *
+     * 旧写法有两处对不上：分母用的是 matched.comparedChars（只有切得出比对片段的句子才算数），自编率还从
+     * 100 里再减一次凭 sentence.score >= 0.5f 现场圈的 AIGC 句占比。0.5 这把尺检测侧不认（区间门槛是
+     * AigcDetector.SEGMENT_FLAG_GATE = 0.45），而且"抄来的"与"机器写的"是两条轴，同一批字可以两边都占，
+     * 放进一个减法里就是互相冲抵。现在机器腔单独记在 ledger.machineChars，谁也不减谁。
+     * 三个比率字段的名字与语义对下游不动，改的是算法；byEngine 仍是 TextCorpus 自己那本归属账。
+     */
+    private static void rates(Report report, TextCorpus.Report matched, int[] citationSpans, int[] structureSpans) {
         if (matched != null) {
             report.hits.addAll(matched.hits);
-            report.comparedChars = matched.comparedChars;
-            report.duplicateChars = matched.duplicateChars;
-            report.citedDuplicateChars = matched.citedDuplicateChars;
-            report.excludedChars = matched.excludedChars;
-            report.overallRate = clamp(matched.overallRate);
-            report.excludingCitationsRate = clamp(matched.excludingCitationsRate);
             for (Map.Entry<String, Double> entry : matched.byEngine.entrySet())
                 report.byEngine.put(entry.getKey(), clamp(entry.getValue() == null ? 0 : entry.getValue().doubleValue()));
         }
@@ -187,15 +199,72 @@ public final class DuplicateEngine {
             report.aigcRate = clamp(report.aigc.rate);
             report.aigcInsufficient = report.aigc.insufficientSample;
             report.aigcVerdict = report.aigc.verdict == null ? "" : report.aigc.verdict;
-            int flagged = 0;
-            for (AigcDetector.Sentence sentence : report.aigc.sentences)
-                if (sentence.score >= 0.5f) flagged += Math.max(0, sentence.end - sentence.start);
-            int base = report.comparedChars > 0 ? report.comparedChars : report.aigc.comparedChars;
-            double share = base > 0 ? flagged * 100d / base : report.aigcRate;
-            // 样本不足时那份倾向连自编率都不该拉动。
-            if (report.aigcInsufficient) share = 0d;
-            report.selfWrittenRate = clamp(100 - report.overallRate - clamp(share));
-        } else report.selfWrittenRate = clamp(100 - report.overallRate);
+        }
+        CharLedger.Balance balance = CharLedger.close(report.sourceText, structureSpans, citationSpans,
+                report.hits, report.aigc);
+        report.ledger = balance;
+        report.comparedChars = balance.totalChars;
+        report.duplicateChars = balance.duplicateChars;
+        report.citedDuplicateChars = balance.citedDuplicateChars;
+        report.excludedChars = balance.excludedChars;
+        report.overallRate = balance.overallRate;
+        report.excludingCitationsRate = balance.excludingCitationsRate;
+        report.selfWrittenRate = balance.selfWrittenRate;
+    }
+
+    /** AIGC 五档的人话名字。指标区与结果面板共用这一份，两处各起一名就一定漂移。 */
+    public static String aigcTierName(AigcDetector.Tier tier) {
+        if (tier == null) return AIGC_TIER_INSUFFICIENT;
+        switch (tier) {
+            case STRONG: return "成段";
+            case NEEDS_REVIEW: return "复核";
+            case WATCH: return "观察";
+            case NONE: return "一般";
+            default: return AIGC_TIER_INSUFFICIENT;
+        }
+    }
+
+    /** 那一格的全文字数：账本在就用账本。账本只在手工拼的报告里缺席，那种场合退到比对侧自己数的字数。 */
+    public static int trendTotalChars(Report report) {
+        if (report == null) return 0;
+        return report.ledger == null ? report.comparedChars : report.ledger.totalChars;
+    }
+
+    /** 那一格的可疑字数：账本按 CharLedger.FLAG_SCORE_GATE 重数过一遍，与全文同一个尺子。 */
+    public static int trendMachineChars(Report report) {
+        if (report == null) return 0;
+        if (report.ledger != null) return report.ledger.machineChars;
+        return report.aigc == null ? 0 : report.aigc.flaggedChars;
+    }
+
+    /** 样本不足、或者这一轮压根没跑 AIGC：都不许印出任何看起来像结论的数。 */
+    public static boolean aigcUnmeasured(Report report) {
+        if (report == null || report.aigc == null) return true;
+        return report.aigcInsufficient || report.aigc.insufficientSample;
+    }
+
+    /**
+     * "机器生成倾向"那一格：档位 + 可疑字数 + 全文字数，三个都是绝对量，一个百分号都没有。
+     * 0.7.0 之前这一格印的是字符加权句分、还挂"AIGC 生成比例"的名字，与同表的总相似度比撞名——
+     * 一份报告里不能有两个都叫比例的数，用户挑不出哪个是错的。
+     */
+    public static String aigcTrend(Report report) {
+        if (report == null || report.aigc == null) return AIGC_NOT_RUN;
+        if (aigcUnmeasured(report))
+            return AIGC_TIER_INSUFFICIENT + "（有效字符 " + report.aigc.comparedChars + " 字，门槛 "
+                    + AigcDetector.MIN_DOCUMENT_CHARS + " 字）";
+        return aigcTierName(report.aigc.tier) + "（可疑 " + trendMachineChars(report) + " 字 / 全文 "
+                + trendTotalChars(report) + " 字）";
+    }
+
+    /**
+     * 字符加权句分（Σ 句分 x 有效字符 / Σ 有效字符）留档但不冒充比例：值不带百分号、名字带"均分"、
+     * 同一格里写死"非占比"。样本不足时给空串，这一格宁可不画。
+     */
+    public static String aigcScoreLine(Report report) {
+        if (report == null || aigcUnmeasured(report)) return "";
+        return String.format(java.util.Locale.US, "%.1f", Double.valueOf(clamp(report.aigcRate)))
+                + "（字符加权句分，非占比）";
     }
     /** 两段成对区间接在一起，交给 mergeSpans 合并。 */
     static int[] concat(int[] first, int[] second) {

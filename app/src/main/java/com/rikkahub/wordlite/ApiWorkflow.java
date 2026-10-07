@@ -278,8 +278,11 @@ public final class ApiWorkflow {
         if (!selection.unchanged(document)) return;
         if (scanShowsDuplicates)
             for (TextCorpus.Hit hit : result.hits) addHighlight(selection, hit.start, hit.end, DUPLICATE_INK);
-        if (result.aigc != null) for (AigcDetector.Sentence sentence : result.aigc.sentences)
-            if (sentence.score >= 0.5f) addHighlight(selection, sentence.start, sentence.end, AIGC_INK);
+        /* 高亮涂的是可疑区间（0.7.1），不再是单句：实测真人论文里 0.45 档的高分句 100% 是孤立的
+           （≥2 连句的字符占比 0.0%），机写骨架稿同档 4.5% 且 5/70 段成片——涂句子会把人自己的
+           孤立长句涂一片，涂区间才是"这一片都一个腔"。门槛与指标区那一格同一个常量。 */
+        if (result.aigc != null) for (AigcDetector.Segment segment : result.aigc.segments)
+            if (segment.flagged) addHighlight(selection, segment.start, segment.end, AIGC_INK);
         host.changed();
     }
     private void addHighlight(TextSelection selection, int start, int end, int color) {
@@ -315,7 +318,12 @@ public final class ApiWorkflow {
                     ? "检索没有取回可比对的文献，相似度类指标无法成立" : result.retrievalReason, 13));
             box.addView(label("相似度类指标不成立，只有 AIGC 倾向是本机计算的结果。", 11));
         }
-        box.addView(label(String.format(Locale.CHINA, "AIGC 倾向 %.2f%%", result.aigcRate), 15));
+        /* 这一格与 HTML 报告同一份文案、同一把尺子（0.7.1）：档位 + 可疑字数 + 全文字数，没有百分号。
+           0.7.0 这里印的 "AIGC 倾向 17.50%" 是字符加权句分冒充比例，与上一行的总相似度比不是一把尺。 */
+        box.addView(label("机器生成倾向 " + DuplicateEngine.aigcTrend(result), 15));
+        String aigcScore = DuplicateEngine.aigcScoreLine(result);
+        if (!aigcScore.isEmpty())
+            box.addView(label(DuplicateEngine.AIGC_SCORE_LABEL + " " + aigcScore, 11));
         box.addView(label(result.detectedAt + "  ·  用时 " + (result.elapsedMillis / 1000L) + " 秒", 11));
         for (String note : result.notes) box.addView(label("提示：" + note, 11));
         if (scanShowsDuplicates) for (final TextCorpus.Hit hit : result.hits) {

@@ -863,7 +863,18 @@ public final class DetectRegression {
                         && report.excludingCitationsRate <= 100 && report.selfWrittenRate >= 0 && report.selfWrittenRate <= 100
                         && report.aigcRate >= 0 && report.aigcRate <= 100,
                 "all four rates stay inside 0..100");
-        check(report.selfWrittenRate + report.overallRate <= 100.0001, "self-written rate never double counts duplicated text");
+        /* 0.7.1 之后这不是"不超过 100"而是恰好等于 100：三个比率出自 CharLedger 同一次划分，
+           自编率已经把已判重复的字符整个减掉了，所以两个数在同一个分母上严丝合缝地对咬。 */
+        check(Math.abs(report.selfWrittenRate + report.overallRate - 100d) < 1e-9,
+                "self-written rate and overall rate close 100 on one denominator");
+        check(report.ledger != null && report.ledger.residual() == 0
+                        && report.ledger.uncitedDuplicateChars + report.ledger.citedDuplicateChars
+                        + report.ledger.selfWrittenChars == report.comparedChars,
+                "character-level closure: uncited duplicate + cited duplicate + self-written equals comparedChars");
+        check(report.excludingCitationsRate <= report.overallRate + 1e-9
+                        && Math.abs(report.overallRate - report.excludingCitationsRate
+                        - report.ledger.citedDuplicateRate) < 1e-9,
+                "总相似度比减去引用内那份重复就是去除引用重复比，三个数同一把尺");
         check(!report.retrievalIncomplete && report.retrievalReason == null,
                 "a loopback scan that took candidates is a complete run");
         check(!report.detectedAt.isEmpty() && report.elapsedMillis >= 0, "report stamps detection time and elapsed millis");
@@ -951,8 +962,16 @@ public final class DetectRegression {
         check(!html.contains("总相似度比 0.00") && !html.contains("<td>总相似度比</td>")
                         && !html.contains("<td>去除引用重复比</td>") && !html.contains("<td>自编率</td>"),
                 "the blackout report shows no numeric duplication rate anywhere");
-        check(html.contains("AIGC 生成比例") && html.contains("AIGC 倾向句"),
+        check(html.contains("机器生成倾向") && html.contains("AIGC 倾向句"),
                 "the blackout report still carries the locally computed AIGC block");
+        // 样本不足只说差多少字；这一格里不许有百分号，更不许有 0.00%。
+        String blackoutRow = metricRow(html, "机器生成倾向");
+        check(blackoutRow != null && blackoutRow.contains("样本不足（有效字符 ") && blackoutRow.contains("门槛 400 字")
+                        && !blackoutRow.contains("%") && !html.contains("AIGC 生成比例"),
+                "an insufficient sample prints tier plus a character deficit, never 0.00% and never a second 比例");
+        // 整份报告里"比例"只剩 AIGC 那句"不给生成比例"，指标区再也没有冒充比例的数。
+        check(occurrences(html, "比例") == 1 && html.contains("不给生成比例"),
+                "the only surviving use of the word 比例 is the sentence that refuses to give one");
         ArrayList<String> unknown = new ArrayList<String>();
         unknown.add("不存在的源");
         DuplicateEngine.Report unselected = DuplicateEngine.scan(selection, new TextCorpus(), true, unknown, limits,
@@ -972,13 +991,18 @@ public final class DetectRegression {
     private static void reports() {
         DuplicateEngine.Report report = new DuplicateEngine.Report();
         report.sourceText = "他说“重复率偏高”，随后重写了这一段正文。";
-        report.overallRate = 12.5;
-        report.excludingCitationsRate = 4.25;
-        report.selfWrittenRate = 70;
+        /* 指标区的数不再手填，全出自同一本账：全文 21 个有效字符，重复是 [3,8) 的 5 个字
+           （"重复率偏高"），其中引用区间 [6,9) 盖住 2 个字，机器腔区间 [10,18) 是 8 个字。
+           于是 总相似度比 = 5/21、去除引用重复比 = 3/21、引用内重复比 = 2/21、自编率 = 16/21。 */
+        report.ledger = CharLedger.closeSpans(report.sourceText, null, new int[]{6, 9},
+                new int[]{3, 8}, new int[]{10, 18});
+        report.comparedChars = report.ledger.totalChars;
+        report.duplicateChars = report.ledger.duplicateChars;
+        report.citedDuplicateChars = report.ledger.citedDuplicateChars;
+        report.overallRate = report.ledger.overallRate;
+        report.excludingCitationsRate = report.ledger.excludingCitationsRate;
+        report.selfWrittenRate = report.ledger.selfWrittenRate;
         report.aigcRate = 17.5;
-        report.comparedChars = 1000;
-        report.duplicateChars = 125;
-        report.citedDuplicateChars = 82;
         report.detectedAt = "2026-10-07T10:00:00Z";
         report.elapsedMillis = 12;
         report.byEngine.put("openalex", Double.valueOf(9.5));
@@ -1007,14 +1031,30 @@ public final class DetectRegression {
         report.aigc = new AigcDetector.Result();
         report.aigc.sentences.add(sentence);
         report.aigc.rate = 17.5f;
+        report.aigc.comparedChars = 1000;
+        report.aigc.tier = AigcDetector.Tier.WATCH;
         report.notes.add("已跳过 CORE：CORE 未配置 API Key");
         String html = CheckReport.html("报告<script>.docx", report);
         check(!html.contains("<script>"), "duplicate report escapes every script tag");
         check(html.contains("&lt;script&gt;") && html.contains("&quot;"), "tags and quotes inside foreign text are escaped");
-        check(html.contains("总相似度比") && html.contains("去除引用重复比") && html.contains("自编率") && html.contains("AIGC 生成比例"),
-                "report lists the three rates plus the AIGC share");
-        check(html.contains("12.50%") && html.contains("4.25%") && html.contains("70.00%") && html.contains("17.50%"),
-                "rates render as bounded percentages");
+        check(html.contains("总相似度比") && html.contains("去除引用重复比") && html.contains("自编率")
+                        && html.contains("机器生成倾向"),
+                "report lists the three rates plus the AIGC tier line");
+        // 手算：5/21 = 23.809523...%、3/21 = 14.285714...%、16/21 = 76.190476...%，四舍五入两位小数。
+        check(html.contains("23.81%") && html.contains("14.29%") && html.contains("76.19%"),
+                "rates render as percentages of one 21-character denominator: 5/21, 3/21, 16/21");
+        check(html.contains("参与比对 21 个有效字符") && html.contains("命中相似 5 个")
+                        && html.contains("落在引用区间内 2 个"),
+                "字数那一行说的就是账本里的 21、5、2，比率与绝对量不打架");
+        check(!html.contains("AIGC 生成比例") && occurrences(html, "比例") == 0,
+                "the finished report never calls anything a 比例 any more: the AIGC cell lost that name");
+        String trendRow = metricRow(html, "机器生成倾向");
+        check(trendRow != null && trendRow.contains("观察（可疑 8 字 / 全文 21 字）") && !trendRow.contains("%"),
+                "the AIGC cell states tier plus two absolute character counts, no percent sign at all");
+        String scoreRow = metricRow(html, DuplicateEngine.AIGC_SCORE_LABEL);
+        check(scoreRow != null && scoreRow.contains("17.5（字符加权句分，非占比）") && !scoreRow.contains("%"),
+                "the character-weighted sentence score survives under a name that does not fake a share");
+        check(!html.contains("17.50%"), "the weighted sentence score is no longer printed as a percentage");
         check(html.contains("PMID:12345678") && html.contains("2020") && html.contains("重复率偏高"),
                 "snippet row shows source title, year and locator");
         check(html.contains("模板句式命中") && html.contains("OpenAlex") && html.contains("已跳过 CORE"),
@@ -1037,9 +1077,13 @@ public final class DetectRegression {
     private static void unfinishedReport() {
         DuplicateEngine.Report report = new DuplicateEngine.Report();
         report.sourceText = "本文的结论建立在实验数据与既有报道之上。";
-        report.overallRate = 0;
-        report.excludingCitationsRate = 0;
-        report.selfWrittenRate = 99.65;
+        // 没有可比对的文献就没有任何重复可记：账本给出分母 20、分子 0、自编 20，三个比率仍然闭合。
+        report.ledger = CharLedger.closeSpans(report.sourceText, null, null, null, null);
+        report.comparedChars = report.ledger.totalChars;
+        report.duplicateChars = report.ledger.duplicateChars;
+        report.overallRate = report.ledger.overallRate;
+        report.excludingCitationsRate = report.ledger.excludingCitationsRate;
+        report.selfWrittenRate = report.ledger.selfWrittenRate;
         report.aigcRate = 10.71;
         report.retrievalIncomplete = true;
         report.retrievalReason = "5 个检索源本次全部不可用，联网检索没有取回可比对的候选文献";
@@ -1052,7 +1096,18 @@ public final class DetectRegression {
         sentence.features.add("书面连接词密集");
         report.aigc = new AigcDetector.Result();
         report.aigc.rate = 10.71f;
+        report.aigc.comparedChars = 420;
+        report.aigc.tier = AigcDetector.Tier.WATCH;
         report.aigc.sentences.add(sentence);
+        // 机器腔区间 [0,6) = "本文的结论"，6 个字；全文 20 个有效字符，两者同一把尺。
+        AigcDetector.Segment flagged = new AigcDetector.Segment();
+        flagged.start = 0;
+        flagged.end = 6;
+        flagged.score = AigcDetector.SEGMENT_FLAG_GATE;
+        flagged.flagged = true;
+        report.aigc.segments.add(flagged);
+        report.ledger = CharLedger.close(report.sourceText, null, null,
+                new ArrayList<TextCorpus.Hit>(), report.aigc);
         report.notes.add("联网检索没有取回可比对的候选文献");
         String html = CheckReport.html("thesis.docx", report);
         check(html.contains("未完成查重") && html.contains("5 个检索源本次全部不可用"),
@@ -1060,10 +1115,32 @@ public final class DetectRegression {
         check(!html.contains("总相似度比 0.00") && !html.contains("<td>总相似度比</td>")
                         && !html.contains("<td>去除引用重复比</td>") && !html.contains("<td>自编率</td>"),
                 "no duplication rate survives an unfinished run");
-        check(html.contains("AIGC 生成比例") && html.contains("10.71%"),
-                "the AIGC figure keeps its place in an unfinished report");
+        String trendRow = metricRow(html, "机器生成倾向");
+        // 手算：可疑 6 个字 / 全文 20 个有效字符；句分 10.71 打成"10.7"，一位小数。
+        check(trendRow != null && trendRow.contains("观察（可疑 6 字 / 全文 20 字）") && !trendRow.contains("%"),
+                "the AIGC figure keeps its place in an unfinished report as tier plus two character counts");
+        String scoreRow = metricRow(html, DuplicateEngine.AIGC_SCORE_LABEL);
+        check(scoreRow != null && scoreRow.contains("10.7（字符加权句分，非占比）") && !scoreRow.contains("%"),
+                "the weighted sentence score is labelled 均分 and carries no percent sign here either");
+        check(!html.contains("AIGC 生成比例") && occurrences(html, "比例") == 0,
+                "an unfinished report has no rate at all, so the word 比例 must not survive anywhere in it");
         check(html.contains("AIGC 倾向句") && html.contains("书面连接词密集") && html.contains("72.00%"),
                 "the per-sentence AIGC list renders as it does today");
         check(html.contains("联网检索没有取回可比对的候选文献"), "the notes still explain the unfinished run");
+    }
+
+    /** "比例"这个词在报告里出现几次。0.7.1 之后它只许活在 AIGC 那句"不给生成比例"里。 */
+    private static int occurrences(String text, String needle) {
+        int at = 0, found = 0;
+        while ((at = text.indexOf(needle, at)) >= 0) { found++; at += needle.length(); }
+        return found;
+    }
+
+    /** 取某一格（<td>指标名</td> 到最近的 </tr>）：要说"这一格里没有百分号"就必须只看这一格。 */
+    private static String metricRow(String html, String name) {
+        int at = html.indexOf("<td>" + name + "</td>");
+        if (at < 0) return null;
+        int end = html.indexOf("</tr>", at);
+        return end < 0 ? null : html.substring(at, end);
     }
 }

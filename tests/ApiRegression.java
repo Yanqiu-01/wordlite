@@ -115,6 +115,63 @@ public final class ApiRegression {
         TextSelection selected = TextSelection.paragraph(p, 0, 2); check(selected.unchanged(document), "request snapshots verify original text before applying result");
         ApiResult.Check report = new ApiResult.Check(); report.rate = 5; ApiResult.Fragment fragment = new ApiResult.Fragment(); fragment.text = "<script>bad</script>"; report.fragments.add(fragment);
         check(CheckReport.html("file.docx", report).contains("&lt;script&gt;") && !CheckReport.html("file.docx", report).contains("<script>"), "HTML reports escape all API supplied text");
-        System.out.println("SUMMARY " + checks + " API/config/encryption/protection assertions passed; loopback-only network");
+        aigcTrendCell();
+        System.out.println("SUMMARY " + checks + " API/config/encryption/protection/AIGC 文案 assertions passed; loopback-only network");
+    }
+
+    /**
+     * 结果面板那一格（0.7.1）。ApiWorkflow 要 Android 才跑得起来，host JVM 上钉的是它准备打印的那句话本身：
+     * 面板与 HTML 报告都取 DuplicateEngine.aigcTrend / aigcScoreLine，一处改文案两处一起动，
+     * 而这一格从今往后只有档位与两个字数，没有第二个"比例"，也没有百分号。
+     *
+     * 夹具手算：全文 21 个有效字符，重复 [0,10) 10 个字，其中引用区间 [0,4) 占 4 个，机器腔 [10,21) 11 个字。
+     * 于是 总相似度比 10/21、去除引用重复比 6/21、引用内重复比 4/21、自编率 11/21，三者闭合。
+     */
+    private static void aigcTrendCell() {
+        String text = "本文给出保温时间与剪切强度的对照实测结果。";
+        CharLedger.Balance ledger = CharLedger.closeSpans(text, null, new int[]{0, 4}, new int[]{0, 10}, new int[]{10, 21});
+        check(ledger.totalChars == 21 && ledger.duplicateChars == 10 && ledger.citedDuplicateChars == 4
+                        && ledger.selfWrittenChars == 11 && ledger.machineChars == 11 && ledger.residual() == 0,
+                "账本手算：自编 11 == 21 - 10（只减重复）；机器腔那 11 个字没有再减第二次，否则旧口径会得出 0");
+        DuplicateEngine.Report panel = new DuplicateEngine.Report();
+        panel.sourceText = text;
+        panel.ledger = ledger;
+        panel.comparedChars = ledger.totalChars;
+        panel.overallRate = ledger.overallRate;
+        panel.excludingCitationsRate = ledger.excludingCitationsRate;
+        panel.selfWrittenRate = ledger.selfWrittenRate;
+        panel.aigcRate = 45.26;
+        panel.aigc = new AigcDetector.Result();
+        panel.aigc.comparedChars = 630;
+        panel.aigc.tier = AigcDetector.Tier.NEEDS_REVIEW;
+        check(DuplicateEngine.aigcTrend(panel).equals("复核（可疑 11 字 / 全文 21 字）"),
+                "面板那一格手算：档位 复核 + 可疑 11 字 / 全文 21 字");
+        check(DuplicateEngine.aigcScoreLine(panel).equals("45.3（字符加权句分，非占比）"),
+                "句分 45.26 打成一位小数并写明非占比");
+        check(!DuplicateEngine.aigcTrend(panel).contains("%") && !DuplicateEngine.aigcTrend(panel).contains("比例"),
+                "这一格既没有百分号也不叫比例");
+        String html = CheckReport.html("panel.docx", panel);
+        check(html.contains("<td>机器生成倾向</td><td>复核（可疑 11 字 / 全文 21 字）</td>")
+                        && html.contains("<td>机器腔均分</td><td>45.3（字符加权句分，非占比）</td>"),
+                "HTML 报告与面板同一份文案，两处不会各说各话");
+        check(!html.contains("AIGC 生成比例"), "报告里再也没有 AIGC 生成比例这一格");
+        panel.aigc.insufficientSample = true;
+        panel.aigcInsufficient = true;
+        check(DuplicateEngine.aigcTrend(panel).equals("样本不足（有效字符 630 字，门槛 400 字）")
+                        && DuplicateEngine.aigcScoreLine(panel).isEmpty(),
+                "样本不足只报差多少字：档位格写门槛，均分格整格不给");
+        check(CheckReport.html("short.docx", panel).contains(
+                "<td>机器生成倾向</td><td>样本不足（有效字符 630 字，门槛 400 字）</td>"),
+                "样本不足时 HTML 那一格也不印 0.00% 之类的假数");
+        panel.aigc = null;
+        check(DuplicateEngine.aigcTrend(panel).equals("本机 AIGC 分析未执行")
+                        && DuplicateEngine.aigcScoreLine(panel).isEmpty(),
+                "这一轮没跑 AIGC 就说没跑，不拿 0.00% 冒充干净");
+        check(DuplicateEngine.aigcTierName(AigcDetector.Tier.INSUFFICIENT_SAMPLE).equals("样本不足")
+                        && DuplicateEngine.aigcTierName(AigcDetector.Tier.NONE).equals("一般")
+                        && DuplicateEngine.aigcTierName(AigcDetector.Tier.WATCH).equals("观察")
+                        && DuplicateEngine.aigcTierName(AigcDetector.Tier.NEEDS_REVIEW).equals("复核")
+                        && DuplicateEngine.aigcTierName(AigcDetector.Tier.STRONG).equals("成段"),
+                "五档名字一份定死：样本不足/一般/观察/复核/成段");
     }
 }

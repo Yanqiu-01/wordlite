@@ -40,9 +40,13 @@ public final class CheckReport {
         }
         return out.append("</html>").toString();
     }
-    /** The three duplication rates: only meaningful once something was actually consulted. */
+    /**
+     * The three duplication rates: only meaningful once something was actually consulted.
+     * 列名 0.7.1 从"比例"改成"数值"：这张表里还挂着机器生成倾向那一格，它不是比例，
+     * 摆在"比例"这一列下面就会被当成第四个比率读。三个比率的名字自己已经把"比/率"写明白了。
+     */
     private static void completed(StringBuilder out, DuplicateEngine.Report report) {
-        out.append("<h2>指标</h2><table><thead><tr><th>指标</th><th>比例</th></tr></thead><tbody>");
+        out.append("<h2>指标</h2><table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>");
         metric(out, "总相似度比", report.overallRate);
         metric(out, "去除引用重复比", report.excludingCitationsRate);
         metric(out, "自编率", report.selfWrittenRate);
@@ -57,7 +61,8 @@ public final class CheckReport {
         out.append("<h2>未完成查重</h2><p><strong>")
                 .append(escape(reason.isEmpty() ? "本次没有可比对的文献来源" : reason)).append("</strong></p>")
                 .append("<p>本次没有取回任何可比对的文献，相似度类指标无法成立，只有 AIGC 倾向是本机计算的结果。</p>");
-        out.append("<h2>指标</h2><table><thead><tr><th>指标</th><th>比例</th></tr></thead><tbody>");
+        // 这一张表里一个比率都没有（未完成查重不成立任何比率），列名当然也不能叫"比例"。
+        out.append("<h2>指标</h2><table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>");
         aigcMetric(out, report);
         out.append("</tbody></table>");
     }
@@ -267,10 +272,17 @@ public final class CheckReport {
         }
         out.append("</tbody></table>");
     }
-    /** 样本不足就不给百分比，这一格直接写清楚。 */
+    /**
+     * 这一格只说档位与字数，不说比例（0.7.1）：0.7.0 它叫"AIGC 生成比例"、打的却是字符加权句分，
+     * 与同一张表里的总相似度比是两把尺子，报告里读错概率最高的就是这一格。现在它是
+     * "机器生成倾向：复核（可疑 412 字 / 全文 6300 字）"——档位是 AigcDetector.Tier 的人话名字，
+     * 后面两个都是绝对量。样本不足时只报差多少字，一个百分号都不印；
+     * 字符加权句分留在"机器腔均分"那一行，名字里就写清它不是占比。文案与结果面板同源（DuplicateEngine）。
+     */
     private static void aigcMetric(StringBuilder out, DuplicateEngine.Report report) {
-        if (report.aigcInsufficient) metricText(out, "AIGC 生成比例", "样本不足");
-        else metric(out, "AIGC 生成比例", report.aigcRate);
+        metricText(out, "机器生成倾向", DuplicateEngine.aigcTrend(report));
+        String score = DuplicateEngine.aigcScoreLine(report);
+        if (!score.isEmpty()) metricText(out, DuplicateEngine.AIGC_SCORE_LABEL, score);
     }
     private static void metricText(StringBuilder out, String name, String value) {
         out.append("<tr><td>").append(escape(name)).append("</td><td>").append(escape(value)).append("</td></tr>");
