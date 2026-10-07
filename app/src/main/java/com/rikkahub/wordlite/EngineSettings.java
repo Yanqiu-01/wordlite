@@ -8,7 +8,7 @@ import java.util.Map;
 /** Built-in scan engines, per-engine depth and the optional CORE key. */
 public final class EngineSettings {
     /** Engines that need no credential; CORE stays opt-in because it needs a key. */
-    public static final String[] DEFAULT_ENGINES = {"cqvip", "ncpssd", "openalex", "crossref", "semantic-scholar", "europepmc", "arxiv"};
+    public static final String[] DEFAULT_ENGINES = {"cnki", "cqvip", "wanfang", "ncpssd", "openalex", "crossref", "semantic-scholar", "europepmc", "arxiv"};
     public boolean web = true;
     public final ArrayList<String> engines = new ArrayList<String>();
     public int perEngine = 12, timeoutSeconds = 20, windows = 12;
@@ -54,7 +54,7 @@ public final class EngineSettings {
 
     public static String serialize(EngineSettings value) {
         LinkedHashMap<String, Object> out = new LinkedHashMap<String, Object>();
-        out.put("version", 2); out.put("web", value.web); out.put("engines", value.engines);
+        out.put("version", 3); out.put("web", value.web); out.put("engines", value.engines);
         out.put("perEngine", value.perEngine); out.put("timeout", value.timeoutSeconds);
         out.put("windows", value.windows); out.put("coreKey", value.coreKey);
         out.put("proxy", value.proxy);
@@ -74,6 +74,10 @@ public final class EngineSettings {
             /* 1 号格式早于后来加的检索源，那些源按"新装"处理一起打开；从 2 号格式起，用户勾掉的就是勾掉了。 */
             Object version = ApiJson.path(root, "version");
             int saved = version instanceof Number ? ((Number) version).intValue() : 1;
+// 3 号格式新增了知网，而万方从一开始就漏在了默认名单之外：老设置只补这两个，
+           // 其余勾选项保持用户自己勾的样子。
+            if (saved < 3) for (String added : new String[] { "cnki", "wanfang" })
+                if (!out.engines.contains(added)) out.engines.add(added);
             if (saved < 2)
                 for (String engine : PaperSources.engines())
                     if (!out.engines.contains(engine)) out.engines.add(engine);

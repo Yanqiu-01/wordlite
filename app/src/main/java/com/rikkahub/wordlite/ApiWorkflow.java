@@ -98,6 +98,7 @@ public final class ApiWorkflow {
         titles.add("AIGC 检测"); ids.add("aigc");
         titles.add("自建库（" + library.size() + " 篇）"); ids.add("library");
         titles.add("检索设置"); ids.add("engines");
+        titles.add("检索自检（文献库通不通）"); ids.add("probe");
         titles.add("自定义接口查重"); ids.add("api");
         if (lastScan != null) {
             titles.add("查重结果"); ids.add("result");
@@ -112,6 +113,7 @@ public final class ApiWorkflow {
             else if ("aigc".equals(id)) scan(false, true);
             else if ("library".equals(id)) libraryMenu();
             else if ("engines".equals(id)) engineSettings();
+            else if ("probe".equals(id)) engineProbe();
             else if ("api".equals(id)) customCheckMenu();
             else if ("result".equals(id)) showScan();
             else if ("export".equals(id)) scanReport();
@@ -362,9 +364,10 @@ public final class ApiWorkflow {
     }
     private void libraryMenu() {
         new AlertDialog.Builder(activity).setTitle("自建库")
-                .setItems(new String[]{"导入文档", "查看清单", "清空自建库"}, (dialog, which) -> {
+                .setItems(new String[]{"导入文档", "按知网文献号入库", "查看清单", "清空自建库"}, (dialog, which) -> {
                     if (which == 0) host.pickLibrary();
-                    else if (which == 1) showLibrary();
+                    else if (which == 1) cnkiImport();
+                    else if (which == 2) showLibrary();
                     else new AlertDialog.Builder(activity).setTitle("清空自建库")
                             .setMessage("将删除本机保存的全部比对文档，文档本身不受影响。")
                             .setPositiveButton("清空", (d, w) -> { library.clear(); toast("自建库已清空"); })
@@ -421,6 +424,132 @@ public final class ApiWorkflow {
             return out.toByteArray();
         } finally { input.close(); }
     }
+    /** 自检用的短语：中文库和英文库各给一个查得出东西的说法，免得把"语种不对"误报成"连不上"。 */
+    private static final String PROBE_CHINESE = "图像分割";
+    private static final String PROBE_ENGLISH = "image segmentation";
+
+    /**
+     * 检索自检。查重报告里"没有重复"和"一个库都没连上"长得太像，而手机的网络、代理、
+     * 库自己的脸色，坏哪一样都只是"没查到"。这里对每个启用中的源真发一次检索，
+     * 把命中数、耗时和这一趟实际走的路（直连还是经哪个代理）如实列出来。
+     */
+    private void engineProbe() {
+        final ArrayList<String> wanted = new ArrayList<String>(engine.engines);
+        if (job != null) return;
+        if (wanted.isEmpty()) { toast("没有勾选检索源"); return; }
+        final ApiClient.Task task = begin("检索自检");
+        final EngineSettings options = engine.copy();
+        Routes.reset();
+        worker = new Thread(() -> {
+            PaperSources.Limits limits = new PaperSources.Limits();
+            limits.timeoutSeconds = options.timeoutSeconds;
+            limits.perEngine = 3;
+            limits.coreKey = options.coreKey;
+            limits.proxy = options.proxy;
+            final StringBuilder lines = new StringBuilder();
+            int usable = 0;
+            for (int i = 0; i < wanted.size(); i++) {
+                if (task.cancelled()) break;
+                String id = wanted.get(i);
+                String host = Routes.host(PaperSources.endpoint(id));
+                progress(PaperSources.label(id) + " " + (i + 1) + "/" + wanted.size());
+                long started = System.nanoTime();
+                String outcome;
+                try {
+                    usable++;
+                    ArrayList<PaperSources.Candidate> found =
+                            PaperSources.search(id, chinese(id) ? PROBE_CHINESE : PROBE_ENGLISH,
+                                    limits, task);
+                    outcome = found.isEmpty() ? "0 条（连通，但没查到）" : found.size() + " 条";
+                } catch (Exception error) { outcome = concise(error); }
+                appendProbe(lines, PaperSources.label(id), outcome,
+                        (System.nanoTime() - started) / 1000000, Routes.routeFor(host));
+            }
+            final String text = lines.toString().trim(), tail = usable + "/" + wanted.size() + " 个源可用";
+            complete(task, () -> probeResult(text, tail));
+        }, "wordlite-probe"); worker.start();
+    }
+
+    /** 中文库判定只看域名，和真正选路时用的是同一条规则，两边不会说出不一致的话。 */
+    private static boolean chinese(String engineId) {
+        return Routes.domestic(Routes.host(PaperSources.endpoint(engineId)));
+    }
+
+    private static void appendProbe(StringBuilder out, String name, String outcome, long millis, String route) {
+        if (out.length() > 0) out.append("\n");
+        out.append(name).append("\n    ").append(outcome).append("  ·  ")
+                .append(millis).append("ms  ·  ").append(route).append("\n");
+    }
+
+    private void probeResult(String text, String tail) {
+        LinearLayout box = column(); box.setPadding(dp(16), dp(8), dp(16), dp(8));
+        box.addView(label(text.isEmpty() ? "没有完成任何一次自检" : text, 13));
+        ScrollView scroll = new ScrollView(activity); scroll.addView(box);
+        new AlertDialog.Builder(activity).setTitle("检索自检（" + tail + "）").setView(scroll)
+                .setNegativeButton("关闭", null).show();
+    }
+
+    /**
+     * 知网没有匿名检索口的那部分，用这个补：手上的文献号或文章页链接直接变成自建库里的一篇，
+     * 刊期号则把当期目录导进来（一期几十篇，一次最多 CnkiTouch.MAX_IMPORT 篇）。
+     * 落库之后就和导入的文档一样参与本机比对。
+     */
+    private void cnkiImport() {
+        final EditText input = field("", "粘贴知网文献号或文章页/刊期页链接");
+        LinearLayout box = column(); box.setPadding(dp(16), dp(8), dp(16), dp(8)); box.addView(input);
+        ScrollView scroll = new ScrollView(activity); scroll.addView(box);
+        new AlertDialog.Builder(activity).setTitle("从知网导入自建库").setView(scroll)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("导入", (dialog, which) -> startCnkiImport(input.getText().toString()))
+                .show();
+    }
+
+    private void startCnkiImport(final String raw) {
+        final String code = CnkiTouch.code(raw);
+        if (job != null) return;
+        if (code.isEmpty()) { toast("认不出这个知网文献号"); return; }
+        final ApiClient.Task task = begin("从知网导入");
+        worker = new Thread(() -> {
+            int added = 0;
+            String error = "";
+            try {
+                java.net.Proxy via = Routes.parse(engine.proxy);
+                ArrayList<String> codes = new ArrayList<String>();
+                if (CnkiTouch.isIssue(code)) {
+                    codes.addAll(CnkiTouch.issueCodes(CnkiTouch.get(CnkiTouch.issueUrl(code),
+                            engine.timeoutSeconds, via, task), CnkiTouch.MAX_IMPORT));
+                    if (codes.isEmpty()) error = "当期目录里没找到文献号";
+                } else codes.add(code);
+                for (int i = 0; i < codes.size(); i++) {
+                    if (task.cancelled()) break;
+                    progress("导入 " + (i + 1) + "/" + codes.size());
+                    String bad = importCnki(codes.get(i), via, task);
+                    if (bad == null) added++;
+                    else if (error.isEmpty()) error = bad;
+                }
+            } catch (Exception failure) { error = concise(failure); }
+            final int count = added;
+            final String tail = error.isEmpty() ? "" : "（" + error + "）";
+            complete(task, () -> toast("已入库 " + count + " 篇" + tail));
+        }, "wordlite-cnki"); worker.start();
+    }
+
+    /** 成功返回 null。期刊页取不到就换会议论文的路由再试一次：同一个编号在两个库里不会同时存在。 */
+    private String importCnki(String code, java.net.Proxy via, ApiClient.Cancellation task) {
+        String[] urls = { CnkiTouch.articleUrl(code), CnkiTouch.conferenceUrl(code) };
+        for (String url : urls) {
+            try {
+                String text = CnkiTouch.record(CnkiTouch.get(url, engine.timeoutSeconds, via, task));
+                if (text.trim().length() < 24) continue;
+                String bad = library.addDocument("知网-" + code + ".txt",
+                        text.getBytes(StandardCharsets.UTF_8));
+                return bad;
+            } catch (Exception error) {
+                if (task.cancelled()) return "已取消";
+            }
+        }
+        return "没取到 " + code + " 的题录";
+    }
     private void engineSettings() {
         LinearLayout box = column(); box.setPadding(dp(16), dp(8), dp(16), dp(8));
         final CheckBox web = check("启用联网检索", engine.web); box.addView(web);
@@ -470,6 +599,8 @@ public final class ApiWorkflow {
         try { return Integer.parseInt(value.trim()); } catch (Exception error) { return fallback; }
     }
     private static String engineTitle(String id) {
+        if ("cnki".equals(id)) return "知网（期刊与会议论文，题录与摘要预览）";
+        if ("wanfang".equals(id)) return "万方数据（期刊与学位论文摘要）";
         if ("cqvip".equals(id)) return "维普（中文期刊摘要，服务端只给第一页）";
         if ("ncpssd".equals(id)) return "国家哲学社会科学文献中心（含摘要）";
         if ("openalex".equals(id)) return "OpenAlex（题录与开放获取全文）";

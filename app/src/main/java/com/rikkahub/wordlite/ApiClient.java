@@ -32,6 +32,8 @@ public final class ApiClient {
         public byte[] raw = new byte[0];
         public long elapsedMillis;
         public int attempts;
+        /** 这次真的走了哪条路：直连，还是用户/自动发现的代理。报告与自检都要显示它。 */
+        public String via = "";
     }
     public static final class Failure extends IOException {
         public final int status;

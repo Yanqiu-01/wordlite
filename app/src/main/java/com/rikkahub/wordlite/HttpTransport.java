@@ -15,7 +15,6 @@ import java.util.Map;
 /** Read-only GET for the built-in literature sources: HTTPS only, no redirects, no secrets in errors. */
 public final class HttpTransport {
     public static final int MAX_BODY = 2 * 1024 * 1024, MAX_FULL_TEXT = 512 * 1024;
-    private static final int RETRY_DELAY_MILLIS = 700;
     /** Beyond this a rate limit is not a momentary crowd, and waiting would look like a hang. */
     private static final int MAX_RETRY_WAIT_MILLIS = 10000;
     /* The sources do not require it, but a UA that names the project and a home page is the
@@ -80,41 +79,60 @@ public final class HttpTransport {
                                            int maxBytes, ApiClient.Cancellation cancellation,
                                            java.net.Proxy proxy, byte[] form, String contentType)
             throws IOException {
-        try {
-            return once(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, form, contentType);
-        } catch (ApiClient.Failure failure) {
-            /* 手机上的代理多半是 adb reverse 出来的临时端口，线没接上的时候直连反而通。
-               只有"连不上"才值得换条路重试；对端明确拒绝或限流时，再试一次只是慢。 */
-            if (proxy != null && failure.status == 0 && unreachableThroughProxy(failure))
-                return once(url, headers, timeoutSeconds, maxBytes, cancellation, null, form, contentType);
-            if (failure.status != 429 || Thread.currentThread().isInterrupted()
-                    || (cancellation != null && cancellation.cancelled())) throw failure;
-            long wait = failure.retryAfterSeconds > 0
-                    ? failure.retryAfterSeconds * 1000L : RETRY_DELAY_MILLIS;
-            if (wait > MAX_RETRY_WAIT_MILLIS)
-                throw new ApiClient.Failure("检索源限流，约 " + failure.retryAfterSeconds
-                        + " 秒后恢复，本次跳过", failure.status);
+        /* 一条请求可能同时有直连和经电脑代理两条路，而哪条通取决于用户此刻的网络：国内库直连快，
+           海外源往往非得借代理才出得去。按主机名把候选路排个先后逐条试——只有"连不上"才值得换路，
+           对端明确拒绝或限流的时候换路只是慢。 */
+        java.util.List<java.net.Proxy> order = Routes.order(Routes.host(url), proxy);
+        ApiClient.Failure failure;
+        java.net.Proxy failedVia = proxy;
+        for (int i = 0; ; ) {
+            java.net.Proxy via = order.get(i);
             try {
-                Thread.sleep(wait);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw failure;
+                ApiClient.Response reached = once(url, headers,
+                        Routes.connectSeconds(proxy, via, timeoutSeconds), maxBytes, cancellation,
+                        via, form, contentType);
+                Routes.succeeded(via);
+                Routes.note(url, via);
+                reached.via = Routes.label(via);
+                return reached;
+            } catch (ApiClient.Failure error) {
+                failure = error;
+                failedVia = via;
+                if (++i >= order.size() || error.status != 0 || !routeIsDown(error)) break;
             }
-            ApiClient.Response retry = once(url, headers, timeoutSeconds, maxBytes, cancellation, proxy,
-                    form, contentType);
-            retry.attempts = 2;
-            return retry;
         }
+        if (failure.status != 429 || Thread.currentThread().isInterrupted()
+                || (cancellation != null && cancellation.cancelled())) throw failure;
+        /* 对方报了时限就等它说的这么久（有上限），没报就立刻重试只是撞在同一个窗口里：
+           实测 Semantic Scholar 的匿名共享配额连续五次都不带 Retry-After，七百毫秒后再打一次必然还是 429。 */
+        if (failure.retryAfterSeconds <= 0)
+            throw new ApiClient.Failure("检索源限流（HTTP 429），本次跳过", failure.status);
+        long wait = failure.retryAfterSeconds * 1000L;
+        if (wait > MAX_RETRY_WAIT_MILLIS)
+            throw new ApiClient.Failure("检索源限流，约 " + failure.retryAfterSeconds
+                    + " 秒后恢复，本次跳过", failure.status);
+        try {
+            Thread.sleep(wait);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw failure;
+        }
+        ApiClient.Response retry = once(url, headers, timeoutSeconds, maxBytes, cancellation, failedVia,
+                form, contentType);
+        retry.attempts = 2;
+        retry.via = Routes.label(failedVia);
+        return retry;
     }
 
-    /** 拨不通代理和代理替我们对端谈崩了，都表现为一次没有状态码的连接失败。 */
-    private static boolean unreachableThroughProxy(ApiClient.Failure failure) {
+    /**
+     * 这条路本身没通：代理拨不上、网络把连接掐了、TLS 谈崩、或者干脆超时。
+     * 只有这一类失败才值得换一条路再试；"已取消"也是零状态码，但它换哪条路都一样，不在此列。
+     */
+    private static boolean routeIsDown(ApiClient.Failure failure) {
         String message = String.valueOf(failure.getMessage());
-        return message.startsWith("网络连接失败") || message.startsWith("安全连接失败");
+        return message.startsWith("网络连接失败") || message.startsWith("安全连接失败")
+                || message.startsWith("请求超时");
     }
-
-    /** Only https, no redirects, and the request line never carries document text. */
-
     private static ApiClient.Response once(String url, Map<String, String> headers, int timeoutSeconds,
                                            int maxBytes, ApiClient.Cancellation cancellation,
                                            java.net.Proxy proxy, byte[] form, String contentType)

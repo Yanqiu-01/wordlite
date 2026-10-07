@@ -28,6 +28,7 @@ public final class PaperSources {
 
     private static LinkedHashMap<String, String> defaults() {
         LinkedHashMap<String, String> map = new LinkedHashMap<String, String>();
+        map.put("cnki", "https://search.cnki.com.cn/search/listresult");
         map.put("cqvip", "https://www.cqvip.com/search");
         map.put("wanfang", "https://s.wanfangdata.com.cn/SearchService.SearchService/search");
         map.put("ncpssd", "https://www.ncpssd.org/searchHandler/search");
@@ -45,6 +46,7 @@ public final class PaperSources {
     /** Display name for notes, progress and reports; the engine id itself stays lowercase. */
     public static String label(String engine) {
         String name = key(engine);
+        if (name.equals("cnki")) return "知网（期刊与会议论文）";
         if (name.equals("cqvip")) return "维普（中文期刊）";
         if (name.equals("wanfang")) return "万方数据";
         if (name.equals("ncpssd")) return "国家哲社文献中心";
@@ -91,6 +93,15 @@ public final class PaperSources {
                     safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation, proxyFor(safe));
             return WanfangProtocol.parse(binary.raw, per);
         }
+        /* 知网这个检索口只认 POST 表单，而且要看一眼浏览器样的请求头，回来的还是带高亮标签的 HTML，
+           所以它不进下面那套 JSON 解析，整个交给 CnkiSearch。 */
+        if (name.equals("cnki")) {
+            ApiClient.Response page = HttpTransport.post(endpoint(name), CnkiSearch.form(phrase, 1),
+                    CnkiSearch.headers(), safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation,
+                    proxyFor(safe));
+            try { return CnkiSearch.parse(page.body, per); }
+            catch (RuntimeException error) { throw new IOException("知网检索响应无法解析"); }
+        }
         ApiClient.Response response = name.equals("ncpssd")
                 ? HttpTransport.post(endpoint(name), formFor(phrase, per), headers,
                         safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation, proxyFor(safe))
@@ -120,17 +131,7 @@ public final class PaperSources {
      * means "dial out directly" rather than a failed retrieval.
      */
     static java.net.Proxy proxyFor(Limits limits) {
-        String value = limits == null ? "" : limits.proxy.trim();
-        int colon = value.lastIndexOf(':');
-        if (colon < 1 || colon == value.length() - 1) return null;
-        int port;
-        try { port = Integer.parseInt(value.substring(colon + 1).trim()); }
-        catch (NumberFormatException error) { return null; }
-        if (port < 1 || port > 65535) return null;
-        String host = value.substring(0, colon).trim();
-        if (host.startsWith("[") && host.endsWith("]")) host = host.substring(1, host.length() - 1);
-        return new java.net.Proxy(java.net.Proxy.Type.HTTP,
-                new java.net.InetSocketAddress(host, port));
+        return Routes.parse(limits == null ? "" : limits.proxy);
     }
 
     /** Only the retrieval phrase travels in the query string, never document text. */
@@ -157,8 +158,19 @@ public final class PaperSources {
     static String formFor(String phrase, int perEngine) throws IOException {
         String term = narrowing(phrase, 6, 30).replace('"', ' ').replace('(', ' ').replace(')', ' ').trim();
         if (term.isEmpty()) throw new IllegalArgumentException("检索短语为空");
-        return "pageNum=1&pageSize=" + perEngine + "&sType=0&search="
-                + encode("(IKTE=\"" + term + "\" OR IKST=\"" + term + "\" OR IKRK=\"" + term + "\")");
+        /* 整句加引号等于要求这几个字在原文里连排出现，知网之外没几个库受得住：实测"深度学习 图像分割
+           综述"这样查回来是 0 条。拆成词、逐词加引号、再用 AND 连起来，才是这个检索口认的写法
+           （同一组实测：单词 689 条，两个词 AND 6 条，整句 0 条，去引号则是一百四十万条噪声）。 */
+        StringBuilder search = new StringBuilder();
+        for (String token : term.split("\\s+")) {
+            String one = token.trim();
+            if (one.isEmpty()) continue;
+            if (search.length() > 0) search.append(" AND ");
+            search.append("(IKTE=\"").append(one).append("\" OR IKST=\"").append(one)
+                    .append("\" OR IKRK=\"").append(one).append("\")");
+        }
+        if (search.length() == 0) throw new IllegalArgumentException("检索短语为空");
+        return "pageNum=1&pageSize=" + perEngine + "&sType=0&search=" + encode(search.toString());
     }
 
     private static String encode(String value) throws IOException {

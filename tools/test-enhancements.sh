@@ -10,6 +10,7 @@ javac -encoding UTF-8 --add-modules jdk.httpserver -classpath "$CP" -d "$OUT/cla
     tests/PdfRegression.java tests/PreservationRegression.java tests/ReviewRegression.java \
     tests/ApiRegression.java tests/ScriptRegression.java tests/TextCorpusRegression.java \
     tests/AigcRegression.java tests/LocalRewriteRegression.java tests/DetectRegression.java
+    tests/CnkiSearchRegression.java tests/CnkiTouchRegression.java
 CP="$OUT/classes:$CP"
 run() {
     name="$1"; shift
@@ -25,6 +26,8 @@ run TextCorpusRegression
 run AigcRegression
 run LocalRewriteRegression
 run DetectRegression
+run CnkiSearchRegression
+run CnkiTouchRegression
 if [ -d /workspace/test-deps/fonttools ]; then
     PYTHONPATH=/workspace/test-deps/fonttools python3 tests/font_subset_test.py > "$REPORT/font-subsets-test.log"
     tail -1 "$REPORT/font-subsets-test.log"

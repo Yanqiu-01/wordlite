@@ -174,6 +174,8 @@ public final class DetectRegression {
         server.createContext("/throttled-once", exchange -> {
             record("/throttled-once", queryOf(exchange));
             boolean first = hits("/throttled-once") == 1;
+            /* 会好的限流会告诉你什么时候回来；不告诉的就不值得闭着眼睛再打一次。 */
+            if (first) exchange.getResponseHeaders().set("Retry-After", "1");
             respond(exchange, first ? 429 : 200, first ? "{\"error\":\"rate limit\"}" : OPENALEX);
         });
         server.createContext("/redirect", exchange -> {
@@ -291,6 +293,14 @@ public final class DetectRegression {
                 "哲社中心收到带字段码的 POST 检索式");
         check(!query("/ncpssd").contains("IKTE") && form.length() < 320,
                 "检索式只装得下短语，正文不参与");
+        /* 整句套一个引号等于要求这几个字在原文里连排出现，实测这个库回 0 条；
+           逐词加引号再用 AND 连起来才有结果（"深度学习 图像分割"两个词是 6 条，整句是 0 条）。 */
+        String multiQuery = java.net.URLDecoder.decode(PaperSources.formFor("深度学习 图像分割 综述", 5)
+                .substring(31), "UTF-8");
+        check(multiQuery.split(" AND ", -1).length == 3
+                        && multiQuery.contains("(IKTE=\"图像分割\" OR IKST=\"图像分割\" OR IKRK=\"图像分割\")")
+                        && !multiQuery.contains("\"深度学习 图像分割\""),
+                "哲社中心的检索式逐词加引号再 AND，不整句一个引号");
         /* 万方：拿真实的 gRPC-web 抓包做夹具，防的是字段号漂移之后解析器静默交白卷。 */
         ArrayList<PaperSources.Candidate> wf = PaperSources.search("wanfang", "机器学习", limits, null);
         check(wf.size() == 3, "万方一帧里的三条记录都被读出来");
@@ -410,12 +420,25 @@ public final class DetectRegression {
 
     private static void engines(String base) throws Exception {
         ArrayList<String> engines = PaperSources.engines();
-        check(engines.size() == 9 && engines.contains("openalex") && engines.contains("semantic-scholar")
+        check(engines.size() == 10 && engines.contains("openalex") && engines.contains("semantic-scholar")
                         && engines.contains("europepmc") && engines.contains("core")
-                        && engines.contains("cqvip") && engines.contains("wanfang") && engines.contains("ncpssd")
-                        && engines.subList(0, 3).containsAll(
-                                java.util.Arrays.asList("cqvip", "wanfang", "ncpssd")),
-                "nine built-in engines are registered, the three Chinese ones first");
+                        && engines.contains("cnki") && engines.contains("cqvip")
+                        && engines.contains("wanfang") && engines.contains("ncpssd")
+                        && engines.subList(0, 4).containsAll(
+                                java.util.Arrays.asList("cnki", "cqvip", "wanfang", "ncpssd")),
+                "ten built-in engines are registered, the four Chinese ones first");
+        /* 万方从一开始就漏在默认名单之外，新装机于是天生少一个中文库；知网接进来时的版本迁移
+           要把这两个一起补上，但不能把用户自己勾掉的源偷偷打开。 */
+        EngineSettings fresh = new EngineSettings();
+        check(fresh.engines.contains("cnki") && fresh.engines.contains("wanfang")
+                        && fresh.engines.contains("cqvip") && !fresh.engines.contains("core"),
+                "a fresh install checks CNKI, Wanfang and VIP without waiting for a key");
+        EngineSettings upgraded = EngineSettings.deserialize("{\"version\":2,\"web\":true,"
+                + "\"engines\":[\"cqvip\",\"openalex\"],\"perEngine\":12,\"timeout\":20,\"windows\":12,"
+                + "\"coreKey\":\"\",\"proxy\":\"\"}");
+        check(upgraded.engines.contains("cnki") && upgraded.engines.contains("wanfang")
+                        && upgraded.engines.contains("cqvip") && !upgraded.engines.contains("semantic-scholar"),
+                "the version 3 upgrade adds CNKI and Wanfang without re-enabling what the user unchecked");
         loopback(base);
         PaperSources.Limits limits = limits();
 
@@ -612,15 +635,18 @@ public final class DetectRegression {
                 "a server-side failure says the source is unavailable");
         failure = fail(base + "/throttled?q=" + marker, null, 8, 0, null);
         check(failure != null && failure.status == 429 && !failure.getMessage().contains(marker)
-                        && failure.getMessage().equals("检索源限流（HTTP 429），稍后重试"),
+                        && failure.getMessage().equals("检索源限流（HTTP 429），本次跳过"),
                 "429 says the source throttled us rather than blaming the network");
+        /* Semantic Scholar 的匿名共享配额实测五次有五次不回 Retry-After，七百毫秒后再打一次
+           必然还是 429：对方没说什么时候回来，就一次都不多打，把时间留给别的源。 */
+        check(hits("/throttled") == 1, "没给 Retry-After 的 429 不做无把握的重试");
         ApiClient.Response recovered = null;
         try {
             recovered = HttpTransport.get(base + "/throttled-once?q=" + marker, null, 8, 0, null);
         } catch (IOException ignored) { }
         check(recovered != null && recovered.attempts == 2 && hits("/throttled-once") == 2
                         && recovered.body.contains("Brazing of SiC ceramic"),
-                "a throttled source gets exactly one patient retry and then answers");
+                "报了 Retry-After 的限流会等它说的这么久，再打一次，然后拿到结果");
         failure = fail(base + "/redirect?q=" + marker, null, 8, 0, null);
         check(failure != null && failure.status == 302 && failure.getMessage().equals("检索源发生重定向"),
                 "302 is reported instead of being followed");
