@@ -33,6 +33,11 @@ public final class TextCorpus {
     private static final int POSTING_SCAN_CAP = 6000;
     private static final int MIN_SHARED_GRAMS = 3;
     private static final int MAX_CORPUS_SENTENCES = 40000;
+    /** 指纹索引的 token 上限，超了就只保留句级比对。 */
+    private static final int MAX_FINGERPRINT_TOKENS = 1200000;
+    /** 一篇文献至少要共享两枚指纹才值得去验证，一枚多半是巧合。 */
+    private static final int MIN_SHARED_FINGERPRINTS = 2;
+    private static final int MAX_ANCHORS_PER_DOC = 4000;
     /** 精算 Dice 前使用的 Dice 上界下限，包含式判定也要求 Dice >= 0.5，故该裁剪无漏报。 */
     private static final float LENGTH_BOUND_FLOOR = 0.5f;
 
@@ -100,6 +105,7 @@ public final class TextCorpus {
         if (text == null || text.length() == 0) return;
         sources.add(source == null ? new Source() : source);
         int sourceIndex = sources.size() - 1;
+        indexFingerprints(sourceIndex, text);
         String norm = normalize(text);
         ArrayList<int[]> spans = sentences(text);
         for (int i = 0; i < spans.size(); i++) {
@@ -119,6 +125,124 @@ public final class TextCorpus {
         }
     }
 
+    /** 每篇文献一份归一化全文与 token 下标；指纹 -> {docId, token 下标} 的倒排。 */
+    private final ArrayList<String> docNorms = new ArrayList<String>();
+    private final ArrayList<int[]> docTokens = new ArrayList<int[]>();
+    private final ArrayList<Integer> docSource = new ArrayList<Integer>();
+    private final HashMap<Long, ArrayList<int[]>> fingerprints = new HashMap<Long, ArrayList<int[]>>();
+    private int fingerprintTokens;
+
+    /** winnowing 取样结果进倒排，一篇文献一份全文，跨句复制才追得到。 */
+    private void indexFingerprints(int sourceIndex, String text) {
+        if (fingerprintTokens >= MAX_FINGERPRINT_TOKENS || text == null) return;
+        String flat = normalize(text);
+        int[] at = Fingerprints.tokens(flat);
+        if (at.length < Fingerprints.MIN_MATCH) return;
+        long[] hashes = Fingerprints.rolling(flat, at);
+        int[] picked = Fingerprints.sample(hashes);
+        int docId = docNorms.size();
+        docNorms.add(flat);
+        docTokens.add(at);
+        docSource.add(Integer.valueOf(sourceIndex));
+        for (int i = 0; i < picked.length; i++) {
+            Long key = Long.valueOf(hashes[picked[i]]);
+            ArrayList<int[]> postings = fingerprints.get(key);
+            if (postings == null) {
+                postings = new ArrayList<int[]>(2);
+                fingerprints.put(key, postings);
+            }
+            postings.add(new int[]{docId, picked[i]});
+        }
+        fingerprintTokens += at.length;
+    }
+
+    /** 指纹带：与断句无关的连续重复区间，长度不少于 Fingerprints.MIN_MATCH 个 token。 */
+    private ArrayList<Hit> fingerprintHits(String norm, int[] excluded) {
+        ArrayList<Hit> out = new ArrayList<Hit>();
+        if (fingerprints.isEmpty()) return out;
+        int[] at = Fingerprints.tokens(norm);
+        if (at.length < Fingerprints.MIN_MATCH) return out;
+        long[] hashes = Fingerprints.rolling(norm, at);
+        int[] picked = Fingerprints.sample(hashes);
+        HashMap<Integer, ArrayList<int[]>> anchors = new HashMap<Integer, ArrayList<int[]>>();
+        for (int i = 0; i < picked.length; i++) {
+            ArrayList<int[]> postings = fingerprints.get(Long.valueOf(hashes[picked[i]]));
+            if (postings == null) continue;
+            for (int p = 0; p < postings.size(); p++) {
+                Integer key = Integer.valueOf(postings.get(p)[0]);
+                ArrayList<int[]> list = anchors.get(key);
+                if (list == null) {
+                    list = new ArrayList<int[]>();
+                    anchors.put(key, list);
+                }
+                if (list.size() < MAX_ANCHORS_PER_DOC) list.add(new int[]{picked[i], postings.get(p)[1]});
+            }
+        }
+        for (Map.Entry<Integer, ArrayList<int[]>> entry : anchors.entrySet()) {
+            if (entry.getValue().size() < MIN_SHARED_FINGERPRINTS) continue;
+            collectRuns(norm, at, docNorms.get(entry.getKey().intValue()), docTokens.get(entry.getKey().intValue()),
+                    entry.getValue(), excluded, sources.get(docSource.get(entry.getKey().intValue()).intValue()), out);
+        }
+        return out;
+    }
+
+    /** 最长匹配优先、用过的 token 不再参与下一次匹配，这两条照抄 JPlag 的 GreedyStringTiling。 */
+    private void collectRuns(String norm, int[] at, String flat, int[] cat, ArrayList<int[]> anchors,
+                             int[] excluded, Source source, ArrayList<Hit> out) {
+        boolean[] used = new boolean[at.length];
+        boolean[] done = new boolean[anchors.size()];
+        while (true) {
+            int best = -1, bestLength = 0;
+            int[] bestSpan = null;
+            for (int a = 0; a < anchors.size(); a++) {
+                if (done[a]) continue;
+                int[] pair = anchors.get(a);
+                if (used[pair[0]]) { done[a] = true; continue; }
+                int[] span = run(norm, at, pair[0], flat, cat, pair[1]);
+                int length = span[1] - span[0] + 1;
+                if (length > bestLength) {
+                    bestLength = length;
+                    best = a;
+                    bestSpan = span;
+                }
+            }
+            if (best < 0 || bestLength < Fingerprints.MIN_MATCH) return;
+            done[best] = true;
+            boolean clash = false;
+            for (int i = bestSpan[0]; i <= bestSpan[1]; i++) if (used[i]) { clash = true; break; }
+            if (clash) continue;
+            for (int i = bestSpan[0]; i <= bestSpan[1]; i++) used[i] = true;
+            int start = at[bestSpan[0]];
+            int end = at[bestSpan[1]] + 1;
+            if (insideSpan(excluded, start)) continue;
+            Hit hit = new Hit();
+            hit.start = start;
+            hit.end = end;
+            int valid = Math.max(1, validCount(norm, start, end));
+            hit.score = (float) Math.min(1d, bestLength / (double) valid);
+            hit.source = source;
+            out.add(hit);
+        }
+    }
+
+    /** 包含这对锚点的最长逐字符相等片段，返回 token 下标的 {起, 止}。 */
+    private int[] run(String norm, int[] at, int docIndex, String flat, int[] cat, int corpusIndex) {
+        int from = docIndex, to = docIndex, cf = corpusIndex, ct = corpusIndex;
+        /* 逐 token 比的是 Fingerprints.code，跟取样同一个口径：数字在这里折过一刀，
+           验算时再按原字符比，锚点两边立刻断掉，指纹带等于白打。 */
+        while (from - 1 >= 0 && cf - 1 >= 0
+                && Fingerprints.code(norm, at[from - 1]) == Fingerprints.code(flat, cat[cf - 1])) {
+            from--;
+            cf--;
+        }
+        while (to + 1 < at.length && ct + 1 < cat.length
+                && Fingerprints.code(norm, at[to + 1]) == Fingerprints.code(flat, cat[ct + 1])) {
+            to++;
+            ct++;
+        }
+        return new int[]{from, to};
+    }
+
     public int sentenceCount() { return entries.size(); }
 
     public boolean isEmpty() { return entries.isEmpty(); }
@@ -128,6 +252,11 @@ public final class TextCorpus {
         entries.clear();
         index.clear();
         exact.clear();
+        docNorms.clear();
+        docTokens.clear();
+        docSource.clear();
+        fingerprints.clear();
+        fingerprintTokens = 0;
         skippedSentences = 0;
     }
 
@@ -201,6 +330,12 @@ public final class TextCorpus {
             duplicate += flushed[0];
             cited += flushed[1];
         }
+        int[] extra = addBandHits(report.hits, fingerprintHits(norm, excluded), norm, citations, engineChars);
+        duplicate += extra[0];
+        cited += extra[1];
+        java.util.Collections.sort(report.hits, new Comparator<Hit>() {
+            public int compare(Hit a, Hit b) { return a.start != b.start ? a.start - b.start : a.end - b.end; }
+        });
         report.comparedChars = compared;
         report.excludedChars = skipped;
         report.duplicateChars = duplicate;
@@ -215,6 +350,73 @@ public final class TextCorpus {
             }
         }
         return report;
+    }
+
+    /** 指纹带只补句级比对没盖住的字符，来源记到带上的引擎，分子不会因为两套算法而翻倍。 */
+    private int[] addBandHits(ArrayList<Hit> hits, ArrayList<Hit> bands, String norm, int[] citations,
+                              HashMap<String, Integer> engineChars) {
+        int[] extra = new int[]{0, 0};
+        if (bands.isEmpty()) return extra;
+        ArrayList<int[]> covered = new ArrayList<int[]>();
+        for (int i = 0; i < hits.size(); i++) covered.add(new int[]{hits.get(i).start, hits.get(i).end});
+        for (int b = 0; b < bands.size(); b++) {
+            Hit band = bands.get(b);
+            String engine = band.source == null || band.source.engine == null ? "" : band.source.engine;
+            ArrayList<int[]> rest = subtract(covered, band.start, band.end);
+            for (int r = 0; r < rest.size(); r++) {
+                int[] range = rest.get(r);
+                int valid = validCount(norm, range[0], range[1]);
+                if (valid < Fingerprints.MIN_MATCH) continue;   // 已被句级命中盖住，不值得再报一条
+                extra[0] += valid;
+                extra[1] += overlapValid(norm, range[0], range[1], citations);
+                tally(engineChars, engine.length() == 0 ? "local" : engine, valid);
+                Hit trimmed = new Hit();
+                trimmed.start = range[0];
+                trimmed.end = range[1];
+                trimmed.score = band.score;
+                trimmed.source = band.source;
+                hits.add(trimmed);
+                covered.add(new int[]{range[0], range[1]});
+            }
+            covered = mergeRanges(covered);
+        }
+        return extra;
+    }
+
+    /** [from,to) 里还没被 covered 盖住的部分。 */
+    private static ArrayList<int[]> subtract(ArrayList<int[]> covered, int from, int to) {
+        ArrayList<int[]> out = new ArrayList<int[]>();
+        int cursor = from;
+        ArrayList<int[]> merged = mergeRanges(covered);
+        for (int i = 0; i < merged.size() && cursor < to; i++) {
+            int[] span = merged.get(i);
+            if (span[1] <= cursor || span[0] >= to) continue;
+            if (span[0] > cursor) out.add(new int[]{cursor, Math.min(span[0], to)});
+            cursor = Math.max(cursor, span[1]);
+        }
+        if (cursor < to) out.add(new int[]{cursor, to});
+        return out;
+    }
+
+    private static ArrayList<int[]> mergeRanges(ArrayList<int[]> ranges) {
+        ArrayList<int[]> out = new ArrayList<int[]>();
+        if (ranges.isEmpty()) return out;
+        ArrayList<int[]> sorted = new ArrayList<int[]>(ranges);
+        java.util.Collections.sort(sorted, new Comparator<int[]>() {
+            public int compare(int[] a, int[] b) { return a[0] != b[0] ? a[0] - b[0] : a[1] - b[1]; }
+        });
+        int[] current = sorted.get(0);
+        for (int i = 1; i < sorted.size(); i++) {
+            int[] next = sorted.get(i);
+            if (next[0] <= current[1]) {
+                if (next[1] > current[1]) current[1] = next[1];
+            } else {
+                out.add(current);
+                current = next;
+            }
+        }
+        out.add(current);
+        return out;
     }
 
     /** 结束一段命中：写 Hit、算有效字符与引用重叠、把重复字符记到主导来源名下。 */

@@ -55,7 +55,7 @@ Android 上的 `.docx` 论文工作台：本地解析与回写 OOXML，按 Word 
 
 ### 匹配
 
-正文先做归一化（全半角、繁简、标点、空白、序号与前缀剥离），按句子切分后生成字符级 n-gram 指纹与 MinHash 签名；倒排索引按 n-gram 命中候选句，再用片段的 Dice 系数与跨句连续段合并成相似区间。这套做法与商业系统公开描述的"句子级指纹 + 语库比对"同构，全部计算在本机完成。
+正文先做归一化（全半角、繁简、标点、空白、序号与前缀剥离），按句子切分后生成字符级 n-gram 指纹与 MinHash 签名；倒排索引按 n-gram 命中候选句，再用片段的 Dice 系数与跨句连续段合并成相似区间。句子级之外还有一条字符指纹带：Schleimer/Wilkerson/Aiken 的 winnowing（8 元组取样、窗口 12），任何连续 19 个字符以上的相同片段必定留下一枚共同指纹，所以两边断句不同、把两句并成一句、或者只在中间加个逗号，整段照抄照样被追出来并成一段报告。这一层里汉字数目字与阿拉伯数字同形（"四十分钟"与"40 分钟"、"七成"与"70%"算同一枚 token），那正是降重写法和录入差异最常动的两处。全部计算在本机完成，比对期间没有正文离开设备。
 
 三个指标彼此独立：
 
@@ -71,7 +71,8 @@ Android 上的 `.docx` 论文工作台：本地解析与回写 OOXML，按 Word 
 
 | 来源 | 端点 | 取用内容 |
 | --- | --- | --- |
-| 维普 | `www.cqvip.com/search` | 中文期刊与学位论文的摘要、作者、刊名、年期、文献页地址 |
+| 维普 | `www.cqvip.com/search` | 中文期刊与学位论文的摘要、作者、刊名、年期、文献页地址 |
+| 万方数据 | `s.wanfangdata.com.cn`（gRPC-web） | 期刊与学位论文的题名、作者、刊名或学校、年份、完整摘要、DOI |
 | 国家哲学社会科学文献中心 | `www.ncpssd.org/searchHandler/search` | 社科期刊题录与摘要 |
 | OpenAlex | `api.openalex.org/works` | 标题、摘要、开放获取全文链接 |
 | Crossref | `api.crossref.org/works` | 题录、摘要、DOI 元数据 |
@@ -80,9 +81,9 @@ Android 上的 `.docx` 论文工作台：本地解析与回写 OOXML，按 Word 
 | arXiv | `export.arxiv.org` | 预印本标题与摘要 |
 | CORE | `core.ac.uk` | 聚合开放获取全文（可选配置 API Key） |
 
-开放获取全文按候选题录按需拉取并只做本机比对，命中结果带来源、题名、作者、年份与标识符写进报告。知网与万方没有可匿名调用的检索入口（知网检索页跳滑块验证，`brief/grid` 对匿名会话固定返回"暂无数据"；万方检索走 gRPC-web 且带反爬跳转），这两家走`自建库`（任何来源的文本导进来即可参与比对）或`接口设置`里的自定义查重服务（`审阅 → 接口设置`，支持文档上传或选区提交、字段映射、超时重试），机构或代理商的检测 API 也接在这里。
+开放获取全文按候选题录按需拉取，只在手机上比对；命中结果带来源、题名、作者、年份与标识符写进报告。中文三库里万方开着检索服务：POST 一帧 protobuf 到 `SearchService.SearchService/search`，回来的同样是 protobuf，一次检索连完整摘要一起给回，编解码在 `WanfangProtocol` 与 `ProtoWire` 里手写，不额外引一个 protobuf 运行时。知网的公开检索入口都在滑块验证与会话校验之后，匿名可用的是按文献号或链接取条目、按刊期看目录（`wap.cnki.net/touch/web/Journal/…`）；知网这一路走`自建库`：把手上的题录、PDF 或 Word 导进来就参与比对，机构或代理商的检测 API 接在`接口设置`（`审阅 → 接口设置`，支持文档上传或选区提交、字段映射、超时重试）。
 
-部分移动网络会重置海外源的 TLS 连接：`检索设置 → HTTP 代理`填一个 `host:port` 即可让检索从那里出网（例如 `adb reverse tcp:18899 tcp:7897` 后填 `127.0.0.1:18899`，借电脑上的代理客户端）。代理只隧道 HTTPS；留空即直连，写法不合法也按直连处理，不会把一次查重弄成失败。
+部分移动网络会重置海外源的 TLS 连接：`检索设置 → HTTP 代理`填一个 `host:port` 就能让检索从那里出网。手机上最省事的接法是把电脑上的代理端口用数据线映射进来：`adb reverse tcp:18899 tcp:7897`（7897 是电脑上 Clash 的 mixed 端口），然后填 `127.0.0.1:18899`。代理只隧道 HTTPS，看不到正文；留空即直连，写法不合法也按直连处理。代理那头没人应答（拔了线、忘了 `adb reverse`）时退回直连重试一次，一次查重不会因为代理没接上而整轮失败。
 
 ### AIGC 倾向
 
@@ -135,8 +136,10 @@ OoxmlPreserver ┘                     │
                                      └─ ReviewManager   修订与批注线程
 
 DuplicateEngine ─┬─ TextCorpus      归一化、句子切分、n-gram/MinHash 指纹、倒排匹配
+                 │                └─ Fingerprints   字符级 winnowing 指纹带：跨句连续复制
                  ├─ LocalLibrary    自建库导入与持久化索引
                  ├─ PaperSources    内置检索源查询与响应解析
+                 │                └─ WanfangProtocol 万方 gRPC-web 编解码（ProtoWire）
                  ├─ AigcDetector    逐句机器生成倾向分
                  └─ LocalRewriter   离线降重规则；与自定义大模型接口共用 TextProtection
 ```
@@ -183,9 +186,9 @@ Robolectric 排版与 UI 回归在 `tests/ui`：
 cd tests/ui && gradle --no-daemon test --console=plain
 ```
 
-`tools/test-host.ps1` 一次跑完 12 个 JVM 套件，962 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 129、`AigcRegression` 逐句倾向 58、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 147、`ApiRegression` 接口配置与加密 30、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
+`tools/test-host.ps1` 一次跑完 12 个 JVM 套件，1033 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 168、`AigcRegression` 逐句倾向 70、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 167、`ApiRegression` 接口配置与加密 30、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
 
-联网检索源的解析全部走本地回环服务，避免测试依赖外网；要确认八个源此刻真的能返回题录，跑：
+联网检索源的解析全部走本地回环服务，避免测试依赖外网；要确认这九个内置源此刻真的能返回题录，跑：
 
 ```powershell
 java -cp <classes> com.rikkahub.wordlite.LiveEngineProbe engines"论文关键词"
@@ -219,14 +222,12 @@ pwsh tools/word-parity.ps1 -Impl new             # 与 Word 页码表逐段对�
 
 ## 版本
 
-`0.4.0` / `versionCode 13`
+`0.5.0` / `versionCode 21`
 
-- 上下标行宽与行高改为 Word 语义，修复含 `w:vertAlign` 段落的提前换行与分页漂移。
-- 表格按 `w:tblGrid` 列宽、`w:tcMar` 内边距与 `w:trHeight` 排版，一篇四张表的开题报告从 29 页回到 Word 的 28 页，同页段落从 75.7% 升到 96.6%。
-- 查重内置检索源（维普 / 国家哲社文献中心 / OpenAlex / Crossref / Semantic Scholar / Europe PMC / arXiv / CORE）、HTTP 代理出网与本机指纹比对，支持自建库。
-- 新增 AIGC 逐句检测与整篇比例、去除引用重复比与自编率。
-- 降重新增离线规则后端，与自定义大模型接口自动回落。
-- 报告补齐来源分布、AIGC 明细与自建库命中。
+- 内置检索源加到九个，中文这一侧补齐万方：它的检索只说 gRPC-web，请求与返回都是 protobuf，`ProtoWire` 与 `WanfangProtocol` 自带一份够用的编解码，不引 protobuf 运行时；一次检索连完整摘要一起进本机比对。维普、国家哲社文献中心照旧。
+- 匹配多了一条字符指纹带（winnowing，8 元组取样、窗口 12）：连续 19 个字符以上的照抄，不管两边怎么断句都能整段追出来；汉字数目字与阿拉伯数字在这一层同形，"四十分钟"改成"40 分钟"不再把一段复制砍成两截。
+- 代理没人应答时退回直连重试一次；`检索设置 → HTTP 代理`配合 `adb reverse` 就能借电脑出网，海外源不再被手机链路掐断。
+- 知网的公开检索入口仍关在滑块验证之后，能匿名取回的是按文献号或链接取条目与刊期目录；知网题录走`自建库`。
 
 ## 隐私与安全
 

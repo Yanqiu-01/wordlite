@@ -28,6 +28,8 @@ public final class ApiClient {
     public static final class Response {
         public int status;
         public String body = "";
+        /** 同一段响应的原始字节：万方的 gRPC-web 响应不是文本，得先按字节解完再谈编码。 */
+        public byte[] raw = new byte[0];
         public long elapsedMillis;
         public int attempts;
     }

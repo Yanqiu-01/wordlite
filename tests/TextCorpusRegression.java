@@ -24,6 +24,7 @@ public final class TextCorpusRegression {
         splitting();
         similarity();
         matching();
+        fingerprints();
         merging();
         rates();
         citations();
@@ -196,6 +197,62 @@ public final class TextCorpusRegression {
                 + "把特征工程交给领域专家手工完成，是早期系统的常见做法。", null);
         check(two.hits.size() == 2, "two adjacent hits from different sources stay as two separate segments");
         check(two.byEngine.size() == 2, "byEngine lists both engines");
+    }
+
+    /** 指纹带：与断句无关的连续重复，短于最短匹配长度的巧合不算重复。 */
+    private static void fingerprints() {
+        check(Fingerprints.GRAM == 8 && Fingerprints.WINDOW == 12, "取样参数是 8 元组配 12 的窗口");
+        check(Fingerprints.MIN_MATCH == 19, "最短可报告匹配是 19 个字符");
+        String[] pieces = {"第一段只有十来个字。", "第二段也差不多长。", "第三段同样如此而已。"};
+        String stitched = "第一段只有十来个字第二段也差不多长第三段同样如此而已";
+        check(TextCorpus.sentences(pieces[0]).size() == 1, "语料里的每一小段都是一句");
+        TextCorpus small = new TextCorpus();
+        TextCorpus.Source paper = source("fp1", "跨句复制的样本", "local");
+        small.add(paper, pieces[0] + pieces[1] + pieces[2]);
+        check(small.sentenceCount() == 0, "短于十二字的句子不进句级索引");
+        String copied = "文献的原话是" + stitched + "，这一点在实验记录里可以对上。";
+        TextCorpus.Report stitchedReport = small.match(copied, null);
+        check(!stitchedReport.hits.isEmpty(), "每句都不够长时，指纹带仍然找到连续复制");
+        boolean spansBoundary = false;
+        for (int i = 0; i < stitchedReport.hits.size(); i++) {
+            TextCorpus.Hit hit = stitchedReport.hits.get(i);
+            if (hit.start <= copied.indexOf(stitched) && hit.end >= copied.indexOf(stitched) + stitched.length())
+                spansBoundary = true;
+        }
+        check(spansBoundary, "跨句的连续复制被报成一段而不是切碎");
+        check(stitchedReport.duplicateChars >= Fingerprints.MIN_MATCH, "重复字符数记进了分子");
+        check("跨句复制的样本".equals(stitchedReport.hits.get(0).source.title), "指纹命中带着来源标题");
+
+        TextCorpus shortShare = new TextCorpus();
+        shortShare.add(source("fp2", "术语来源", "local"),
+                "这套流程的名称叫做自适应窗口取样算法，其余内容与本题无关，纯粹是为了凑够长度。");
+        TextCorpus.Report shortQuery = shortShare.match(
+                "自适应窗口取样算法这个名字听起来很直白，别的句子都是我们自己写的，没有从别处抄。", null);
+        check(shortQuery.hits.isEmpty(), "共享不足十九个字符时不报重复");
+
+        TextCorpus punctuated = new TextCorpus();
+        punctuated.add(source("fp3", "标点干扰", "local"),
+                "保温时间超过四十分钟之后反应层明显增厚，接头强度随之下降到原来的七成左右。");
+        TextCorpus.Report punctReport = punctuated.match(
+                "保温时间超过 40 分钟之后，反应层明显增厚；接头强度随之下降到原来的 70 %左右。这样的写法很常见。", null);
+        check(!punctReport.hits.isEmpty(), "标点与半角数字改动不影响连续重复的认定");
+
+        TextCorpus both = new TextCorpus();
+        both.add(source("fp4", "重复计数的对照", "local"),
+                "取样位置固定在接头中心两侧，每次试验都记录峰值载荷与断裂位置。");
+        String verbatim = "取样位置固定在接头中心两侧，每次试验都记录峰值载荷与断裂位置。";
+        TextCorpus.Report overlap = both.match(verbatim + "后面是我们自己写的分析部分，用来把分母撑大一些。", null);
+        int once = TextCorpus.validCount(TextCorpus.normalize(verbatim), 0, verbatim.length());
+        check(overlap.duplicateChars == once, "两套算法命中同一段时字符只算一次");
+
+        String reference = "参考文献\n[1] 张三. 取样位置对峰值载荷的影响[J]. 焊接学报, 2020, 41(3): 12-20.\n"
+                + "[2] 李四. 反应层厚度与接头强度[J]. 材料工程, 2021, 49(8): 33-41.\n";
+        TextCorpus citedOut = new TextCorpus();
+        citedOut.add(source("fp5", "被引用的条目", "local"),
+                "取样位置对峰值载荷的影响在接头中心两侧最为明显，这一点已经被反复验证过。");
+        TextCorpus.Report citedReport = citedOut.match("正文从这里开始讲我们的实验设置。\n" + reference,
+                null, TextCorpus.structure("正文从这里开始讲我们的实验设置。\n" + reference).spanArray());
+        check(citedReport.hits.isEmpty(), "落在参考文献区间里的重复不会被指纹带翻出来");
     }
 
     private static void merging() {

@@ -99,6 +99,9 @@ public final class LiveEngineProbe {
         PaperSources.Limits limits = new PaperSources.Limits();
         limits.perEngine = 5;
         limits.timeoutSeconds = 25;
+        /* WORDLITE_PROXY=host:port 让同一份探针从手机或电脑经代理再跑一遍。 */
+        String via = System.getenv("WORDLITE_PROXY");
+        limits.proxy = via == null ? "" : via.trim();
         String key = System.getenv("WORDLITE_CORE_KEY");
         limits.coreKey = key == null ? "" : key.trim();
         return limits;

@@ -2,6 +2,19 @@
 
 版本号遵循"功能加一版、修复加一位"，每个可安装构建同步递增 `versionName` / `versionCode`。
 
+## 0.5.0（`versionCode 21`）
+
+**万方接进来了，照抄的那一段不再看两边怎么断句**
+
+- 内置检索源从八个变成九个，万方数据排在中文库第一位。万方的检索只说 gRPC-web：`POST https://s.wanfangdata.com.cn/SearchService.SearchService/search`，请求体是 5 字节帧头加一帧 protobuf（`CommonRequest{searchType=paper, searchWord, currentPage, pageSize}` + `interfaceType`），回来的也是帧化 protobuf。`ProtoWire` 只实现线格式里用到的 varint 与长度前缀两段，`WanfangProtocol` 按字段号取题名/作者/刊名或学校/年份/摘要/DOI，并给出 `https://d.wanfangdata.com.cn/periodical/{id}` 这类可点开的文献页。为的是一个不到四十一个字节的请求体去引 protobuf 运行时不划算，读侧越界的长度前缀一律按格式无效处理。
+- 实测"机器学习"0.5 秒返回 5 条题录、总命中 242193 条，摘要整段进本机比对——这是中文三库里唯一给匿名调用者留门的检索口。`HttpTransport.postBytes` 是新的字节通道：写 protobuf 请求体、按字节收响应（`ApiClient.Response.raw`），护栏与 GET/POST 相同（只走 HTTPS、不追重定向、响应有上限、错误里不带地址）。
+- `TextCorpus` 在句子级之外加了一条字符指纹带：`Fingerprints` 做滚动 8 元组哈希 + Robust Winnowing（窗口 12），数学上保证任何不少于 19 个字符（`n + w - 1`）的公共片段必定留下一枚共同指纹，与两边怎么断句无关。取样比的是指纹值而不是窗口下标——按窗口下标去重时两边历史不同，同一段文字可以一边输出一边不输出，整段照抄反而躲过检测。命中经 `run()` 逐 token 验算后只补句级没盖住的字符，两套算法不会把分子翻倍。
+- 滚窗口那一步少乘了一次 BASE：滚出窗口的旧字符此时位权是 `BASE^GRAM`，减成 `BASE^(GRAM-1)` 会让哈希一直拖着整段前缀，同一段文字换个位置算出来两样，指纹比对退化成"两边恰好在同一处开头"才命中。修完之后同一段 26 字的复制从 0 枚共同指纹变成 3 枚，报成一段而不是切碎。
+- 汉字数目字与阿拉伯数字在指纹层同形：连着的数字折成一枚 token，`40` 与 `四十`、`70%` 与 `七成` 占同一个格子，取样与验算同一个口径。这是降重写法和录入差异里最常动的两处，不折就会把一段连续复制砍成三四截，谁都不到 19 字符。折完之后的副作用写进了注释：1949 年与 1979 年同形，但 19 字符的门槛决定了单靠年份撑不起一段重复。
+- 代理那一头没人应答时退回直连重试一次（`HttpTransport.send`）。手机上的代理是 `adb reverse tcp:18899 tcp:7897` 映射过来的电脑端口，拔线或忘了 reverse 之后端口就没人听；只有"拨不通/握手失败"才换路重试，对端明确拒绝或限流时不重复打扰。
+- 知网仍然没有匿名检索口：`kns8s/*` 一律 302 到滑块验证，`brief/grid` 对匿名会话固定回 102 字节的"暂无数据"，`search.cnki.com.cn/api/search/listresult` 的 POST 在直连与代理下都是 50 秒 504。能匿名取回的是 `wap.cnki.net/touch/web/Journal/…` 的条目与刊期目录，知网题录走`自建库`或`接口设置`里的自定义服务，本版不假装能白拿。
+- 回归：`TextCorpusRegression` 156 → 168（跨句复制、标点与数字改写、不足 19 字符不报重复），`DetectRegression` 156 → 167（万方真实抓包的解析、帧长自洽、`status=false` 的原话进注记、帧被截断不得静默给空结果、代理没人应答退回直连）。夹具 `tests/samples/wanfang-search.bin` 是真实响应字节。12 个套件 1010 → 1033 断言通过；`LiveEngineProbe engines` 在线核对九个源：万方 5 条 / 维普 5 条 / 哲社 5 条 / OpenAlex 5 条 / Crossref 5 条 / Europe PMC 5 条，Semantic Scholar 公共配额偶尔 429。
+
 ## 0.4.7（`versionCode 20`）
 
 **改写有没有用，由改写前后的对照说了算**

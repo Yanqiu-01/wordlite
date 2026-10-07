@@ -22,6 +22,10 @@ public final class DetectRegression {
     private static volatile String lastApiKey = "";
     private static volatile String lastMethod = "", lastForm = "";
     private static String cqvipFixture = "", ncpssdFixture = "";
+    /* 万方那一路收发的是 protobuf 字节，夹具也照字节存，文本通道一概不碰。 */
+    private static byte[] wanfangFixture = new byte[0];
+    private static byte[] lastBinaryBody = new byte[0];
+    private static String lastContentType = "";
     private static void check(boolean ok, String message) {
         if (!ok) throw new AssertionError(message);
         checks++;
@@ -103,6 +107,13 @@ public final class DetectRegression {
     public static void main(String[] args) throws Exception {
         cqvipFixture = fixture(args.length > 0 ? args[0] : "tests/samples/cqvip-search.html");
         ncpssdFixture = fixture(args.length > 1 ? args[1] : "tests/samples/ncpssd-search.json");
+        wanfangFixture = binary(args.length > 2 ? args[2] : "tests/samples/wanfang-search.bin");
+        /* 万方答"检索参数为空"时把 status 置 false，原因写在 message 里，这条路径得单独演一遍。 */
+        java.io.ByteArrayOutputStream refused = new java.io.ByteArrayOutputStream();
+        ProtoWire.writeTag(refused, 1, 0);
+        ProtoWire.writeVarint(refused, 0);
+        ProtoWire.writeString(refused, 2, "检索参数为空");
+        final byte[] refusedFrame = grpcFrame(refused.toByteArray());
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/openalex", exchange -> { record("/openalex", queryOf(exchange)); respond(exchange, 200, OPENALEX); });
         server.createContext("/crossref", exchange -> { record("/crossref", queryOf(exchange)); respond(exchange, 200, CROSSREF); });
@@ -126,6 +137,36 @@ public final class DetectRegression {
             lastMethod = exchange.getRequestMethod();
             lastForm = body(exchange);
             respond(exchange, 200, ncpssdFixture);
+        });
+        server.createContext("/wanfang", exchange -> {
+            record("/wanfang", queryOf(exchange));
+            lastMethod = exchange.getRequestMethod();
+            lastContentType = String.valueOf(exchange.getRequestHeaders().getFirst("Content-Type"));
+            java.io.ByteArrayOutputStream asked = new java.io.ByteArrayOutputStream();
+            InputStream input = exchange.getRequestBody();
+            byte[] buffer = new byte[4096];
+            int count;
+            while ((count = input.read(buffer)) > 0) asked.write(buffer, 0, count);
+            lastBinaryBody = asked.toByteArray();
+            exchange.getResponseHeaders().set("Content-Type", "application/grpc-web+proto");
+            exchange.sendResponseHeaders(200, wanfangFixture.length);
+            exchange.getResponseBody().write(wanfangFixture);
+            exchange.close();
+        });
+        server.createContext("/wanfang-refused", exchange -> {
+            record("/wanfang-refused", queryOf(exchange));
+            readQuietly(exchange);
+            exchange.sendResponseHeaders(200, refusedFrame.length);
+            exchange.getResponseBody().write(refusedFrame);
+            exchange.close();
+        });
+        server.createContext("/wanfang-truncated", exchange -> {
+            record("/wanfang-truncated", queryOf(exchange));
+            readQuietly(exchange);
+            byte[] half = java.util.Arrays.copyOf(wanfangFixture, 40);
+            exchange.sendResponseHeaders(200, half.length);
+            exchange.getResponseBody().write(half);
+            exchange.close();
         });
         server.createContext("/notfound", exchange -> { record("/notfound", queryOf(exchange)); respond(exchange, 404, "{\"error\":\"missing\"}"); });
         server.createContext("/error", exchange -> { record("/error", queryOf(exchange)); respond(exchange, 500, "{\"error\":\"boom\"}"); });
@@ -204,6 +245,7 @@ public final class DetectRegression {
     /** The loopback fixtures stand in for every built-in connector. */
     private static void loopback(String base) {
         PaperSources.setEndpoint("cqvip", base + "/cqvip");
+        PaperSources.setEndpoint("wanfang", base + "/wanfang");
         PaperSources.setEndpoint("ncpssd", base + "/ncpssd");
         PaperSources.setEndpoint("openalex", base + "/openalex");
         PaperSources.setEndpoint("crossref", base + "/crossref");
@@ -249,6 +291,64 @@ public final class DetectRegression {
                 "哲社中心收到带字段码的 POST 检索式");
         check(!query("/ncpssd").contains("IKTE") && form.length() < 320,
                 "检索式只装得下短语，正文不参与");
+        /* 万方：拿真实的 gRPC-web 抓包做夹具，防的是字段号漂移之后解析器静默交白卷。 */
+        ArrayList<PaperSources.Candidate> wf = PaperSources.search("wanfang", "机器学习", limits, null);
+        check(wf.size() == 3, "万方一帧里的三条记录都被读出来");
+        check(wf.get(0).source.locator.equals("https://d.wanfangdata.com.cn/periodical/gdxxhxxb202602011"),
+                "万方记录以文献页地址为标识");
+        check(wf.get(0).source.title.contains("催化电子捐赠的机器学习描述符")
+                        && wf.get(0).source.title.endsWith("《高等学校化学学报》")
+                        && !wf.get(0).source.title.contains("的 机器学习"),
+                "题名取中文那条并挂上出处，去高亮时不在中文词中间补空格");
+        check(wf.get(0).source.year.equals("2026") && wf.get(0).source.authors.startsWith("赵迎, 杨海迪"),
+                "年份与作者顺序照著录项来");
+        check(wf.get(0).abstractText.contains("梯度提升回归") && !wf.get(0).abstractText.contains("span"),
+                "摘要去掉标签之后才是可比对文本");
+        check(lastMethod.equals("POST") && lastContentType.equals("application/grpc-web+proto"),
+                "万方只收 gRPC-web 的 POST");
+        int declared = ((lastBinaryBody[1] & 0xFF) << 24) | ((lastBinaryBody[2] & 0xFF) << 16)
+                | ((lastBinaryBody[3] & 0xFF) << 8) | (lastBinaryBody[4] & 0xFF);
+        check(lastBinaryBody.length == declared + 5, "发出去的是自洽的一帧，帧长与字节数一致");
+        check(contains(lastBinaryBody, "机器学习".getBytes(StandardCharsets.UTF_8)) && lastBinaryBody.length < 96,
+                "帧里只有检索短语，正文不参与");
+        PaperSources.setEndpoint("wanfang", base + "/wanfang-refused");
+        String refusal = "";
+        try { PaperSources.search("wanfang", "机器学习", limits, null); }
+        catch (IOException error) { refusal = String.valueOf(error.getMessage()); }
+        check(refusal.contains("检索参数为空"), "万方答不通时把它的原话带进注记，不自己编一句没有重复");
+        PaperSources.setEndpoint("wanfang", base + "/wanfang-truncated");
+        boolean torn = false;
+        try { PaperSources.search("wanfang", "机器学习", limits, null); } catch (IOException error) { torn = true; }
+        check(torn, "帧长和实际字节数对不上时不静默给空结果");
+        PaperSources.setEndpoint("wanfang", base + "/wanfang");
+    }
+
+    /** gRPC-web 帧：1 字节标志 + 4 字节大端长度 + 消息体，和 WanfangProtocol 写出去的一致。 */
+    private static byte[] grpcFrame(byte[] message) {
+        byte[] out = new byte[message.length + 5];
+        out[1] = (byte) (message.length >>> 24);
+        out[2] = (byte) (message.length >>> 16);
+        out[3] = (byte) (message.length >>> 8);
+        out[4] = (byte) message.length;
+        System.arraycopy(message, 0, out, 5, message.length);
+        return out;
+    }
+
+    private static boolean contains(byte[] haystack, byte[] needle) {
+        outer:
+        for (int at = 0; at + needle.length <= haystack.length; at++) {
+            for (int i = 0; i < needle.length; i++) if (haystack[at + i] != needle[i]) continue outer;
+            return true;
+        }
+        return false;
+    }
+
+    private static byte[] binary(String path) {
+        try {
+            return java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path));
+        } catch (IOException error) {
+            throw new IllegalStateException("missing binary fixture " + path, error);
+        }
     }
 
     private static String fixture(String path) {
@@ -310,10 +410,12 @@ public final class DetectRegression {
 
     private static void engines(String base) throws Exception {
         ArrayList<String> engines = PaperSources.engines();
-        check(engines.size() == 8 && engines.contains("openalex") && engines.contains("semantic-scholar")
+        check(engines.size() == 9 && engines.contains("openalex") && engines.contains("semantic-scholar")
                         && engines.contains("europepmc") && engines.contains("core")
-                        && engines.contains("cqvip") && engines.contains("ncpssd"),
-                "eight built-in engines are registered, the two Chinese ones first");
+                        && engines.contains("cqvip") && engines.contains("wanfang") && engines.contains("ncpssd")
+                        && engines.subList(0, 3).containsAll(
+                                java.util.Arrays.asList("cqvip", "wanfang", "ncpssd")),
+                "nine built-in engines are registered, the three Chinese ones first");
         loopback(base);
         PaperSources.Limits limits = limits();
 
@@ -457,6 +559,14 @@ public final class DetectRegression {
         String routed = requestLines.isEmpty() ? "<none>" : requestLines.get(0);
         check(requestLines.size() == 1 && routed.startsWith("GET " + base + "/openalex?") && routed.contains("brazing+temperature"),
                 "the proxy is given the absolute URL it needs to route on: " + routed);
+        /* 手机上的代理是 adb reverse 出来的临时端口，拔线之后就没人听了：这时候该退回直连，
+           而不是把一次好好的查重判成失败。 */
+        PaperSources.Limits dead = limits();
+        dead.proxy = "127.0.0.1:1";
+        int beforeDead = hits("/openalex");
+        check(PaperSources.search("openalex", "brazing temperature", dead, null).size() == 1
+                        && hits("/openalex") == beforeDead + 1,
+                "代理没人应答时退回直连，检索不因此失败");
         PaperSources.Limits portless = limits();
         portless.proxy = "127.0.0.1";
         int beforeDirect = hits("/openalex");

@@ -29,6 +29,7 @@ public final class PaperSources {
     private static LinkedHashMap<String, String> defaults() {
         LinkedHashMap<String, String> map = new LinkedHashMap<String, String>();
         map.put("cqvip", "https://www.cqvip.com/search");
+        map.put("wanfang", "https://s.wanfangdata.com.cn/SearchService.SearchService/search");
         map.put("ncpssd", "https://www.ncpssd.org/searchHandler/search");
         map.put("openalex", "https://api.openalex.org/works");
         map.put("crossref", "https://api.crossref.org/works");
@@ -45,6 +46,7 @@ public final class PaperSources {
     public static String label(String engine) {
         String name = key(engine);
         if (name.equals("cqvip")) return "维普（中文期刊）";
+        if (name.equals("wanfang")) return "万方数据";
         if (name.equals("ncpssd")) return "国家哲社文献中心";
         if (name.equals("openalex")) return "OpenAlex";
         if (name.equals("crossref")) return "Crossref";
@@ -81,6 +83,14 @@ public final class PaperSources {
         if (name.equals("core")) headers.put("api-key", safe.coreKey.trim());
         /* 国家哲社文献中心只接 POST，检索式必须带字段码；维普的检索页是服务端渲染的 HTML。
            其余源仍是一次 GET 加查询串。 */
+        /* 万方走 gRPC-web：请求体和响应都不是文本，编解码在 WanfangProtocol 里，
+           这条路上没有查询串，检索式整个装在 protobuf 消息里发出去。 */
+        if (name.equals("wanfang")) {
+            ApiClient.Response binary = HttpTransport.postBytes(endpoint(name),
+                    WanfangProtocol.request(phrase, 1, per), WanfangProtocol.CONTENT_TYPE, headers,
+                    safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation, proxyFor(safe));
+            return WanfangProtocol.parse(binary.raw, per);
+        }
         ApiClient.Response response = name.equals("ncpssd")
                 ? HttpTransport.post(endpoint(name), formFor(phrase, per), headers,
                         safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation, proxyFor(safe))
@@ -184,7 +194,7 @@ public final class PaperSources {
         return odd > 8;
     }
 
-    private static void add(ArrayList<Candidate> out, Candidate candidate, int limit) {
+    static void add(ArrayList<Candidate> out, Candidate candidate, int limit) {
         if (out.size() >= limit) return;
         if (candidate.source.title.isEmpty() && candidate.abstractText.isEmpty()) return;
         for (Candidate known : out) {
@@ -261,7 +271,7 @@ public final class PaperSources {
         }
         return value == null ? "" : String.valueOf(value).trim();
     }
-    private static String year(String value) {
+    static String year(String value) {
         for (int i = 0; i + 3 < value.length(); i++) {
             if (value.charAt(i) < '0' || value.charAt(i) > '9') continue;
             int digits = 0;
@@ -393,7 +403,7 @@ public final class PaperSources {
         return join(names);
     }
 
-    private static String join(ArrayList<String> values) {
+    static String join(ArrayList<String> values) {
         StringBuilder out = new StringBuilder();
         for (String value : values) {
             if (out.length() > 0) out.append(", ");
@@ -545,7 +555,7 @@ public final class PaperSources {
         return out.toString();
     }
     private static String first(String left, String right) { return left == null || left.isEmpty() ? (right == null ? "" : right) : left; }
-    private static String clip(String value) {
+    static String clip(String value) {
         String text = value == null ? "" : value;
         return text.length() > MAX_TEXT ? text.substring(0, MAX_TEXT) : text;
     }

@@ -49,7 +49,7 @@ public final class HttpTransport {
     public static ApiClient.Response get(String url, Map<String, String> headers, int timeoutSeconds,
                                          int maxBytes, ApiClient.Cancellation cancellation,
                                          java.net.Proxy proxy) throws IOException {
-        return send(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, null);
+        return send(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, null, null);
     }
 
     /**
@@ -59,39 +59,66 @@ public final class HttpTransport {
     public static ApiClient.Response post(String url, String form, Map<String, String> headers, int timeoutSeconds,
                                           int maxBytes, ApiClient.Cancellation cancellation,
                                           java.net.Proxy proxy) throws IOException {
-        return send(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, form == null ? "" : form);
+        String payload = form == null ? "" : form;
+        return send(url, headers, timeoutSeconds, maxBytes, cancellation, proxy,
+                payload.getBytes(StandardCharsets.UTF_8), null);
+    }
+
+    /**
+     * 万方那一路的检索体是 protobuf 而不是表单，回来的也是 protobuf，所以要一条按字节写、按字节读的路。
+     * 护栏和 GET/POST 完全一样：只走 HTTPS、不追重定向、响应有上限、错误里不带地址。
+     */
+    public static ApiClient.Response postBytes(String url, byte[] payload, String contentType,
+                                               Map<String, String> headers, int timeoutSeconds,
+                                               int maxBytes, ApiClient.Cancellation cancellation,
+                                               java.net.Proxy proxy) throws IOException {
+        return send(url, headers, timeoutSeconds, maxBytes, cancellation, proxy,
+                payload == null ? new byte[0] : payload, contentType);
     }
 
     private static ApiClient.Response send(String url, Map<String, String> headers, int timeoutSeconds,
                                            int maxBytes, ApiClient.Cancellation cancellation,
-                                           java.net.Proxy proxy, String form) throws IOException {
+                                           java.net.Proxy proxy, byte[] form, String contentType)
+            throws IOException {
         try {
-            return once(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, form);
-        } catch (ApiClient.Failure throttled) {
-            if (throttled.status != 429 || Thread.currentThread().isInterrupted()
-                    || (cancellation != null && cancellation.cancelled())) throw throttled;
-            long wait = throttled.retryAfterSeconds > 0
-                    ? throttled.retryAfterSeconds * 1000L : RETRY_DELAY_MILLIS;
+            return once(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, form, contentType);
+        } catch (ApiClient.Failure failure) {
+            /* 手机上的代理多半是 adb reverse 出来的临时端口，线没接上的时候直连反而通。
+               只有"连不上"才值得换条路重试；对端明确拒绝或限流时，再试一次只是慢。 */
+            if (proxy != null && failure.status == 0 && unreachableThroughProxy(failure))
+                return once(url, headers, timeoutSeconds, maxBytes, cancellation, null, form, contentType);
+            if (failure.status != 429 || Thread.currentThread().isInterrupted()
+                    || (cancellation != null && cancellation.cancelled())) throw failure;
+            long wait = failure.retryAfterSeconds > 0
+                    ? failure.retryAfterSeconds * 1000L : RETRY_DELAY_MILLIS;
             if (wait > MAX_RETRY_WAIT_MILLIS)
-                throw new ApiClient.Failure("检索源限流，约 " + throttled.retryAfterSeconds
-                        + " 秒后恢复，本次跳过", throttled.status);
+                throw new ApiClient.Failure("检索源限流，约 " + failure.retryAfterSeconds
+                        + " 秒后恢复，本次跳过", failure.status);
             try {
                 Thread.sleep(wait);
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
-                throw throttled;
+                throw failure;
             }
-            ApiClient.Response retry = once(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, form);
+            ApiClient.Response retry = once(url, headers, timeoutSeconds, maxBytes, cancellation, proxy,
+                    form, contentType);
             retry.attempts = 2;
             return retry;
         }
+    }
+
+    /** 拨不通代理和代理替我们对端谈崩了，都表现为一次没有状态码的连接失败。 */
+    private static boolean unreachableThroughProxy(ApiClient.Failure failure) {
+        String message = String.valueOf(failure.getMessage());
+        return message.startsWith("网络连接失败") || message.startsWith("安全连接失败");
     }
 
     /** Only https, no redirects, and the request line never carries document text. */
 
     private static ApiClient.Response once(String url, Map<String, String> headers, int timeoutSeconds,
                                            int maxBytes, ApiClient.Cancellation cancellation,
-                                           java.net.Proxy proxy, String form) throws IOException {
+                                           java.net.Proxy proxy, byte[] form, String contentType)
+            throws IOException {
         int limit = maxBytes <= 0 ? MAX_BODY : Math.min(maxBytes, MAX_BODY);
         int seconds = timeoutSeconds <= 0 ? 20 : Math.min(timeoutSeconds, 120);
         HttpURLConnection connection = null;
@@ -107,7 +134,8 @@ public final class HttpTransport {
             connection.setRequestMethod(form == null ? "GET" : "POST");
             connection.setUseCaches(false);
             if (form != null)
-                connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+                connection.setRequestProperty("Content-Type", contentType == null || contentType.trim().isEmpty()
+                        ? "application/x-www-form-urlencoded; charset=UTF-8" : contentType.trim());
             connection.setRequestProperty("Accept", "application/json, application/xml, text/xml, text/plain;q=0.8, */*;q=0.5");
             connection.setRequestProperty("User-Agent", USER_AGENT);
             if (headers != null) for (Map.Entry<String, String> header : headers.entrySet()) {
@@ -127,7 +155,12 @@ public final class HttpTransport {
             }
             ApiClient.Response response = new ApiClient.Response();
             response.status = status;
-            try (InputStream input = connection.getInputStream()) { response.body = read(input, limit, cancellation); }
+            byte[] raw;
+            try (InputStream input = connection.getInputStream()) {
+                raw = read(input, limit, cancellation);
+            }
+            response.raw = raw;
+            response.body = new String(raw, StandardCharsets.UTF_8);
             response.attempts = 1;
             response.elapsedMillis = (System.nanoTime() - started) / 1000000;
             return response;
@@ -162,9 +195,8 @@ public final class HttpTransport {
         throw new ApiClient.Failure("检索源必须使用 HTTPS", 0);
     }
     /** The search form is built here, never taken from the document, so its length is not a leak. */
-    private static void writeForm(HttpURLConnection connection, String form,
+    private static void writeForm(HttpURLConnection connection, byte[] payload,
                                   ApiClient.Cancellation cancellation) throws IOException {
-        byte[] payload = form.getBytes(StandardCharsets.UTF_8);
         connection.setFixedLengthStreamingMode(payload.length);
         connection.setDoOutput(true);
         try (OutputStream out = connection.getOutputStream()) {
@@ -181,7 +213,7 @@ public final class HttpTransport {
     private static void guard(ApiClient.Cancellation cancellation) throws ApiClient.Failure {
         if (Thread.currentThread().isInterrupted() || cancellation != null && cancellation.cancelled()) throw new ApiClient.Failure("已取消", 0);
     }
-    private static String read(InputStream input, int limit, ApiClient.Cancellation cancellation) throws IOException {
+    private static byte[] read(InputStream input, int limit, ApiClient.Cancellation cancellation) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buffer = new byte[8192];
         int count;
@@ -190,7 +222,7 @@ public final class HttpTransport {
             if (out.size() + count > limit) throw new ApiClient.Failure("响应过大", 0);
             out.write(buffer, 0, count);
         }
-        return new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+        return out.toByteArray();
     }
     /** A throttled source and a dead source need different replies from the report, and the
      *  status code is the only evidence left once the body has been dropped, so it stays in the
