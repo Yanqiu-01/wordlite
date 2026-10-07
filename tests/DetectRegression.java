@@ -6,7 +6,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -148,7 +150,9 @@ public final class DetectRegression {
             phrase();
             marking();
             scan(base);
+            unreachable(base);
             reports();
+            unfinishedReport();
         } finally {
             server.stop(0);
             PaperSources.resetEndpoints();
@@ -175,16 +179,25 @@ public final class DetectRegression {
         limits.timeoutSeconds = 8;
         return limits;
     }
-    private static void engines(String base) throws Exception {
-        ArrayList<String> engines = PaperSources.engines();
-        check(engines.size() == 6 && engines.contains("openalex") && engines.contains("semantic-scholar")
-                && engines.contains("europepmc") && engines.contains("core"), "six built-in engines are registered");
+    /** The loopback fixtures stand in for every built-in connector. */
+    private static void loopback(String base) {
         PaperSources.setEndpoint("openalex", base + "/openalex");
         PaperSources.setEndpoint("crossref", base + "/crossref");
         PaperSources.setEndpoint("semantic-scholar", base + "/semantic-scholar");
         PaperSources.setEndpoint("europepmc", base + "/europepmc/search");
         PaperSources.setEndpoint("arxiv", base + "/arxiv");
         PaperSources.setEndpoint("core", base + "/core");
+    }
+    private static void everyEndpointAt(String url) {
+        ArrayList<String> all = PaperSources.engines();
+        for (String engine : all) PaperSources.setEndpoint(engine, url);
+    }
+
+    private static void engines(String base) throws Exception {
+        ArrayList<String> engines = PaperSources.engines();
+        check(engines.size() == 6 && engines.contains("openalex") && engines.contains("semantic-scholar")
+                && engines.contains("europepmc") && engines.contains("core"), "six built-in engines are registered");
+        loopback(base);
         PaperSources.Limits limits = limits();
 
         PaperSources.Candidate openalex = PaperSources.search("openalex", "brazing temperature", limits, null).get(0);
@@ -478,6 +491,8 @@ public final class DetectRegression {
                         && report.aigcRate >= 0 && report.aigcRate <= 100,
                 "all four rates stay inside 0..100");
         check(report.selfWrittenRate + report.overallRate <= 100.0001, "self-written rate never double counts duplicated text");
+        check(!report.retrievalIncomplete && report.retrievalReason == null,
+                "a loopback scan that took candidates is a complete run");
         check(!report.detectedAt.isEmpty() && report.elapsedMillis >= 0, "report stamps detection time and elapsed millis");
         check(report.sourceText.equals(selection.text), "report keeps the scanned text for snippet rendering");
         check(!labels.isEmpty() && labels.get(0).startsWith("检索"), "progress reports retrieval steps first");
@@ -497,12 +512,16 @@ public final class DetectRegression {
         for (String note : stopped.notes) if (note.contains("取消")) noted = true;
         check(noted, "cancellation is written into notes");
         check(stopped.candidates.isEmpty(), "cancelled scan keeps no candidates");
+        check(stopped.retrievalIncomplete && stopped.retrievalReason.contains("取消"),
+                "a web scan cancelled before the search says the retrieval never happened");
         int beforeOffline = totalHits();
         DuplicateEngine.Report offline = DuplicateEngine.scan(selection, new TextCorpus(), false, null, limits, new ApiClient.Task(), null);
         check(totalHits() == beforeOffline, "local-only scan never touches the network");
         boolean explained = false;
         for (String note : offline.notes) if (note.contains("未启用联网检索")) explained = true;
         check(explained, "local-only scan explains its baseline in notes");
+        check(offline.retrievalIncomplete && offline.retrievalReason.contains("自建库为空"),
+                "a local-only scan over an empty library admits there was nothing to compare against");
         TextCorpus mirrored = new TextCorpus();
         TextCorpus.Source mirroredSource = new TextCorpus.Source();
         mirroredSource.engine = "openalex";
@@ -516,6 +535,12 @@ public final class DetectRegression {
         check(mirror.hits.get(0).source != null && mirror.byEngine.isEmpty() == mirror.hits.isEmpty(),
                 "hits carry their source and feed the per-engine distribution");
         check(mirror.candidates.isEmpty() && totalHits() == beforeOffline, "the offline mirror scan still never goes online");
+        check(!mirror.retrievalIncomplete && mirror.retrievalReason == null,
+                "a local-only scan against a non-empty library is a complete run");
+        String mirrorHtml = CheckReport.html("mirror.docx", mirror);
+        check(mirrorHtml.contains("<td>总相似度比</td>") && mirrorHtml.contains("<td>自编率</td>")
+                        && !mirrorHtml.contains("未完成查重"),
+                "the complete local run keeps the numeric headline");
         ArrayList<String> subset = new ArrayList<String>();
         subset.add("openalex");
         subset.add("不存在的源");
@@ -526,6 +551,45 @@ public final class DetectRegression {
         boolean flagged = false;
         for (String note : single.notes) if (note.contains("未知检索源")) flagged = true;
         check(flagged, "unknown engine name is reported in notes and skipped");
+    }
+
+    /** The phone symptom: every connector dies at the transport, the library is empty, and 0.00% would be a lie. */
+    private static void unreachable(String base) throws Exception {
+        TextSelection selection = TextSelection.all(essay());
+        PaperSources.Limits limits = limits();
+        limits.perEngine = 2;
+        ServerSocket probe = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
+        int port = probe.getLocalPort();
+        probe.close();
+        everyEndpointAt("http://127.0.0.1:" + port + "/");
+        DuplicateEngine.Report blackout = DuplicateEngine.scan(selection, new TextCorpus(), true, null, limits,
+                new ApiClient.Task(), null);
+        loopback(base);
+        check(blackout.candidates.isEmpty(), "a blackout scan keeps no candidates");
+        check(blackout.retrievalIncomplete, "a web scan where every connector failed is flagged incomplete");
+        check(blackout.retrievalReason != null && blackout.retrievalReason.contains("个检索源本次全部不可用")
+                        && blackout.retrievalReason.contains("联网检索没有取回可比对的候选文献"),
+                "the reason names the dead connectors with the note wording");
+        boolean counted = false;
+        for (String note : blackout.notes) if (note.contains("个检索源本次不可用")) counted = true;
+        check(counted, "the blackout scan keeps its existing failure note");
+        String html = CheckReport.html("thesis.docx", blackout);
+        check(html.contains("未完成查重"), "the blackout report headlines the run as unfinished");
+        check(!html.contains("总相似度比 0.00") && !html.contains("<td>总相似度比</td>")
+                        && !html.contains("<td>去除引用重复比</td>") && !html.contains("<td>自编率</td>"),
+                "the blackout report shows no numeric duplication rate anywhere");
+        check(html.contains("AIGC 生成比例") && html.contains("AIGC 倾向句"),
+                "the blackout report still carries the locally computed AIGC block");
+        ArrayList<String> unknown = new ArrayList<String>();
+        unknown.add("不存在的源");
+        DuplicateEngine.Report unselected = DuplicateEngine.scan(selection, new TextCorpus(), true, unknown, limits,
+                new ApiClient.Task(), null);
+        check(unselected.retrievalIncomplete && unselected.retrievalReason.contains("没有可用的检索源"),
+                "a web scan with no usable source selected is flagged");
+        DuplicateEngine.Report emptied = DuplicateEngine.scan(selection, new TextCorpus(), false, unknown, limits,
+                new ApiClient.Task(), null);
+        check(emptied.retrievalIncomplete && emptied.retrievalReason.contains("自建库为空"),
+                "a local-only scan with an empty library is flagged whatever the source list says");
     }
 
     private static final String LEGACY_TAIL = "</style><h1>查重报告</h1><p>f.docx</p><p>重复率：12.50%</p>"
@@ -594,5 +658,39 @@ public final class DetectRegression {
         String legacyHtml = CheckReport.html("f.docx", legacy);
         check(legacyHtml.endsWith(LEGACY_TAIL), "legacy overload output stays byte-identical after adding the new one");
         check(!legacyHtml.contains("<script>") && !html.equals(legacyHtml), "legacy report still escapes API text");
+    }
+
+    /** A report with the retrieval flag up: only the locally computed AIGC share may keep a number. */
+    private static void unfinishedReport() {
+        DuplicateEngine.Report report = new DuplicateEngine.Report();
+        report.sourceText = "本文的结论建立在实验数据与既有报道之上。";
+        report.overallRate = 0;
+        report.excludingCitationsRate = 0;
+        report.selfWrittenRate = 99.65;
+        report.aigcRate = 10.71;
+        report.retrievalIncomplete = true;
+        report.retrievalReason = "5 个检索源本次全部不可用，联网检索没有取回可比对的候选文献";
+        report.detectedAt = "2026-10-08T10:00:00Z";
+        report.elapsedMillis = 640;
+        AigcDetector.Sentence sentence = new AigcDetector.Sentence();
+        sentence.start = 0;
+        sentence.end = 6;
+        sentence.score = 0.72f;
+        sentence.features.add("书面连接词密集");
+        report.aigc = new AigcDetector.Result();
+        report.aigc.rate = 10.71f;
+        report.aigc.sentences.add(sentence);
+        report.notes.add("联网检索没有取回可比对的候选文献");
+        String html = CheckReport.html("thesis.docx", report);
+        check(html.contains("未完成查重") && html.contains("5 个检索源本次全部不可用"),
+                "the unfinished headline shows why the run counts for nothing");
+        check(!html.contains("总相似度比 0.00") && !html.contains("<td>总相似度比</td>")
+                        && !html.contains("<td>去除引用重复比</td>") && !html.contains("<td>自编率</td>"),
+                "no duplication rate survives an unfinished run");
+        check(html.contains("AIGC 生成比例") && html.contains("10.71%"),
+                "the AIGC figure keeps its place in an unfinished report");
+        check(html.contains("AIGC 倾向句") && html.contains("书面连接词密集") && html.contains("72.00%"),
+                "the per-sentence AIGC list renders as it does today");
+        check(html.contains("联网检索没有取回可比对的候选文献"), "the notes still explain the unfinished run");
     }
 }

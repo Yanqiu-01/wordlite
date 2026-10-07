@@ -12,6 +12,11 @@ import java.util.Map;
 public final class DuplicateEngine {
     static final int WINDOW_PARAGRAPHS = 3, MAX_WINDOWS = 24, MAX_PHRASE_CHARS = 160;
     static final int MAX_REQUESTS = 40, MAX_FULL_TEXTS = 6, MAX_CANDIDATES = 120, MAX_NOTES = 40;
+    /** Retrieval gaps phrased with the note(...) vocabulary so the headline and the notes never disagree. */
+    static final String GAP_NOTHING_RETRIEVED = "联网检索没有取回可比对的候选文献";
+    static final String GAP_CANCELLED = "检索已取消，没有联网取候选文献";
+    static final String GAP_NO_SOURCE = "没有可用的检索源，本次没有执行联网检索";
+    static final String GAP_EMPTY_LIBRARY = "未启用联网检索，自建库为空，没有可比对的语料";
     public interface Progress { void step(String label, int done, int total); }
     public static final class Report {
         public double overallRate, excludingCitationsRate, selfWrittenRate, aigcRate;
@@ -26,6 +31,10 @@ public final class DuplicateEngine {
         public final ArrayList<String> notes = new ArrayList<String>();
         /** Scanned text so the report can cut snippets without re-opening the document. */
         public String sourceText = "";
+        /** True when the run consulted nothing, so the rates must not read as "nothing is duplicated". */
+        public boolean retrievalIncomplete;
+        /** Why the run is unfinished, in the same wording as the notes; null while the run is complete. */
+        public String retrievalReason;
     }
     private DuplicateEngine() { }
 
@@ -37,12 +46,14 @@ public final class DuplicateEngine {
         report.sourceText = text;
         TextCorpus library = corpus == null ? new TextCorpus() : corpus;
         PaperSources.Limits safe = limits == null ? new PaperSources.Limits() : limits;
+        ArrayList<String> wanted = new ArrayList<String>();
+        boolean aborted = false;
         try {
-            ArrayList<String> wanted = pick(engines, report);
+            wanted.addAll(pick(engines, report));
             int[] spans = citationSpans(selection, null);
             if (spans.length >= 2) note(report, "已标出 " + (spans.length / 2) + " 处引用段落，这部分只计入总相似度比");
             if (!useWeb) note(report, "未启用联网检索，只与自建库比对");
-            else if (cancelled(cancellation)) note(report, "检索已取消，没有联网取候选文献");
+            else if (cancelled(cancellation)) note(report, GAP_CANCELLED);
             else search(text, library, report, wanted, safe, cancellation, progress);
             if (library.isEmpty()) note(report, "自建库为空，比对基线只有检索到的候选文献摘要");
             TextCorpus.Report matched = null;
@@ -60,10 +71,32 @@ public final class DuplicateEngine {
             step(progress, "汇总报告", 4, 4);
         } catch (RuntimeException error) {
             note(report, "检测中断：" + message(error));
+            aborted = true;
         }
+        markRetrievalGap(report, useWeb, wanted, library, cancellation, aborted);
         report.elapsedMillis = (System.nanoTime() - started) / 1000000;
         report.detectedAt = ReviewManager.now();
         return report;
+    }
+
+    /** Nothing consulted must never read as nothing duplicated: name the gap so the report can say so. */
+    private static void markRetrievalGap(Report report, boolean useWeb, ArrayList<String> engines,
+                                         TextCorpus corpus, ApiClient.Cancellation cancellation, boolean aborted) {
+        if (report.retrievalIncomplete) return;
+        if (!useWeb) {
+            if (corpus.isEmpty()) gap(report, GAP_EMPTY_LIBRARY);
+            return;
+        }
+        if (engines.isEmpty()) { gap(report, GAP_NO_SOURCE); return; }
+        if (!report.candidates.isEmpty()) return;
+        if (cancelled(cancellation)) gap(report, GAP_CANCELLED);
+        else if (aborted) gap(report, GAP_NOTHING_RETRIEVED);
+    }
+    /** The first named gap wins, so the sharpest reason is the one search() found. */
+    private static void gap(Report report, String reason) {
+        if (report.retrievalIncomplete) return;
+        report.retrievalIncomplete = true;
+        report.retrievalReason = reason;
     }
 
     private static void rates(Report report, TextCorpus.Report matched) {
@@ -123,7 +156,11 @@ public final class DuplicateEngine {
                 if (cancelled(cancellation)) { note(report, "检索已取消，结果只覆盖已完成的窗口"); return; }
                 if (phrase.isEmpty() || Boolean.TRUE.equals(skipped.get(engine))) continue;
                 if (count(report.candidateCount, engine) >= limits.perEngine) continue;
-                if (requests >= MAX_REQUESTS) { note(report, "已达单次检测的检索请求上限 " + MAX_REQUESTS + " 次，剩余窗口未检索"); return; }
+                if (requests >= MAX_REQUESTS) {
+                    note(report, "已达单次检测的检索请求上限 " + MAX_REQUESTS + " 次，剩余窗口未检索");
+                    everyConnectorFailed(report, engines, skipped);
+                    return;
+                }
                 requests++;
                 step(progress, "检索 " + PaperSources.label(engine), done, total);
                 ArrayList<PaperSources.Candidate> found;
@@ -157,10 +194,17 @@ public final class DuplicateEngine {
                 }
             }
         }
-        if (report.candidates.isEmpty()) note(report, "联网检索没有取回可比对的候选文献");
+        if (report.candidates.isEmpty()) note(report, GAP_NOTHING_RETRIEVED);
         else note(report, "共取回 " + report.candidates.size() + " 篇候选文献，其中 " + fullTexts + " 篇尝试了开放获取全文");
         if (requests >= MAX_REQUESTS) note(report, "检索请求已达上限 " + MAX_REQUESTS + " 次");
         if (failures > 0) note(report, failures + " 个检索源本次不可用");
+        everyConnectorFailed(report, engines, skipped);
+    }
+    /** Every wanted connector threw and nothing usable came back: the web half of the run never happened. */
+    private static void everyConnectorFailed(Report report, ArrayList<String> engines,
+                                             LinkedHashMap<String, Boolean> skipped) {
+        if (report.candidates.isEmpty() && !engines.isEmpty() && skipped.size() >= engines.size())
+            gap(report, engines.size() + " 个检索源本次全部不可用，" + GAP_NOTHING_RETRIEVED);
     }
     private static boolean known(ArrayList<PaperSources.Candidate> candidates, PaperSources.Candidate candidate) {
         String left = !candidate.source.locator.isEmpty() ? candidate.source.locator : candidate.source.title;

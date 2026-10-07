@@ -2,6 +2,18 @@
 
 版本号遵循"功能加一版、修复加一位"，每个可安装构建同步递增 `versionName` / `versionCode`。
 
+## 0.4.3（`versionCode 16`）
+
+**查重不再把"没查到"报成"没重复"**
+
+- 真机跑"联网查重（内置文献库）"复现出一个会害人的输出：五个内置检索源全部连接失败、候选文献 0 篇、自建库为空，报告照样写"总相似度比 0.00% · 去除引用重复比 0.00% · 自编率 99.65%"。对一篇准备提交的论文，这是整个应用里最贵的一个数字。现在 `DuplicateEngine.Report` 带 `retrievalIncomplete` / `retrievalReason`，对话框与导出 HTML 在这种情形显示"未完成查重"加原因，AIGC 倾向照旧给（它是本机算的）。
+- 只有五种情形算未完成：所选检索源本次全部不可用、取候选前被取消、启用联网却没有可用源、联网扫描被异常中断、未联网且自建库为空。联网成功而确实零命中的 0.00% 仍照实显示，`rates()` 一位未动。
+- `HttpTransport` 不再把 TLS 与 IO 异常压成"安全连接失败""网络连接失败"：现在带上 JSSE 的叶子异常。真机因此报出 `SSLHandshakeException: Connection closed by peer`，与根证书过期那种 `unable to find valid certification path` 一眼可分；本次五源同错、且 PC 侧同一组端点全部 200，说明是链路被重置而不是设备信任库过期。
+- CORE 的地址补上尾斜杠。`/v3/search/works` 会 301 到 `/v3/search/works/`，而本传输层按设计不跟随重定向，所以这个源以前必然失败。
+- 429 改为读 `Retry-After` 退避：等待上限 10 秒，超过就记"检索源限流，约 N 秒后恢复，本次跳过"。Semantic Scholar 匿名池是 1 req/s、CORE 是 10 req/10min，原来固定 700 ms 的单次重试对它们是纯浪费。
+- `User-Agent` 改为报出项目主页（`WordLite document checker (+https://github.com/Yanqiu-01/wordlite)`，不写版本号以免和 manifest 走偏），这是 OpenAlex 与 Crossref polite pool 的约定；实测两者对匿名 UA 都返回 200，不加 `mailto` 也不会 403。
+- `DetectRegression` 增加"全部端点指向一个已关闭的回环端口"的用例，断言 `retrievalIncomplete` 为真且导出的 HTML 里没有 `总相似度比` 指标行（105 → 124 断言）。主机侧 12 个回归套件全通过。
+
 ## 0.4.2（`versionCode 15`）
 
 **两端对齐不再等平台**

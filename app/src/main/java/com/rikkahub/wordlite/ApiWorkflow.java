@@ -279,7 +279,7 @@ public final class ApiWorkflow {
         final DuplicateEngine.Report result = lastScan;
         if (result == null || !alive()) return;
         LinearLayout box = column(); box.setPadding(dp(16), dp(8), dp(16), dp(8));
-        if (scanShowsDuplicates) {
+        if (scanShowsDuplicates && !result.retrievalIncomplete) {
             box.addView(label(String.format(Locale.CHINA, "总相似度比 %.2f%%", result.overallRate), 20));
             box.addView(label(String.format(Locale.CHINA, "去除引用重复比 %.2f%%  ·  自编率 %.2f%%",
                     result.excludingCitationsRate, result.selfWrittenRate), 13));
@@ -290,6 +290,13 @@ public final class ApiWorkflow {
                             .append(String.format(Locale.CHINA, "%.1f%%  ", entry.getValue()));
                 box.addView(label(line.toString().trim(), 12));
             }
+        } else if (result.retrievalIncomplete) {
+            // A run that consulted nothing must not read as a clean document: 0.00% here would be
+            // the most expensive number in the app to get wrong.
+            box.addView(label("未完成查重", 20));
+            box.addView(label(result.retrievalReason == null
+                    ? "检索没有取回可比对的文献，相似度类指标无法成立" : result.retrievalReason, 13));
+            box.addView(label("相似度类指标不成立，只有 AIGC 倾向是本机计算的结果。", 11));
         }
         box.addView(label(String.format(Locale.CHINA, "AIGC 倾向 %.2f%%", result.aigcRate), 15));
         box.addView(label(result.detectedAt + "  ·  用时 " + (result.elapsedMillis / 1000L) + " 秒", 11));

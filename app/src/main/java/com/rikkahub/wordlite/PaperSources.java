@@ -31,7 +31,9 @@ public final class PaperSources {
         map.put("semantic-scholar", "https://api.semanticscholar.org/graph/v1/paper/search");
         map.put("europepmc", "https://www.ebi.ac.uk/europepmc/webservices/rest/search");
         map.put("arxiv", "https://export.arxiv.org/api/query");
-        map.put("core", "https://api.core.ac.uk/v3/search/works");
+    /* CORE answers the slash-less path with a 301, and this transport refuses redirects, so the
+     * canonical trailing slash is part of the endpoint, not a cosmetic detail. */
+    map.put("core", "https://api.core.ac.uk/v3/search/works/");
         return map;
     }
     public static ArrayList<String> engines() { return new ArrayList<String>(defaults().keySet()); }

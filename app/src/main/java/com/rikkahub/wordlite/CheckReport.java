@@ -22,13 +22,7 @@ public final class CheckReport {
                 .append(escape(fileName)).append("</p><p>检测时间：").append(escape(report.detectedAt))
                 .append(" &#183; 耗时 ").append(report.elapsedMillis).append(" ms &#183; 相似片段 ")
                 .append(report.hits.size()).append(" 处</p>");
-        out.append("<h2>指标</h2><table><thead><tr><th>指标</th><th>比例</th></tr></thead><tbody>");
-        metric(out, "总相似度比", report.overallRate);
-        metric(out, "去除引用重复比", report.excludingCitationsRate);
-        metric(out, "自编率", report.selfWrittenRate);
-        metric(out, "AIGC 生成比例", report.aigcRate);
-        out.append("</tbody></table><p>参与比对 ").append(report.comparedChars).append(" 个有效字符，命中相似 ")
-                .append(report.duplicateChars).append(" 个，其中落在引用区间内 ").append(report.citedDuplicateChars).append(" 个。</p>");
+        if (report.retrievalIncomplete) unfinished(out, report); else completed(out, report);
         engines(out, report);
         candidates(out, report);
         snippets(out, report);
@@ -41,6 +35,26 @@ public final class CheckReport {
             out.append("</ul>");
         }
         return out.append("</html>").toString();
+    }
+    /** The three duplication rates: only meaningful once something was actually consulted. */
+    private static void completed(StringBuilder out, DuplicateEngine.Report report) {
+        out.append("<h2>指标</h2><table><thead><tr><th>指标</th><th>比例</th></tr></thead><tbody>");
+        metric(out, "总相似度比", report.overallRate);
+        metric(out, "去除引用重复比", report.excludingCitationsRate);
+        metric(out, "自编率", report.selfWrittenRate);
+        metric(out, "AIGC 生成比例", report.aigcRate);
+        out.append("</tbody></table><p>参与比对 ").append(report.comparedChars).append(" 个有效字符，命中相似 ")
+                .append(report.duplicateChars).append(" 个，其中落在引用区间内 ").append(report.citedDuplicateChars).append(" 个。</p>");
+    }
+    /** A run that consulted nothing gets 未完成查重 as its headline; the AIGC share is local, so it stays. */
+    private static void unfinished(StringBuilder out, DuplicateEngine.Report report) {
+        String reason = report.retrievalReason == null ? "" : report.retrievalReason.trim();
+        out.append("<h2>未完成查重</h2><p><strong>")
+                .append(escape(reason.isEmpty() ? "本次没有可比对的文献来源" : reason)).append("</strong></p>")
+                .append("<p>本次没有取回任何可比对的文献，相似度类指标无法成立，只有 AIGC 倾向是本机计算的结果。</p>");
+        out.append("<h2>指标</h2><table><thead><tr><th>指标</th><th>比例</th></tr></thead><tbody>");
+        metric(out, "AIGC 生成比例", report.aigcRate);
+        out.append("</tbody></table>");
     }
     private static void engines(StringBuilder out, DuplicateEngine.Report report) {
         ArrayList<String> names = new ArrayList<String>();

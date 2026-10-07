@@ -14,7 +14,12 @@ import java.util.Map;
 public final class HttpTransport {
     public static final int MAX_BODY = 2 * 1024 * 1024, MAX_FULL_TEXT = 512 * 1024;
     private static final int RETRY_DELAY_MILLIS = 700;
-    static final String USER_AGENT = "WordLite/1.0 (offline document checker)";
+    /** Beyond this a rate limit is not a momentary crowd, and waiting would look like a hang. */
+    private static final int MAX_RETRY_WAIT_MILLIS = 10000;
+    /* The sources do not require it, but a UA that names the project and a home page is the
+     * polite-pool convention OpenAlex and Crossref ask for, and it makes our traffic findable
+     * in their logs when something of ours misbehaves. */
+    static final String USER_AGENT = "WordLite document checker (+https://github.com/Yanqiu-01/wordlite)";
     private HttpTransport() { }
 
     public static ApiClient.Response get(String url, Map<String, String> headers, int timeoutSeconds,
@@ -31,8 +36,13 @@ public final class HttpTransport {
         } catch (ApiClient.Failure throttled) {
             if (throttled.status != 429 || Thread.currentThread().isInterrupted()
                     || (cancellation != null && cancellation.cancelled())) throw throttled;
+            long wait = throttled.retryAfterSeconds > 0
+                    ? throttled.retryAfterSeconds * 1000L : RETRY_DELAY_MILLIS;
+            if (wait > MAX_RETRY_WAIT_MILLIS)
+                throw new ApiClient.Failure("检索源限流，约 " + throttled.retryAfterSeconds
+                        + " 秒后恢复，本次跳过", throttled.status);
             try {
-                Thread.sleep(RETRY_DELAY_MILLIS);
+                Thread.sleep(wait);
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 throw throttled;
@@ -69,7 +79,12 @@ public final class HttpTransport {
             }
             int status = connection.getResponseCode();
             if (status >= 300 && status < 400) throw new ApiClient.Failure("检索源发生重定向", status);
-            if (status < 200 || status >= 300) { drain(connection, cancellation); throw new ApiClient.Failure(statusMessage(status), status); }
+            if (status < 200 || status >= 300) {
+                ApiClient.Failure failure = new ApiClient.Failure(statusMessage(status), status);
+                if (status == 429) failure.retryAfterSeconds = retryAfterSeconds(connection);
+                drain(connection, cancellation);
+                throw failure;
+            }
             ApiClient.Response response = new ApiClient.Response();
             response.status = status;
             try (InputStream input = connection.getInputStream()) { response.body = read(input, limit, cancellation); }
@@ -84,12 +99,12 @@ public final class HttpTransport {
             guard(cancellation);
             throw new ApiClient.Failure("请求超时", 0);
         } catch (javax.net.ssl.SSLException error) {
-            throw new ApiClient.Failure("安全连接失败", 0);
+            throw new ApiClient.Failure("安全连接失败: " + cause(error), 0);
         } catch (java.net.ProtocolException error) {
             throw new ApiClient.Failure("检索请求不受支持", 0);
         } catch (IOException error) {
             guard(cancellation);
-            throw new ApiClient.Failure("网络连接失败", 0);
+            throw new ApiClient.Failure("网络连接失败: " + cause(error), 0);
         } finally {
             if (connection != null) connection.disconnect();
             if (cancellation != null) cancellation.connection(null);
@@ -135,8 +150,33 @@ public final class HttpTransport {
         return "检索源返回 HTTP " + status;
     }
 
-    private static void drain(HttpURLConnection connection
-, ApiClient.Cancellation cancellation) {
+    /**
+     * How far the source asked us to wait. Only the delta-seconds form is honoured; an HTTP date
+     * or garbage falls back to the fixed delay rather than trusting a clock we do not control.
+     */
+    private static int retryAfterSeconds(HttpURLConnection connection) {
+        try {
+            int seconds = Integer.parseInt(connection.getHeaderField("Retry-After").trim());
+            return seconds < 0 ? 0 : Math.min(seconds, 3600);
+        } catch (Exception absent) {
+            return 0;
+        }
+    }
+
+    /**
+     * The JSSE text says which part of the handshake died, which is the difference between a trust
+     * store that has never been updated, a proxy that terminates TLS, and a network that resets the
+     * connection. Kept short, and it never carries a URL: the note that shows it already names the
+     * source.
+     */
+    private static String cause(Throwable error) {
+        Throwable leaf = error;
+        while (leaf.getCause() != null && leaf.getCause() != leaf) leaf = leaf.getCause();
+        String text = (leaf.getClass().getSimpleName() + " " + leaf.getMessage()).replaceAll("\\s+", " ").trim();
+        return text.length() <= 120 ? text : text.substring(0, 120);
+    }
+
+    private static void drain(HttpURLConnection connection, ApiClient.Cancellation cancellation) {
         try (InputStream error = connection.getErrorStream()) {
             if (error == null) return;
             byte[] buffer = new byte[4096];

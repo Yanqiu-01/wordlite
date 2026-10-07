@@ -33,6 +33,8 @@ public final class ApiClient {
     }
     public static final class Failure extends IOException {
         public final int status;
+        /** Retry-After in whole seconds from a 429, or 0 when the source did not say. */
+        public int retryAfterSeconds;
         public Failure(String message, int status) { super(message); this.status = status; }
     }
     private ApiClient() { }
