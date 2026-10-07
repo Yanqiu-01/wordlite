@@ -150,6 +150,7 @@ public final class DuplicateEngine {
         ArrayList<String> windows = windows(text);
         if (windows.isEmpty()) { note(report, "正文没有可用于检索的段落"); return; }
         LinkedHashMap<String, Boolean> skipped = new LinkedHashMap<String, Boolean>();
+        LinkedHashMap<String, Boolean> empty = new LinkedHashMap<String, Boolean>();
         int requests = 0, fullTexts = 0, failures = 0, total = windows.size() * engines.size(), done = 0;
         for (String window : windows) {
             String phrase = PaperSources.queryPhrase(window, MAX_PHRASE_CHARS);
@@ -176,7 +177,7 @@ public final class DuplicateEngine {
                     note(report, "已跳过 " + PaperSources.label(engine) + "：" + message(error));
                     continue;
                 }
-                if (found.isEmpty()) { note(report, PaperSources.label(engine) + " 未命中相关文献"); continue; }
+                if (found.isEmpty()) { empty.put(engine, Boolean.TRUE); continue; }
                 for (PaperSources.Candidate candidate : found) {
                     if (cancelled(cancellation) || report.candidates.size() >= MAX_CANDIDATES
                             || count(report.candidateCount, engine) >= limits.perEngine) break;
@@ -194,8 +195,13 @@ public final class DuplicateEngine {
                     corpus.add(candidate.source, body);
                     bump(report.candidateCount, candidate.source.engine);
                 }
+                /* 只有所有窗口都空手才算"未命中"：第一个窗口没查到、后面的窗口查到了，不该报未命中。 */
+                if (count(report.candidateCount, engine) > 0) empty.remove(engine);
             }
         }
+        for (String engine : engines)
+            if (Boolean.TRUE.equals(empty.get(engine)) && !Boolean.TRUE.equals(skipped.get(engine)))
+                note(report, PaperSources.label(engine) + " 未命中相关文献");
         if (report.candidates.isEmpty()) note(report, GAP_NOTHING_RETRIEVED);
         else note(report, "共取回 " + report.candidates.size() + " 篇候选文献，其中 " + fullTexts + " 篇尝试了开放获取全文");
         if (requests >= MAX_REQUESTS) note(report, "检索请求已达上限 " + MAX_REQUESTS + " 次");

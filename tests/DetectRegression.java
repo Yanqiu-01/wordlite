@@ -57,6 +57,7 @@ public final class DetectRegression {
         try { Thread.sleep(millis); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
     }
 
+    private static final String EMPTY_CROSSREF = "{\"message\":{\"items\":[],\"total-results\":0}}";
     private static final String OPENALEX = "{\"meta\":{\"count\":1},\"results\":[{\"id\":\"https://openalex.org/W301\","
             + "\"doi\":\"https://doi.org/10.1000/abc\",\"title\":\"Brazing of SiC ceramic with Ag-Cu-Ti filler\","
             + "\"authorships\":[{\"author\":{\"display_name\":\"L. Zhang\"}},{\"author\":{\"display_name\":\"M. Kumar\"}}],"
@@ -115,6 +116,11 @@ public final class DetectRegression {
             respond(exchange, 200, CORE);
         });
         server.createContext("/cqvip", exchange -> { record("/cqvip", queryOf(exchange)); respond(exchange, 200, cqvipFixture); });
+        server.createContext("/sometimes", exchange -> {
+            String asked = queryOf(exchange);
+            record("/sometimes", asked);
+            respond(exchange, 200, asked.contains("alpha-marker") ? EMPTY_CROSSREF : CROSSREF);
+        });
         server.createContext("/ncpssd", exchange -> {
             record("/ncpssd", queryOf(exchange));
             lastMethod = exchange.getRequestMethod();
@@ -161,6 +167,7 @@ public final class DetectRegression {
             viaProxy(base);
             domestic(base);
             windowing();
+            deferredNote(base);
             phrase();
             marking();
             scan(base);
@@ -271,6 +278,28 @@ public final class DetectRegression {
                 + "目录\n2.2.1  SiC高温封装与TLP互连技术4\n图 1 接头形貌 12\n");
         check(picked.size() == 1 && picked.get(0).contains("多孔铜为中间层") && !picked.get(0).contains("SiC高温封装"),
                 "封面行与带页码的目录行不参与检索窗口");
+    }
+
+    /** "未命中" is a verdict about the whole run, not about one window of it. */
+    private static void deferredNote(String base) {
+        PaperSources.setEndpoint("crossref", base + "/sometimes");
+        DocxDocument document = new DocxDocument();
+        add(document, paragraph(0, "alpha-marker 这一段先送去检索，希望这个源第一次答空。", "", ""));
+        add(document, paragraph(1, "中段内容用来把窗口撑满，使第一段单独成为一个检索窗口。", "", ""));
+        add(document, paragraph(2, "这一段同样只是正文，不参与断言，只保证窗口切分稳定可预期。", "", ""));
+        add(document, paragraph(3, "beta-marker 这一段再送去检索，这一次同一个源应当给出候选。", "", ""));
+        add(document, paragraph(4, "再补一段正文，让第二个窗口稳定成型而不受标点影响。", "", ""));
+        add(document, paragraph(5, "最后一段正文，检索窗口到这里就足够覆盖两个窗口的差别。", "", ""));
+        ArrayList<String> engines = new ArrayList<String>();
+        engines.add("crossref");
+        DuplicateEngine.Report report = DuplicateEngine.scan(TextSelection.all(document), new TextCorpus(),
+                true, engines, limits(), new ApiClient.Task(), null);
+        check(report.candidateCount.get("crossref") != null && report.candidateCount.get("crossref") > 0,
+                "第二个窗口的检索结果照样进候选池");
+        check(hits("/sometimes") >= 2, "这个源被问了两次：第一个窗口确实答了空");
+        check(!String.valueOf(report.notes).contains("未命中相关文献"),
+                "先空后中的检索源不再被报成未命中");
+        PaperSources.setEndpoint("crossref", base + "/crossref");
     }
 
     private static void everyEndpointAt(String url) {
