@@ -14,10 +14,34 @@ import java.util.regex.Pattern;
 public final class TextCorpus {
     /** 有效字符数少于该值的句子不参与匹配。 */
     public static final int MIN_SENTENCE_CHARS = 12;
-    /** 判定相似所需的字符三元组 Dice 下限：实测轻度改写 0.61~0.91，同框架不同事实落在 0.52~0.58。 */
-    public static final float SIMILAR_DICE = 0.60f;
-    /** 长短悬殊时改用的三元组包含率下限：整句原文嵌进改写过的长句。 */
+    /**
+     * 判定相似所需的字符三元组 Dice 下限。0.60 是当年凭三个手搓例句定的，标定台在真实语料上扫过
+     * 之后发现它偏紧：同篇论文内部的负例（术语全撞车那种最难判的）和从 CNKI 检索页上摘下来的
+     * 别领域论文摘要片段，误报率从 0.50 到 0.85 整段都是 0.0%，而 0.60 要在句级少认回 5/120 条改写句、
+     * 引擎级召回少 1.2 个点。取 0.55 而不是 0.50：这两档在实测里逐位相同，多留一档余量给真实文库——
+     * 文库涨到几千篇之后偶发撞车的压力远不是这两个样本能代表的。全部表格见 docs/detection-calibration.md。
+     */
+    public static final float SIMILAR_DICE = 0.55f;
+    /** 长短悬殊时改用的三元组包含率下限：整句原文嵌进改写过的长句。标定台上这一列不构成约束——
+     * 0.80 到 1.00 逐位相同，因为能配上的句子长短本来就接近；留着它是因为整句原文嵌进长句那种写法只有它抓得住。
+     */
     public static final float SIMILAR_CONTAINMENT = 0.90f;
+
+    /**
+     * 标定台用的临时覆盖。默认就是上面那两个产品值，产品路径一次也不碰它，跑完必须还原；
+     * 有了这个口子，阈值才能在真实语料上扫而不是写死之后凭感觉调（见 tools/detect-calibration.ps1）。
+     */
+    private static float diceFloor = SIMILAR_DICE, containmentFloor = SIMILAR_CONTAINMENT;
+
+    static void overrideThresholds(float dice, float containment) {
+        diceFloor = dice;
+        containmentFloor = containment;
+    }
+
+    static void restoreThresholds() {
+        diceFloor = SIMILAR_DICE;
+        containmentFloor = SIMILAR_CONTAINMENT;
+    }
     /** 精算 Dice 的候选句上限。 */
     public static final int MAX_CANDIDATES = 400;
     /** 间隔不超过该字符数的相邻命中并为一段。 */
@@ -36,7 +60,7 @@ public final class TextCorpus {
     /** 指纹索引的 token 上限，超了就只保留句级比对。 */
     private static final int MAX_FINGERPRINT_TOKENS = 1200000;
     /** 一篇文献至少要共享两枚指纹才值得去验证，一枚多半是巧合。 */
-    private static final int MIN_SHARED_FINGERPRINTS = 2;
+    private static final int MIN_SHARED_FINGERPRINTS = 3;
     private static final int MAX_ANCHORS_PER_DOC = 4000;
     /** 精算 Dice 前使用的 Dice 上界下限，包含式判定也要求 Dice >= 0.5，故该裁剪无漏报。 */
     private static final float LENGTH_BOUND_FLOOR = 0.5f;
@@ -502,7 +526,7 @@ public final class TextCorpus {
             int shared = (int) (scratch[i] >>> 37);
             float dice = 2f * shared / total;
             float containment = (float) shared / smaller;
-            boolean exact = dice >= SIMILAR_DICE || containment >= SIMILAR_CONTAINMENT;
+            boolean exact = dice >= diceFloor || containment >= containmentFloor;
             if (!exact) {
                 shared = intersectCount(grams, candidate.grams);
                 dice = 2f * shared / total;
@@ -510,8 +534,8 @@ public final class TextCorpus {
             }
             if (shared < MIN_SHARED_GRAMS) continue;
             float score = dice;
-            boolean similar = dice >= SIMILAR_DICE;
-            if (!similar && containment >= SIMILAR_CONTAINMENT && dice >= LENGTH_BOUND_FLOOR
+            boolean similar = dice >= diceFloor;
+            if (!similar && containment >= containmentFloor && dice >= LENGTH_BOUND_FLOOR
                     && Math.max(queryLength, candidateLength) >= 1.6f * Math.min(queryLength, candidateLength)) {
                 score = Math.max(dice, containment * 0.8f);
                 similar = true;

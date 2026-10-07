@@ -201,8 +201,12 @@ public final class TextCorpusRegression {
 
     /** 指纹带：与断句无关的连续重复，短于最短匹配长度的巧合不算重复。 */
     private static void fingerprints() {
-        check(Fingerprints.GRAM == 8 && Fingerprints.WINDOW == 12, "取样参数是 8 元组配 12 的窗口");
-        check(Fingerprints.MIN_MATCH == 19, "最短可报告匹配是 19 个字符");
+        /* 参数不是照抄论文里的 8 和 12，是标定台扫出来的：真实论文正文做文库，正例是原文的六种
+           写法，负例取同一篇论文里内容无关的句子。n=7、w=12 配三枚共通指纹那一档，召回与
+           n=8、w=12 配两枚一样是满的，锚点层误报却从 45.5% 掉到 0.0%。原始表格见
+           docs/detection-calibration.md，重跑 tools/detect-calibration.ps1。 */
+        check(Fingerprints.GRAM == 7 && Fingerprints.WINDOW == 12, "取样参数标定在 7 元组配 12 的窗口");
+        check(Fingerprints.MIN_MATCH == 18, "最短可报告匹配是 18 个字符");
         String[] pieces = {"第一段只有十来个字。", "第二段也差不多长。", "第三段同样如此而已。"};
         String stitched = "第一段只有十来个字第二段也差不多长第三段同样如此而已";
         check(TextCorpus.sentences(pieces[0]).size() == 1, "语料里的每一小段都是一句");
@@ -222,6 +226,27 @@ public final class TextCorpusRegression {
         check(spansBoundary, "跨句的连续复制被报成一段而不是切碎");
         check(stitchedReport.duplicateChars >= Fingerprints.MIN_MATCH, "重复字符数记进了分子");
         check("跨句复制的样本".equals(stitchedReport.hits.get(0).source.title), "指纹命中带着来源标题");
+
+        /* 数字换写法。折成同一枚 token 只解决了一半：滚出窗口时若照原字符减回去，两边减掉的
+           权重不一样，哈希里留下一笔残值，数字之后的整条带子两边不再相等——一条完整复制被
+           一个数字砍成两截，每截都不到最短可报告长度，等于没检出。 */
+        TextCorpus numberSwap = new TextCorpus();
+        numberSwap.add(source("fp-num", "数字写法", "local"),
+                "在四十摄氏度的恒温箱里，样品保持了七十二小时的稳定状态，其间没有观察到任何异常变化。");
+        TextCorpus.Report rewritten = numberSwap.match(
+                "在40摄氏度的恒温箱里，样品保持了72小时的稳定状态，其间没有观察到任何异常变化。", null);
+        int longest = 0;
+        for (int i = 0; i < rewritten.hits.size(); i++)
+            longest = Math.max(longest, rewritten.hits.get(i).end - rewritten.hits.get(i).start);
+        check(longest >= 30, "数字换写法之后的整段复制仍是一条带子，没被数字砍断");
+
+        /* 只撞术语不算重复：同一篇论文里内容无关的句子，是标定台上最难也最诚实的负例。 */
+        TextCorpus sharedTerms = new TextCorpus();
+        sharedTerms.add(source("fp-term", "同领域其它论文", "local"),
+                "该模型的训练采用分层的卷积结构，并在公开数据集上报告了 top-5 准确率。");
+        TextCorpus.Report termQuery = sharedTerms.match(
+                "分层的卷积结构在本实验里只用于特征提取，top-5 准确率是附带记录的一项指标，与本文主线无关。", null);
+        check(termQuery.duplicateChars < Fingerprints.MIN_MATCH, "只共用几个术语的句子不算重复");
 
         TextCorpus shortShare = new TextCorpus();
         shortShare.add(source("fp2", "术语来源", "local"),

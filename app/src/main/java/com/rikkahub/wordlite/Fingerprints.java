@@ -5,13 +5,17 @@ package com.rikkahub.wordlite;
  *
  * 句子级比对要求两边恰好以同样的方式断句，改写者只要把两句并成一句就漏掉了。这里换成
  * Schleimer/Wilkerson/Aiken（SIGMOD'03）的 winnowing：任何长度不少于 MIN_MATCH 的公共片段
- * 必定留下一枚相同的指纹，与断句无关。参数按 docs/oss-algorithms.md 里的中文换算取
- * n=8、w=12，最短可报告匹配 19 个字符，相当于一个短句；比原来字符三元组加 Dice 的
- * "一个半词就报重复"严谨得多。
+ * 必定留下一枚相同的指纹，与断句无关。
+ *
+ * n 与 w 不是照抄论文里的 8 和 12，是标定台扫出来的。文库用真实论文正文，正例是原文的六种
+ * 写法（原样、换数字、去标点、两句拼接、两半对调、同义词替换），负例取同一篇论文里内容无关
+ * 的句子——同一篇论文意味着术语全撞在一起，这是最难也最诚实的负例。n 从 6 扫到 9、w 从 8 扫
+ * 到 16、最短共通指纹数从 1 扫到 3，定在 n=7、w=12 配三枚：召回还是满的，锚点层误报从
+ * 45.5% 掉到 0.0%。拐点与原始表格见 docs/detection-calibration.md，重跑 tools/detect-calibration.ps1。
  */
 public final class Fingerprints {
     /** 参与取样的最小连续 token 数。 */
-    public static final int GRAM = 8;
+    public static final int GRAM = 7;
     /** winnowing 窗口，单位是 token。 */
     public static final int WINDOW = 12;
     /** 数学上保证被取样到的最短公共片段：n + w - 1。 */
@@ -78,8 +82,11 @@ public final class Fingerprints {
             h = h * BASE + code(norm, at[i]);
             /* 乘过一次 BASE 之后，最旧那枚字符的位权是 BASE^GRAM 而不是 BASE^(GRAM-1)。
                减错这一位，哈希里就还拖着整段前缀，同一段文字换个位置算出来两样，
-               指纹比对只剩下"两边恰好在同一处开头"才命中。 */
-            if (i >= GRAM) h -= POWERS[GRAM] * norm.charAt(at[i - GRAM]);
+               指纹比对只剩下"两边恰好在同一处开头"才命中。
+               减的时候必须和加的时候同一个口径：数目字进来时折成了 NUMBER，出去也得按 NUMBER 减。
+               照原字符减会留下一笔残值，"四十分钟"改成"40 分钟"之后，两边从那个数字之后
+               的所有指纹都不再相等——折数字本来就是为了认出这种写法，结果它把之后的整条带子弄断了。 */
+            if (i >= GRAM) h -= POWERS[GRAM] * code(norm, at[i - GRAM]);
             out[i] = i + 1 >= GRAM ? mix(h) : 0L;
         }
         return out;
