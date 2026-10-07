@@ -48,6 +48,7 @@ public final class AigcRegression {
             + "ＭＯＲＥＯＶＥＲ， ｉｔ ｐｒｏｖｉｄｅｓ ｖａｌｕａｂｌｅ ｉｎｓｉｇｈｔｓ ｆｏｒ ｆｕｔｕｒｅ ｗｏｒｋ．";
 
     public static void main(String[] args) {
+        guards();
         ordering();
         templates();
         shortSentences();
@@ -72,6 +73,34 @@ public final class AigcRegression {
 
     private static boolean anyTemplate(AigcDetector.Result result) {
         return hasFeature(result, "模板句式：");
+    }
+
+    /** 样本门槛与引用排除：不给小样本编造比例，也不拿抄来的句子判机器腔。 */
+    private static void guards() {
+        check(AigcDetector.MIN_DOCUMENT_CHARS == 400, "样本门槛定在 400 个有效字符");
+        AigcDetector.Result shortRun = AigcDetector.detect(HUMAN);
+        check(shortRun.insufficientSample, "几百字的人写段落被判为样本不足");
+        check(shortRun.verdict.indexOf("样本不足") == 0, "样本不足时第一句就说清");
+        check(shortRun.sentences.size() > 0, "样本不足照样列出特征句供人看");
+        String longish = AI + AI + AI;
+        AigcDetector.Result longRun = AigcDetector.detect(longish);
+        check(!longRun.insufficientSample, "过了门槛才给比例");
+        check(longRun.verdict.length() > 0 && longRun.rate > 20f, "模板腔够重时结论是建议复核");
+        AigcDetector.Result plain = AigcDetector.detect(HUMAN_EN + HUMAN_EN + HUMAN_EN);
+        check("未见明显机器腔".equals(plain.verdict), "人写英文给的是一般结论");
+        check(Math.abs(AigcDetector.detect(AI).rate - AigcDetector.detect(AI, null).rate) < 0.0001f,
+                "不传排除区间与传 null 结果一致");
+        String mixed = AI + MILD + MILD + MILD;
+        int aiEnd = AI.length();
+        AigcDetector.Result full = AigcDetector.detect(mixed);
+        AigcDetector.Result quoted = AigcDetector.detect(mixed, new int[]{0, aiEnd});
+        check(quoted.excludedChars > 0, "被圈住的字数记在报告里");
+        check(quoted.sentences.size() < full.sentences.size(), "引用区间里的句子不再打分");
+        check(quoted.rate < full.rate, "把模板句圈成引用之后倾向分下降");
+        boolean insideExcluded = false;
+        for (int i = 0; i < quoted.sentences.size(); i++)
+            if (quoted.sentences.get(i).start < aiEnd) insideExcluded = true;
+        check(!insideExcluded, "排除区间里没有残留计分句");
     }
 
     private static void ordering() {

@@ -2,6 +2,16 @@
 
 版本号遵循"功能加一版、修复加一位"，每个可安装构建同步递增 `versionName` / `versionCode`。
 
+## 0.4.6（`versionCode 19`）
+
+**AIGC 只看自己该看的部分，样本不够就不给比例**
+
+- `AigcDetector.detect(text, excludedSpans)`：引用区间加上 0.4.5 找出的结构性文本（参考文献表、致谢、目录）一律不参与机器腔打分，那些本来就是抄来或套来的。`DuplicateEngine` 把两类区间接在一起传进去，报告多一句"AIGC 分析跳过引用与结构性文本 N 字"，`Result.excludedChars` 负责落账。
+- 门槛 `MIN_DOCUMENT_CHARS = 400`：有效字符不够就置 `insufficientSample`，指标那一格写"样本不足"而不是百分比，自编率也不再被这份倾向拉动。参照公开实现的入口守卫（DetectGPT 复现仓库的 min 100 characters / min 100 words 与 60..80 的"需要更多文本"中间档，出处记在 `docs/oss-algorithms.md`）。
+- 结论改成三档人话（`Result.verdict`）：样本不足 / 机器腔明显建议逐段复核 / 部分段落有机器腔 / 未见明显机器腔。手机端拿不到 token 级 logprob，Binoculars、DetectGPT、GLTR 那类算法在这里不成立，所以只报倾向不报判定。
+- HTML 报告在 AIGC 一节顶上把 verdict 原样打出来，未完成查重的分支同样走这套。
+- 回归：`AigcRegression` 58 → 70 断言，覆盖门槛、三档结论、不传区间与传 null 结果一致、把模板句圈成引用之后倾向下降、排除区间里没有残留计分句。12 个套件 1001 断言通过。
+
 ## 0.4.5（`versionCode 18`）
 
 **参考文献表、致谢、目录不再算进相似率**

@@ -32,6 +32,9 @@ public final class DuplicateEngine {
         public final LinkedHashMap<String, Double> byEngine = new LinkedHashMap<String, Double>();
         public final LinkedHashMap<String, Integer> candidateCount = new LinkedHashMap<String, Integer>();
         public AigcDetector.Result aigc;
+        /** AIGC 样本不足时，比例不该被当成结论。 */
+        public boolean aigcInsufficient;
+        public String aigcVerdict = "";
         public final ArrayList<String> notes = new ArrayList<String>();
         /** Scanned text so the report can cut snippets without re-opening the document. */
         public String sourceText = "";
@@ -74,7 +77,10 @@ public final class DuplicateEngine {
             if (cancelled(cancellation)) note(report, "检测到取消，未执行 AIGC 倾向分析");
             else {
                 step(progress, "AIGC 倾向分析", 3, 4);
-                report.aigc = AigcDetector.detect(text);
+                int[] quoted = TextCorpus.mergeSpans(concat(spans, structure.spanArray()), text.length());
+                report.aigc = AigcDetector.detect(text, quoted);
+                if (report.aigc.excludedChars > 0)
+                    note(report, "AIGC 分析跳过引用与结构性文本 " + report.aigc.excludedChars + " 字");
             }
             rates(report, matched);
             step(progress, "汇总报告", 4, 4);
@@ -122,14 +128,28 @@ public final class DuplicateEngine {
         }
         if (report.aigc != null) {
             report.aigcRate = clamp(report.aigc.rate);
+            report.aigcInsufficient = report.aigc.insufficientSample;
+            report.aigcVerdict = report.aigc.verdict == null ? "" : report.aigc.verdict;
             int flagged = 0;
             for (AigcDetector.Sentence sentence : report.aigc.sentences)
                 if (sentence.score >= 0.5f) flagged += Math.max(0, sentence.end - sentence.start);
             int base = report.comparedChars > 0 ? report.comparedChars : report.aigc.comparedChars;
             double share = base > 0 ? flagged * 100d / base : report.aigcRate;
+            // 样本不足时那份倾向连自编率都不该拉动。
+            if (report.aigcInsufficient) share = 0d;
             report.selfWrittenRate = clamp(100 - report.overallRate - clamp(share));
         } else report.selfWrittenRate = clamp(100 - report.overallRate);
     }
+    /** 两段成对区间接在一起，交给 mergeSpans 合并。 */
+    static int[] concat(int[] first, int[] second) {
+        int a = first == null ? 0 : first.length;
+        int b = second == null ? 0 : second.length;
+        int[] out = new int[a + b];
+        System.arraycopy(first, 0, out, 0, a);
+        if (b > 0) System.arraycopy(second, 0, out, a, b);
+        return out;
+    }
+
     private static double clamp(double value) {
         if (Double.isNaN(value) || Double.isInfinite(value)) return 0;
         return value < 0 ? 0 : value > 100 ? 100 : value;

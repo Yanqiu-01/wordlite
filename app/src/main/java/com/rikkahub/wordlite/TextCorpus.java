@@ -724,7 +724,7 @@ public final class TextCorpus {
 
     /** {start,end} 成对数组 -> 裁剪、排序、合并后的扁平区间数组。 */
     /** spans 是成对区间，判断一个点是否落在其中。 */
-    private static boolean insideSpan(int[] spans, int pos) {
+    static boolean insideSpan(int[] spans, int pos) {
         for (int i = 0; i + 1 < spans.length; i += 2)
             if (pos >= spans[i] && pos < spans[i + 1]) return true;
         return false;

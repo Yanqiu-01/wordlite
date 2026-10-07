@@ -11,6 +11,8 @@ import java.util.regex.Pattern;
 public final class AigcDetector {
     /** 有效字符数少于该值的句子不计分。 */
     public static final int MIN_SENTENCE_CHARS = 8;
+    /** 低于这个有效字符数只给特征提示，不给百分比。 */
+    public static final int MIN_DOCUMENT_CHARS = 400;
     private static final double TEMPLATE_WEIGHT = 0.30d;
     private static final double CONNECTIVE_WEIGHT = 0.18d;
     private static final double BURST_WEIGHT = 0.12d;
@@ -36,6 +38,12 @@ public final class AigcDetector {
         public final ArrayList<Sentence> sentences = new ArrayList<Sentence>();
         public float rate;                       // 按字符加权的百分比 0..100
         public int comparedChars;
+        /** 引用区间与参考文献表里没参与打分的字数。 */
+        public int excludedChars;
+        /** 有效字符不足 MIN_DOCUMENT_CHARS，比例不可信。 */
+        public boolean insufficientSample;
+        /** 一句人话结论，替代拿百分比当判决。 */
+        public String verdict = "";
     }
 
     private static final class Template {
@@ -95,7 +103,14 @@ public final class AigcDetector {
     private AigcDetector() { }
 
     /** 逐句给出机器生成倾向分，整篇比例按字符加权；短于 MIN_SENTENCE_CHARS 的句子不参与。 */
-    public static Result detect(String text) {
+    public static Result detect(String text) { return detect(text, null); }
+
+    /** excludedSpans 圈住的是抄来的引用与结构文本，不拿来判机器腔。 */
+    public static Result detect(String text, int[] excludedSpans) {
+        return detectInto(text, TextCorpus.mergeSpans(excludedSpans, text == null ? 0 : text.length()));
+    }
+
+    private static Result detectInto(String text, int[] excluded) {
         Result result = new Result();
         if (text == null || text.length() == 0) return result;
         String norm = TextCorpus.normalize(text);
@@ -107,6 +122,10 @@ public final class AigcDetector {
             int[] span = spans.get(i);
             int chars = TextCorpus.validCount(norm, span[0], span[1]);
             all[i] = chars;
+            if (TextCorpus.insideSpan(excluded, span[0])) {
+                result.excludedChars += chars;
+                continue;
+            }
             // 只有标点的短串不算一句话：实义字符不足 MIN_SENTENCE_CHARS 就不计分。
             if (chars < MIN_SENTENCE_CHARS || contentCount(norm, span[0], span[1]) < MIN_SENTENCE_CHARS) continue;
             scored.add(span);
@@ -150,7 +169,18 @@ public final class AigcDetector {
         }
         double rate = weighted * 100d / totalChars;
         result.rate = (float) (rate > 100d ? 100d : rate);
+        result.insufficientSample = totalChars < MIN_DOCUMENT_CHARS;
+        result.verdict = verdict(result);
         return result;
+    }
+
+    /** 样本不足时禁止给比例，其余只说倾向。 */
+    static String verdict(Result result) {
+        if (result.insufficientSample)
+            return "样本不足（有效字符 " + result.comparedChars + "，门槛 " + MIN_DOCUMENT_CHARS + "），只列特征，不给生成比例";
+        if (result.rate >= 45f) return "机器腔明显，建议逐段复核";
+        if (result.rate >= 20f) return "部分段落有机器腔，建议复核高分句";
+        return "未见明显机器腔";
     }
 
     private static Sentence score(String norm, int[] span, int chars, boolean flat, double cv,

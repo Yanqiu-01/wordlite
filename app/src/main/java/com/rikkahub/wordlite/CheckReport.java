@@ -42,7 +42,7 @@ public final class CheckReport {
         metric(out, "总相似度比", report.overallRate);
         metric(out, "去除引用重复比", report.excludingCitationsRate);
         metric(out, "自编率", report.selfWrittenRate);
-        metric(out, "AIGC 生成比例", report.aigcRate);
+        aigcMetric(out, report);
         out.append("</tbody></table><p>参与比对 ").append(report.comparedChars).append(" 个有效字符，命中相似 ")
                 .append(report.duplicateChars).append(" 个，其中落在引用区间内 ").append(report.citedDuplicateChars).append(" 个。</p>");
     }
@@ -53,7 +53,7 @@ public final class CheckReport {
                 .append(escape(reason.isEmpty() ? "本次没有可比对的文献来源" : reason)).append("</strong></p>")
                 .append("<p>本次没有取回任何可比对的文献，相似度类指标无法成立，只有 AIGC 倾向是本机计算的结果。</p>");
         out.append("<h2>指标</h2><table><thead><tr><th>指标</th><th>比例</th></tr></thead><tbody>");
-        metric(out, "AIGC 生成比例", report.aigcRate);
+        aigcMetric(out, report);
         out.append("</tbody></table>");
     }
     private static void engines(StringBuilder out, DuplicateEngine.Report report) {
@@ -98,6 +98,8 @@ public final class CheckReport {
     }
     private static void aigc(StringBuilder out, DuplicateEngine.Report report) {
         out.append("<h2>AIGC 倾向句</h2>");
+        if (report.aigc != null && report.aigc.verdict != null && report.aigc.verdict.length() > 0)
+            out.append("<p>").append(escape(report.aigc.verdict)).append("</p>");
         AigcDetector.Result aigc = report.aigc;
         if (aigc == null || aigc.sentences.isEmpty()) { out.append("<p>未标记出高倾向句子。</p>"); return; }
         out.append("<table><thead><tr><th>句子</th><th>倾向分</th><th>判定依据</th></tr></thead><tbody>");
@@ -112,8 +114,16 @@ public final class CheckReport {
         }
         out.append("</tbody></table>");
     }
+    /** 样本不足就不给百分比，这一格直接写清楚。 */
+    private static void aigcMetric(StringBuilder out, DuplicateEngine.Report report) {
+        if (report.aigcInsufficient) metricText(out, "AIGC 生成比例", "样本不足");
+        else metric(out, "AIGC 生成比例", report.aigcRate);
+    }
+    private static void metricText(StringBuilder out, String name, String value) {
+        out.append("<tr><td>").append(escape(name)).append("</td><td>").append(escape(value)).append("</td></tr>");
+    }
     private static void metric(StringBuilder out, String name, double value) {
-        out.append("<tr><td>").append(escape(name)).append("</td><td>").append(percent(value)).append("</td></tr>");
+        metricText(out, name, percent(value));
     }
     private static String percent(double value) {
         double safe = Double.isNaN(value) || Double.isInfinite(value) ? 0 : value;
