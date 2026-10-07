@@ -32,6 +32,7 @@ public final class CnkiSearchRegression {
             String html = read(path);
             check(html.contains("hidTotalCount"), "夹具保留了服务端给的结果总数");
             form();
+            narrowing();
             headers();
             routing();
             parsed(html);
@@ -49,9 +50,9 @@ public final class CnkiSearchRegression {
 
     private static void form() throws Exception {
         String expected = "Content=%E6%B7%B1%E5%BA%A6%E5%AD%A6%E4%B9%A0+%E5%9B%BE%E5%83%8F%E5%88%86%E5%89%B2"
-                + "+%E7%BB%BC%E8%BF%B0&Type=0&Order=2&Page=1&Match=0&IntervalTime=0&ArticleType=0";
+                + "&Type=0&Order=2&Page=1&Match=0&IntervalTime=0&ArticleType=0";
         String body = CnkiSearch.form("深度学习 图像分割 综述", 1);
-        check(body.equals(expected), "form 按 UTF-8 百分号编码中文并带全六个固定参数");
+        check(body.equals(expected), "form 按 UTF-8 百分号编码中文并带全六个固定参数，第三个词被收窄掉");
         check(ascii(body), "表单里没有裸中文，服务端收到的是纯 ASCII");
         check(CnkiSearch.form("深度学习", 0).contains("&Page=1&"), "页码 0 被夹到第一页");
         check(CnkiSearch.form("深度学习", -9).contains("&Page=1&"), "负页码被夹到第一页");
@@ -60,6 +61,23 @@ public final class CnkiSearchRegression {
         check(CnkiSearch.form(null, 1).startsWith("Content=&"), "空短语退化成空 Content 而不是抛异常");
         check(CnkiSearch.SEARCH.equals("https://search.cnki.com.cn/search/listresult"),
                 "检索地址是活的那个，不是五十秒后 504 的 /api/ 版本");
+    }
+
+    /** 查询词收窄：多词查询在知网那个老口子上会换回一批固定填充条目，只留最具体的两个词。 */
+    private static void narrowing() throws Exception {
+        check("宽禁带半导体 互连材料".equals(CnkiSearch.narrow("宽禁带半导体 封装 互连材料 可靠性")),
+                "四个词里留最长的两个，实测只有这一档回来的是对题结果");
+        check("封装 可靠性".equals(CnkiSearch.narrow("封装 可靠性")), "两个词原样发出，哪怕都很泛——收窄只数词数不猜语义");
+        check("宽禁带半导体".equals(CnkiSearch.narrow("宽禁带半导体")), "单词查询不动");
+        check("".equals(CnkiSearch.narrow("")) && "".equals(CnkiSearch.narrow("   ")),
+                "空与全空白都退化成空串而不是抛异常");
+        check("".equals(CnkiSearch.narrow(null)), "null 退化成空串");
+        check("深度学习 图像分割".equals(CnkiSearch.narrow("深度学习 图像分割 综述")),
+                "三词砍到两个，短的那个先掉");
+        check("AI 研究".equals(CnkiSearch.narrow("AI 研究 与 展望")), "单字词不参与，剩下的仍然只留两个");
+        check(CnkiSearch.form("宽禁带半导体 封装 互连材料 可靠性", 3).contains("Content="
+                + java.net.URLEncoder.encode("宽禁带半导体 互连材料", "UTF-8") + "&Type=0"),
+                "form 发出去的就是收窄后的两个词");
     }
 
     private static void headers() {

@@ -66,12 +66,55 @@ final class CnkiSearch {
     private CnkiSearch() { }
 
     /**
+    /**
+     * 查询词收窄：最多留两个词，留的是最长的那两个（中文里词越长通常越专门）。两词以内原样发出。
+     *
+     * 为什么必须收窄——这是实测出来的。同一个表单只改 Content：
+     * "宽禁带半导体 封装 互连材料 可靠性"、"封装 可靠性"、"宽禁带半导体 互连材料 可靠性" 三种写法，
+     * 服务端都回同一批与查询词毫不相干的固定条目（奢侈品品牌与 Gucci、ZSM-5 催化裂解、云雾粒子探测）；
+     * 换成两个最具体的词"宽禁带半导体 互连材料"，回来的才是块体碳化硅、氮化铝 HTCC 基板微波性能和可靠性
+     * 这一堆对题的结果。而真正查无此项时它只回 430 字节的空片段——那批固定条目不是"空结果"，
+     * 是没匹配上时塞进来的填充内容。照单全收等于往查重语料里塞五篇毫不相干的论文，重复率和来源榜一起脏。
+     * 两词以内的查询走的是另一条正常路径，一律原样发出，别把本来能用的查询改坏。
+     */
+    static String narrow(String phrase) {
+        if (phrase == null) return "";
+        String[] parts = phrase.trim().split("\\s+");
+        ArrayList<String> terms = new ArrayList<String>();
+        for (int i = 0; i < parts.length; i++) {
+            String term = parts[i].trim();
+            if (term.length() >= 2) terms.add(term);
+        }
+        if (terms.size() <= 2) return join(terms);
+        /* 取最长的两个，同样长取先出现的；输出仍按原顺序，别把服务端眼里的查询换了个次序。 */
+        int best = 0, second = -1;
+        for (int i = 1; i < terms.size(); i++) {
+            if (terms.get(i).length() > terms.get(best).length()) { second = best; best = i; }
+            else if (second < 0 || terms.get(i).length() > terms.get(second).length()) second = i;
+        }
+        ArrayList<String> picked = new ArrayList<String>();
+        picked.add(terms.get(Math.min(best, second)));
+        picked.add(terms.get(Math.max(best, second)));
+        return join(picked);
+    }
+
+    /** minSdk 23 上用不了 String.join。 */
+    private static String join(ArrayList<String> parts) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0) out.append(' ');
+            out.append(parts.get(i));
+        }
+        return out.toString();
+    }
+
+    /**
      * 检索表单。中文一律百分号编码，这一步不能省：命令行和部分 HTTP 客户端会把裸中文按本地码发出去，
      * 服务端回一段四个问号的错误，看着像被拒绝，其实只是编码坏了。页码夹在 1 到 50 之间。
      */
     static String form(String phrase, int page) throws IOException {
         StringBuilder out = new StringBuilder();
-        out.append("Content=").append(encode(phrase == null ? "" : phrase.trim()));
+        out.append("Content=").append(encode(narrow(phrase)));
         out.append("&Type=0&Order=2&Page=").append(page < 1 ? 1 : page > MAX_PAGE ? MAX_PAGE : page);
         out.append("&Match=0&IntervalTime=0&ArticleType=0");
         return out.toString();
