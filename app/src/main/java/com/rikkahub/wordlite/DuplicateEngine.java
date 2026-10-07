@@ -23,6 +23,8 @@ public final class DuplicateEngine {
     public static final class Report {
         public double overallRate, excludingCitationsRate, selfWrittenRate, aigcRate;
         public int comparedChars, duplicateChars, citedDuplicateChars;
+        /** 按论文结构排除在比对之外的字数（参考文献表、致谢、附录、目录）。 */
+        public int excludedChars;
         public long elapsedMillis;
         public String detectedAt = "";
         public final ArrayList<TextCorpus.Hit> hits = new ArrayList<TextCorpus.Hit>();
@@ -59,10 +61,15 @@ public final class DuplicateEngine {
             else search(text, library, report, wanted, safe, cancellation, progress);
             if (library.isEmpty()) note(report, "自建库为空，比对基线只有检索到的候选文献摘要");
             TextCorpus.Report matched = null;
+            TextCorpus.Structure structure = TextCorpus.structure(text);
             if (cancelled(cancellation)) note(report, "检测到取消，未执行语料比对");
             else {
                 step(progress, "比对语料", 2, 4);
-                matched = library.match(text, spans);
+                matched = library.match(text, spans, structure.spanArray());
+                if (!structure.isEmpty())
+                    note(report, "已排除结构性文本 " + structure.excludedChars + " 字：参考文献表 "
+                            + structure.bibliographySections + " 节共 " + structure.citationLines
+                            + " 条，致谢/附录/目录等 " + structure.otherSections + " 节；这部分不计入相似率");
             }
             if (cancelled(cancellation)) note(report, "检测到取消，未执行 AIGC 倾向分析");
             else {
@@ -107,6 +114,7 @@ public final class DuplicateEngine {
             report.comparedChars = matched.comparedChars;
             report.duplicateChars = matched.duplicateChars;
             report.citedDuplicateChars = matched.citedDuplicateChars;
+            report.excludedChars = matched.excludedChars;
             report.overallRate = clamp(matched.overallRate);
             report.excludingCitationsRate = clamp(matched.excludingCitationsRate);
             for (Map.Entry<String, Double> entry : matched.byEngine.entrySet())

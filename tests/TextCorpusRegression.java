@@ -27,6 +27,7 @@ public final class TextCorpusRegression {
         merging();
         rates();
         citations();
+        structure();
         edgeCases();
         performance();
         library();
@@ -504,6 +505,95 @@ public final class TextCorpusRegression {
                 "clear removes the stored documents");
         deleteRecursively(directory);
     }
+
+    /** 参考文献表/致谢/附录/目录不参与比对：它们重复了也不是抄袭，还会长大分母。 */
+    private static void structure() {
+        check(TextCorpus.structureHeading("参考文献"), "structureHeading 认得裸标题「参考文献」");
+        check(TextCorpus.structureHeading("参考文献（References）:"), "structureHeading 放过带括注和冒号的标题");
+        check(TextCorpus.structureHeading("六、致谢"), "structureHeading 认得带编号的「致谢」");
+        check(TextCorpus.structureHeading("附录A：调查问卷"), "structureHeading 认得带小题的「附录A」");
+        check(TextCorpus.structureHeading("Acknowledgements"), "structureHeading 认得英文致谢");
+        check(TextCorpus.structureHeading("目 录"), "structureHeading 认得中间空格的「目 录」");
+        check(!TextCorpus.structureHeading("参考文献的编排要遵循国标。"),
+                "structureHeading 不把提到参考文献的正文句当标题");
+        check(!TextCorpus.structureHeading("本章小结"), "structureHeading 不把普通章节名当结构标题");
+        StringBuilder longLine = new StringBuilder("附录");
+        for (int i = 0; i < 45; i++) longLine.append('文');
+        check(!TextCorpus.structureHeading(longLine.toString()), "structureHeading 拒绝长得像正文的行");
+        check(TextCorpus.bibliographyHeading("参考文献及注释"), "bibliographyHeading 认得「参考文献及注释」");
+        check(!TextCorpus.bibliographyHeading("致谢"), "bibliographyHeading 不把致谢算作参考文献表");
+
+        String bodyCopy = "深度学习模型的训练过程需要大量标注数据，否则模型很难收敛到稳定状态。";
+        String tailCopy = "滑动窗口的宽度取十六个字符时误报最少，再窄一些就会漏掉被改写过的句子。";
+        String entry = "[3] Smith J, Li W. Near-duplicate detection at scale[J]. ACM Computing Surveys, 2019, 52(4): 1-38.";
+        String text = "本文先在采集端做归一化，再用滑动窗口统计字符三元组，四个数据集上各重复五折。\n"
+                + bodyCopy + "\n"
+                + "参考文献\n"
+                + "[1] 张三. 面向长文本的查重方法[J]. 计算机学报, 2020, 43(3): 512-524.\n"
+                + "[2] 李四, 王五. 中文文本相似度计算综述[J]. 软件学报, 2021, 32(8): 2456-2470.\n"
+                + entry + "\n"
+                + "[4] 赵六. 学位论文查重系统的实现[D]. 哈尔滨: 哈尔滨工业大学, 2018.\n"
+                + "致谢\n"
+                + "感谢导师三年来的悉心指导，也感谢实验室同学在数据采集阶段提供的帮助，没有他们这篇论文不可能完成。\n"
+                + "第六章 实验设计\n"
+                + tailCopy;
+        int refsAt = text.indexOf("参考文献");
+        int tailAt = text.indexOf(tailCopy);
+
+        TextCorpus.Structure found = TextCorpus.structure(text);
+        check(!found.isEmpty(), "structure 找得到参考文献表");
+        check(found.bibliographySections == 1, "structure 只把参考文献那一节记成文献表");
+        check(found.citationLines == 4, "structure 数出四条参考文献条目");
+        check(found.otherSections == 1, "structure 另外认出致谢一节");
+        check(found.excludedChars > 0, "structure 统计出被排除的字数");
+        check(found.spans.get(0)[0] == refsAt, "排除区间从「参考文献」标题起算");
+        check(found.spans.get(0)[1] > text.indexOf("致谢") && found.spans.get(0)[1] <= tailAt,
+                "致谢整节被排除，但下一章节没有陪着进去");
+
+        TextCorpus corpus = new TextCorpus();
+        TextCorpus.Source source = new TextCorpus.Source();
+        source.title = "查重方法研究";
+        corpus.add(source, bodyCopy + tailCopy
+                + "Smith J, Li W. Near-duplicate detection at scale[J]. ACM Computing Surveys, 2019, 52(4): 1-38.");
+        int[] excluded = found.spanArray();
+        TextCorpus.Report loose = corpus.match(text, null);
+        TextCorpus.Report strict = corpus.match(text, null, excluded);
+        boolean referenceHitReported = false;
+        for (int i = 0; i < loose.hits.size(); i++)
+            if (loose.hits.get(i).start >= refsAt) referenceHitReported = true;
+        check(referenceHitReported, "不排除时，参考文献条目会被当成抄袭命中");
+        boolean insideExcluded = false;
+        for (int i = 0; i < strict.hits.size(); i++)
+            if (strict.hits.get(i).start >= refsAt && strict.hits.get(i).start < tailAt) insideExcluded = true;
+        check(!insideExcluded, "排除后参考文献里不再产生命中");
+        boolean bodyKept = false, tailKept = false;
+        for (int i = 0; i < strict.hits.size(); i++) {
+            int start = strict.hits.get(i).start;
+            if (start == text.indexOf(bodyCopy)) bodyKept = true;
+            if (start == tailAt) tailKept = true;
+        }
+        check(bodyKept, "正文里的真实重复照样命中");
+        check(tailKept, "致谢之后的正文仍然参与比对");
+        check(strict.comparedChars < loose.comparedChars, "排除后分母变小");
+        check(strict.excludedChars > 0 && strict.duplicateChars < loose.duplicateChars,
+                "排除的字数进了报告，重复字数随之下降");
+
+        String lone = "参考文献\n[1] 张三. 面向长文本的查重方法[J]. 计算机学报, 2020, 43(3): 512-524.\n"
+                + "这一节之后的内容明显是正文，它讲的是实验设置与随机种子的取法，跟文献无关。";
+        check(TextCorpus.structure(lone).isEmpty(), "只有一条条目时不敢把整节当成文献表");
+
+        String headless = "正文段落先把方法和数据交代清楚，再给出可以复现的步骤。\n"
+                + "[1] 王五. 中文文本相似度计算综述[J]. 软件学报, 2021, 32(8): 2456-2470.\n"
+                + "[2] 赵六. 学位论文查重系统的实现[D]. 哈尔滨: 哈尔滨工业大学, 2018.\n"
+                + "[3] 孙七. 长文本指纹比对[D]. 北京: 清华大学, 2019.";
+        TextCorpus.Structure bare = TextCorpus.structure(headless);
+        check(!bare.isEmpty() && bare.bibliographySections == 1, "没有标题的条目串也认作文献表");
+
+        TextCorpus.Structure toc = TextCorpus.structure("目录\n1 引言 ......... 1\n2 方法 ......... 5\n"
+                + "3 实验 ......... 12\n第一章 引言\n引言从研究背景讲起，先说明为什么要做这件事。\n");
+        check(!toc.isEmpty() && toc.otherSections == 1, "目录被排除，正文从第一章继续");
+    }
+
 
     private static byte[] readAll(File file) throws Exception {
         FileInputStream in = new FileInputStream(file);

@@ -2,6 +2,8 @@ package com.rikkahub.wordlite;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -48,6 +50,8 @@ public final class TextCorpus {
     public static final class Report {
         public final ArrayList<Hit> hits = new ArrayList<Hit>();
         public int comparedChars, duplicateChars, citedDuplicateChars;
+        /** 参考文献表、致谢这类结构性文本的字数，它们既不算重复也不计分母。 */
+        public int excludedChars;
         public double overallRate, excludingCitationsRate;
         public final LinkedHashMap<String, Double> byEngine = new LinkedHashMap<String, Double>();
     }
@@ -133,10 +137,14 @@ public final class TextCorpus {
     int skippedSentenceCount() { return skippedSentences; }
 
     /** citationSpans 是 {start,end} 成对数组，可为 null。 */
-    public Report match(String text, int[] citationSpans) {
+    public Report match(String text, int[] citationSpans) { return match(text, citationSpans, null); }
+
+    /** excludedSpans 圈住的句子整体退出比对：参考文献表、致谢这类文本重复了也不是抄袭。 */
+    public Report match(String text, int[] citationSpans, int[] excludedSpans) {
         Report report = new Report();
         if (text == null || text.length() == 0) return report;
         int[] citations = mergeSpans(citationSpans, text.length());
+        int[] excluded = mergeSpans(excludedSpans, text.length());
         String norm = normalize(text);
         ArrayList<int[]> spans = sentences(text);
         Counter counter = new Counter(entries.isEmpty() ? 64 : Math.min(1 << 15, 4 + entries.size()));
@@ -144,13 +152,17 @@ public final class TextCorpus {
         long[] scratch = new long[Math.max(64, Math.min(entries.size() + 1, POSTING_SCAN_CAP))];
         Match best = new Match();
         HashMap<String, Integer> engineChars = new HashMap<String, Integer>();
-        int compared = 0, duplicate = 0, cited = 0;
+        int compared = 0, duplicate = 0, cited = 0, skipped = 0;
         int runStart = -1, runEnd = -1, runWeight = 0, runValid = 0;
         double runScore = 0d;
         Source runSource = null;
         HashMap<String, Integer> runTally = null;
         for (int i = 0; i < spans.size(); i++) {
             int[] span = spans.get(i);
+            if (insideSpan(excluded, span[0])) {
+                skipped += validCount(norm, span[0], span[1]);
+                continue;
+            }
             ArrayList<Frag> frags = fragments(norm, span[0], span[1]);
             if (frags.isEmpty()) continue;
             // 有效字符按句子计一次：超长句的滑动窗口重叠，不能把同一个字符算两遍。
@@ -190,6 +202,7 @@ public final class TextCorpus {
             cited += flushed[1];
         }
         report.comparedChars = compared;
+        report.excludedChars = skipped;
         report.duplicateChars = duplicate;
         report.citedDuplicateChars = Math.min(cited, duplicate);
         if (compared > 0) {
@@ -710,6 +723,13 @@ public final class TextCorpus {
     }
 
     /** {start,end} 成对数组 -> 裁剪、排序、合并后的扁平区间数组。 */
+    /** spans 是成对区间，判断一个点是否落在其中。 */
+    private static boolean insideSpan(int[] spans, int pos) {
+        for (int i = 0; i + 1 < spans.length; i += 2)
+            if (pos >= spans[i] && pos < spans[i + 1]) return true;
+        return false;
+    }
+
     static int[] mergeSpans(int[] raw, int length) {
         if (raw == null || raw.length < 2 || length <= 0) return new int[0];
         int pairs = raw.length / 2;
@@ -758,6 +778,210 @@ public final class TextCorpus {
         return total;
     }
 
+    // ---- 结构性文本：参考文献表、致谢、附录、成果清单、目录 ----
+
+    /** 单独成行即为分节标题。这些段落既不该算重复，也不该进相似率的分母。 */
+    private static final String[] STRUCTURE_TITLES = {
+        "参考文献", "引用文献", "主要参考文献", "参考书目", "文献目录", "致谢", "鸣谢", "后记",
+        "附录", "目录", "目次", "references", "reference", "bibliography", "works cited",
+        "acknowledgement", "acknowledgements", "acknowledgment", "acknowledgments",
+        "appendix", "appendices", "contents", "table of contents",
+    };
+    private static final String[] BIBLIOGRAPHY_TITLES = {
+        "参考文献", "引用文献", "主要参考文献", "参考书目", "文献目录",
+        "references", "reference", "bibliography", "works cited",
+    };
+    private static final int STRUCTURE_TITLE_LIMIT = 40;
+    private static final int STRUCTURE_PROSE_CHARS = 60;
+    private static final int STRUCTURE_MIN_ENTRIES = 2;
+    /** 标题上的编号、括注和冒号："六、参考文献（References）:" 要能落到关键词上。 */
+    private static final Pattern STRUCTURE_NUMBER_PREFIX = Pattern.compile(
+            "^(?:[0-9]{1,2}(?:[.][0-9]{1,2})*|[一二三四五六七八九十]{1,3})[.,]?");
+    private static final Pattern STRUCTURE_TRAILING = Pattern.compile(
+            "(?:\\s*\\([^()]{0,30}\\))?\\s*:?\\s*(?:\\s*\\([^()]{0,30}\\))?\\s*[.]*\\s*$");
+    private static final Pattern STRUCTURE_TITLE_PREFIX = Pattern.compile(
+            "^(?:附录[^；;]{0,14}|攻读.{0,12}学位.{0,12}(?:成果|论文|论著|科研|项目|获奖)"
+                    + "|在读期间.{0,8}(?:成果|论文)|发表论文.{0,12}|学术成果)$");
+    /** 参考文献标题的写法比"参考文献"多一种就要在这里加一种，宁缺毋滥。 */
+    private static final Pattern STRUCTURE_BIBLIO = Pattern.compile(
+            "^参考文献(?:及|与|和)?(?:注释|书目|文献|列表)?$");
+    /** 下一章节的开头，用来给致谢/附录这类段落收口。 */
+    private static final Pattern STRUCTURE_CHAPTER = Pattern.compile(
+            "^(?:[0-9]{1,2}(?:[.][0-9]{1,2})*\\s+\\S|第?[零一二三四五六七八九十百]{1,4}(?:章|节|部分))");
+    /** 目录行：编号开头，中间是点线、连续空格或制表符，结尾落在页码上。 */
+    private static final Pattern STRUCTURE_TOC_LINE = Pattern.compile(
+            "^(?:[0-9]{1,3}(?:[.][0-9]{1,3})*|[第附篇][零〇一二三四五六七八九十百0-9]{0,6}|摘\\s*要|abstract)"
+                    + "[^\\n]{0,80}(?:[.·…]{2,}[ ]*|[ ]{2,}|\\t)[0-9]{1,4}$", Pattern.CASE_INSENSITIVE);
+
+    /** 目录类标题：段里是一行行"标题 + 页码"，跟参考文献表一样要有内容才认。 */
+    public static boolean contentsHeading(String line) {
+        if (!structureHeading(line)) return false;
+        String norm = STRUCTURE_NUMBER_PREFIX.matcher(
+                STRUCTURE_TRAILING.matcher(normalize(line.trim())).replaceFirst("")).replaceFirst("");
+        norm = norm.replace(" ", "");
+        return norm.equals("目录") || norm.equals("目次")
+                || norm.equals("contents") || norm.equals("tableofcontents");
+    }
+
+    /** 是否是"参考文献/致谢/附录/目录/成果清单"这类结构标题行。 */
+    public static boolean structureHeading(String line) {
+        if (line == null) return false;
+        String trimmed = line.trim();
+        if (trimmed.length() == 0 || trimmed.length() > STRUCTURE_TITLE_LIMIT) return false;
+        String norm = normalize(trimmed);
+        norm = STRUCTURE_TRAILING.matcher(norm).replaceFirst("");
+        norm = STRUCTURE_NUMBER_PREFIX.matcher(norm).replaceFirst("");
+        norm = norm.replace(" ", "");
+        if (norm.length() == 0 || norm.length() > 24) return false;
+        for (int i = 0; i < STRUCTURE_TITLES.length; i++)
+            if (norm.equals(STRUCTURE_TITLES[i])) return true;
+        if (STRUCTURE_BIBLIO.matcher(norm).matches()) return true;
+        // 带句读的就不是标题了，"参考文献的编排要遵循国标"这类正文句必须放行。
+        if (norm.indexOf('.') >= 0 || norm.indexOf('!') >= 0 || norm.indexOf('?') >= 0
+                || norm.indexOf(';') >= 0 || norm.length() > 20) return false;
+        return STRUCTURE_TITLE_PREFIX.matcher(norm).matches();
+    }
+
+    /** 结构标题里哪一类是参考文献表：那一类必须有真条目才认，其余按标题即认。 */
+    public static boolean bibliographyHeading(String line) {
+        if (line == null) return false;
+        String trimmed = line.trim();
+        if (trimmed.length() == 0 || trimmed.length() > STRUCTURE_TITLE_LIMIT) return false;
+        String norm = STRUCTURE_NUMBER_PREFIX.matcher(
+                STRUCTURE_TRAILING.matcher(normalize(trimmed)).replaceFirst("")).replaceFirst("");
+        norm = norm.replace(" ", "");
+        for (int i = 0; i < BIBLIOGRAPHY_TITLES.length; i++)
+            if (norm.equals(BIBLIOGRAPHY_TITLES[i])) return true;
+        return STRUCTURE_BIBLIO.matcher(norm).matches();
+    }
+
+    /** 排除了哪些结构性文本，各多少字，供报告如实交代。 */
+    public static final class Structure {
+        public final ArrayList<int[]> spans = new ArrayList<int[]>();
+        public int bibliographySections, otherSections, citationLines, excludedChars;
+        public boolean isEmpty() { return spans.isEmpty(); }
+        public int sectionCount() { return bibliographySections + otherSections; }
+        /** 展平成 {start,end} 成对数组，直接交给 match。 */
+        public int[] spanArray() {
+            int[] out = new int[spans.size() * 2];
+            for (int i = 0; i < spans.size(); i++) {
+                out[i * 2] = spans.get(i)[0];
+                out[i * 2 + 1] = spans.get(i)[1];
+            }
+            return out;
+        }
+    }
+
+    /**
+     * 找参考文献表、致谢、附录、成果清单、目录。参考文献表要求段内至少两条条目，
+     * 免得把一句"参考文献很重要"当成一节；没有标题的条目串（连续三条以上）也一并排除。
+     */
+    public static Structure structure(String text) {
+        Structure found = new Structure();
+        if (text == null || text.length() == 0) return found;
+        ArrayList<int[]> lines = lines(text);
+        for (int i = 0; i < lines.size(); i++) {
+            String title = text.substring(lines.get(i)[0], lines.get(i)[1]);
+            if (!structureHeading(title)) continue;
+            boolean bibliography = bibliographyHeading(title);
+            boolean contents = contentsHeading(title);
+            int end = lines.get(i)[1];
+            int entries = 0, leaders = 0;
+            for (int j = i + 1; j < lines.size(); j++) {
+                String line = text.substring(lines.get(j)[0], lines.get(j)[1]);
+                if (structureHeading(line)) break;
+                // 目录条目长得就像下一章节（"第1章 绪论	3"），所以目录段不按章节名收口。
+                boolean leader = STRUCTURE_TOC_LINE.matcher(line).find();
+                if (leader) leaders++;
+                else if (!contents && STRUCTURE_CHAPTER.matcher(normalize(line)).find()) break;
+                boolean entry = citationLike(line);
+                if (entry) entries++;
+                if (leader) {
+                    end = lines.get(j)[1];
+                    continue;
+                }
+                // 条目本身可以很长（英文文献一行七八十个字符），只有正文句才收口。
+                if ((bibliography || contents) && !entry && line.length() >= STRUCTURE_PROSE_CHARS) break;
+                end = lines.get(j)[1];
+            }
+            if (bibliography && entries < STRUCTURE_MIN_ENTRIES) continue;
+            if (contents && leaders < STRUCTURE_MIN_ENTRIES) continue;
+            found.spans.add(new int[]{lines.get(i)[0], end});
+            if (bibliography) found.bibliographySections++; else found.otherSections++;
+            found.citationLines += entries;
+        }
+        int runStart = -1, runEnd = -1, runEntries = 0;
+        for (int i = 0; i <= lines.size(); i++) {
+            boolean entry = i < lines.size()
+                    && bibliographyEntry(text.substring(lines.get(i)[0], lines.get(i)[1]));
+            if (entry) {
+                if (runStart < 0) runStart = lines.get(i)[0];
+                runEnd = lines.get(i)[1];
+                runEntries++;
+            } else if (runEntries >= 3) {
+                if (!covered(found.spans, runStart, runEnd)) {
+                    found.spans.add(new int[]{runStart, runEnd});
+                    found.bibliographySections++;
+                }
+                runStart = -1; runEnd = -1; runEntries = 0;
+            }
+        }
+        ArrayList<int[]> merged = mergeSpanList(found.spans);
+        found.spans.clear();
+        found.spans.addAll(merged);
+        String norm = normalize(text);
+        for (int i = 0; i < found.spans.size(); i++)
+            found.excludedChars += validCount(norm, found.spans.get(i)[0], found.spans.get(i)[1]);
+        return found;
+    }
+
+
+    /** 这段条目是不是已经落在某个按标题圈出来的区间里，避免同一节被数两次。 */
+    private static boolean covered(ArrayList<int[]> spans, int start, int end) {
+        for (int i = 0; i < spans.size(); i++)
+            if (start >= spans.get(i)[0] && end <= spans.get(i)[1]) return true;
+        return false;
+    }
+
+    /** 按行切分并去掉空行，保留原文偏移。 */
+    private static ArrayList<int[]> lines(String text) {
+        ArrayList<int[]> out = new ArrayList<int[]>();
+        if (text == null) return out;
+        int n = text.length(), start = 0;
+        for (int i = 0; i <= n; i++) {
+            boolean cut = i == n || text.charAt(i) == '\n' || text.charAt(i) == '\r'
+                    || text.charAt(i) == 0x0B || text.charAt(i) == 0x0C
+                    || text.charAt(i) == 0x2028 || text.charAt(i) == 0x2029;
+            if (!cut) continue;
+            int s = start, e = i;
+            while (s < e && isBlank(text.charAt(s))) s++;
+            while (e > s && isBlank(text.charAt(e - 1))) e--;
+            if (e > s) out.add(new int[]{s, e});
+            start = i + 1;
+        }
+        return out;
+    }
+
+    /** 起点排序并合并相邻或重叠的区间。 */
+    private static ArrayList<int[]> mergeSpanList(ArrayList<int[]> spans) {
+        ArrayList<int[]> out = new ArrayList<int[]>();
+        if (spans.isEmpty()) return out;
+        Collections.sort(spans, new Comparator<int[]>() {
+            public int compare(int[] a, int[] b) { return a[0] != b[0] ? a[0] - b[0] : a[1] - b[1]; }
+        });
+        int[] current = spans.get(0);
+        for (int i = 1; i < spans.size(); i++) {
+            int[] next = spans.get(i);
+            if (next[0] <= current[1] + 1) {
+                if (next[1] > current[1]) current[1] = next[1];
+            } else {
+                out.add(current);
+                current = next;
+            }
+        }
+        out.add(current);
+        return out;
+    }
     // ---- 参考文献条目特征 ----
 
     private static final Pattern LEADING_INDEX = Pattern.compile(
@@ -771,6 +995,16 @@ public final class TextCorpus {
     private static final Pattern SOURCE_WORD = Pattern.compile(
             "学报|期刊|杂志|论文集|学位论文|毕业设计|出版社|书局|书店|印刷厂|技术报告|proceedings|journal|press|transactions|springer|elsevier|ieee|acm|publisher");
 
+    /**
+     * 参考文献表里的条目比"像条目"更严：必须带 [J]/[M]/[D] 这类文献类型标识或 DOI 等标识符。
+     * 正文里"（2）热压连接采用 240、250 和 260 ℃"这种编号段落也会通过 citationLike，
+     * 参考论文实测有 8984 字差点被当成文献表排除，所以这一条不能松。
+     */
+    static boolean bibliographyEntry(String line) {
+        if (!citationLike(line)) return false;
+        String norm = normalize(line);
+        return DOC_TYPE.matcher(norm).find() || IDENTIFIER.matcher(norm).find();
+    }
     /** 是否是参考文献条目：编号、文献类型标识、来源刊名、年份、标识符、多段点号共同判定。 */
     public static boolean citationLike(String line) {
         if (line == null) return false;
