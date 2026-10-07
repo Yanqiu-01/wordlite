@@ -1,32 +1,55 @@
 package com.rikkahub.wordlite;
 
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
-/** 本机 AIGC 倾向检测：句长突发度、连接词密度、模板句式、句首重复、字符二元组熵、标点画像与实词多样度。 */
+/**
+ * 本机 AIGC 倾向检测的编排层：切句 → 取特征值（{@link AigcFeatures}）→ 打分（{@link AigcScorer}）→
+ * 相邻同腔句并成区间 → 双门槛定档。这一层一个权重都不写，也不再自己量文本。
+ *
+ * 两条口径是写死了不许动的：
+ * 1. {@link Result#rate} 仍然是**字符加权的句分均值**（Σ 句分 × 有效字符 / Σ 有效字符），定义一个字没改。
+ *    区间是"分区不挑选"的视图——每个计分句恰好落进一个区间，低分句也自成区间——于是
+ *    Σ 区间分 × 字数 / Σ 字数 == rate 是恒等式，聚合只改视图，一个字符都没被重复计或漏掉。
+ * 2. 有效字符不足 {@link #MIN_DOCUMENT_CHARS} 只给"样本不足"，不给比例。0 个计分句同样算样本不足
+ *    （0.5.4 在这里留着 insufficientSample=false，报告那一格会印出 0.00%，与
+ *    docs/oss-algorithms.md"可比对字数不足时禁止输出 0.00%"直接冲突，本版改掉）。
+ *
+ * 加成只进档位判定（{@link Tier}），不进任何百分比：rate、flaggedChars、Segment.score 三者口径互不打架。
+ */
 public final class AigcDetector {
     /** 有效字符数少于该值的句子不计分。 */
     public static final int MIN_SENTENCE_CHARS = 8;
     /** 低于这个有效字符数只给特征提示，不给百分比。 */
     public static final int MIN_DOCUMENT_CHARS = 400;
-    private static final double TEMPLATE_WEIGHT = 0.30d;
-    private static final double CONNECTIVE_WEIGHT = 0.18d;
-    private static final double BURST_WEIGHT = 0.12d;
-    private static final double OPENING_WEIGHT = 0.12d;
-    private static final double PUNCT_WEIGHT = 0.11d;
-    private static final double ENTROPY_WEIGHT = 0.08d;
-    private static final double DIVERSITY_WEIGHT = 0.08d;
-    private static final double PARALLEL_WEIGHT = 0.12d;
-    private static final double INTENSIFIER_WEIGHT = 0.16d;
-    private static final double FLAT_CV = 0.28d;
-    private static final double OPENING_RATIO = 0.45d;
-    private static final double LOW_ENTROPY = 3.4d;
-    private static final double LOW_DIVERSITY = 0.78d;
-    private static final double LOW_WORD_DIVERSITY = 0.62d;
+    /**
+     * 相邻两句都要到这条线才并段。0.35 来自实测：真人论文里 0.45 档的高分句 100% 是孤立的
+     * （≥2 连句的字符占比 0.0%），而机写骨架稿的分数是成片出现的（同档 4.5%、5/70 段成片）。
+     * 孤立的高分句在真人论文里是常态，成片的同腔成段几乎不存在——区间聚合买的就是这个差别。
+     */
+    public static final float SEGMENT_SCORE_FLOOR = 0.35f;
+    /** 区间分过这条线才算可疑区间，{@code flaggedChars} 由它来。取值见 docs/aigc-calibration.md 的 TIER 行。 */
+    public static final float SEGMENT_FLAG_GATE = 0.45f;
+    /** 一个区间最多并几句、最多多少有效字符：WCopyfind"按绝对量而不是只看比例"的同一条纪律。 */
+    public static final int MAX_SEGMENT_SENTENCES = 6;
+    public static final int MAX_SEGMENT_CHARS = 1200;
+    /** 档位的双门槛：可疑字数是绝对量，最长可疑区间的句数是连续度，两个一起看。 */
+    public static final int TIER_STRONG_CHARS = 400, TIER_REVIEW_CHARS = 200;
+    public static final int TIER_STRONG_RUN = 3, TIER_REVIEW_RUN = 2;
+    public static final float TIER_STRONG_RATE = 45f, TIER_REVIEW_RATE = 20f, TIER_WATCH_RATE = 10f;
+
+    /** 置信档位。顺序即强弱，报告与断言按 ordinal 比高低。 */
+    public enum Tier {
+        /** 可比对字数不够，只列特征。 */
+        INSUFFICIENT_SAMPLE,
+        /** 未见明显机器腔。 */
+        NONE,
+        /** 有痕迹但比例或连续度不足以下判断。 */
+        WATCH,
+        /** 成片的机器腔，值得复核。 */
+        NEEDS_REVIEW,
+        /** 成片且量大，整节复核。 */
+        STRONG
+    }
 
     public static final class Sentence {
         public int start, end;                   // 原串偏移
@@ -34,71 +57,40 @@ public final class AigcDetector {
         public final ArrayList<String> features = new ArrayList<String>(); // 中文特征名
     }
 
+    /** 分区视图：成员句的并集，不扩边；每个计分句恰好属于一个区间。 */
+    public static final class Segment {
+        public int start, end;                   // 成员句的并集偏移（不扩边）
+        public int fromSentence, toSentence;     // 在 Result.sentences 里的下标闭区间
+        public int chars;                        // 成员句有效字符之和（不是 UTF-16 跨度）
+        public float score;                      // 成员句分的字符加权平均，不含任何加成
+        public int family;                       // AigcFamily.CHINESE / LATIN / MIXED
+        public boolean flagged;                  // 区间分 ≥ SEGMENT_FLAG_GATE
+        /** 与查重命中重叠的字数，由查重侧回填（0.7.2 口径互扣，见 artifacts/research/aigc-handoff.md）。 */
+        public int duplicatedChars;
+        public final ArrayList<String> evidence = new ArrayList<String>(); // 成员句依据去重合并
+    }
+
     public static final class Result {
         public final ArrayList<Sentence> sentences = new ArrayList<Sentence>();
-        public float rate;                       // 按字符加权的百分比 0..100
+        /** 计分句的分区视图：按原文顺序、互不重叠、无缝覆盖全部计分句。 */
+        public final ArrayList<Segment> segments = new ArrayList<Segment>();
+        public float rate;                       // 定义不变：Σ 句分×有效字符 / Σ 有效字符
         public int comparedChars;
         /** 引用区间与参考文献表里没参与打分的字数。 */
         public int excludedChars;
+        /** 可疑区间的有效字符之和（不是 UTF-16 跨度，代理对不再算两个）。 */
+        public int flaggedChars;
+        /** 可疑区间的个数与其中最长的句数/字数，档位判定的依据，不是黑箱。 */
+        public int flaggedSegments, longestRunSentences, longestRunChars;
+        public Tier tier = Tier.INSUFFICIENT_SAMPLE;
         /** 有效字符不足 MIN_DOCUMENT_CHARS，比例不可信。 */
         public boolean insufficientSample;
         /** 一句人话结论，替代拿百分比当判决。 */
         public String verdict = "";
+        /** 本次真正用的系数表（族取中文族；拉丁族的表由它平移而来）。 */
+        public AigcScorer.Coefficients coefficients;
+        public String coefficientVersion = "";
     }
-
-    private static final class Template {
-        final String name;
-        final Pattern pattern;
-        Template(String name, String regex) {
-            this.name = name;
-            this.pattern = Pattern.compile(regex);
-        }
-    }
-
-    private static final Template[] TEMPLATES = {
-        new Template("综上所述", "综上所述|总而言之|总的来说|总体而言|概括来说"),
-        new Template("值得注意的是", "值得注意的是|需要注意的是|需要指出的是|值得注意的|不难发现|由此可见|众所周知"),
-        new Template("随着……的发展", "随着[^。]{0,18}的?(不断|日益|持续)?(发展|推进|深入|普及|演进)"),
-        new Template("在……的背景下", "在[^。]{0,14}的(背景|形势|情况)下"),
-        new Template("通过……可以发现", "通过[^。]{0,20}(可以|能够|得以|足以)?[^。]{0,6}(发现|看出|得知|得知|印证|验证)"),
-        new Template("为……提供了", "为[^。]{1,18}提供(了)?[^。]{0,6}(支撑|依据|参考|借鉴|基础|思路|方向)"),
-        new Template("起重要作用", "(发挥|起|起到|发挥了)了?[^。]{0,6}(重要|关键|积极|巨大)[^。]{0,3}作用"),
-        new Template("具有重要意义", "具有[^。]{0,6}(重要|显著|突出|重大)[^。]{0,3}(意义|价值|作用|前景)"),
-        new Template("首先……其次……最后", "首先[^。]{2,60}其次[^。]{2,60}(最后|再次|此外)"),
-        new Template("一方面……另一方面", "一方面[^。]{2,60}另一方面"),
-        new Template("不仅……而且", "不仅[^。]{2,50}(而且|还|更|同时|也)"),
-        new Template("本文提出/认为", "(本文|本研究|本节)(认为|提出|采用|旨在|试图|尝试|围绕|聚焦)"),
-        new Template("奠定坚实基础", "奠定(了)?[^。]{0,4}(坚实|良好|扎实)[^。]{0,3}基础"),
-        new Template("有待进一步", "(有待|仍需|还需)[^。]{0,6}(进一步|持续)[^。]{0,4}(研究|验证|完善|提升|优化)"),
-        new Template("存在广阔空间", "存在[^。]{0,6}(较大|广阔|巨大|一定)[^。]{0,4}(空间|潜力|余地|挑战)"),
-        new Template("in conclusion", "in conclusion|to sum up|in summary|overall, |taken together"),
-        new Template("it is worth noting", "it is worth noting|it is important to note|it should be noted|it is evident that"),
-        new Template("moreover/furthermore", "moreover|furthermore|additionally|in addition|what'?s more"),
-        new Template("plays a crucial role", "plays? a[^。]{0,14}(crucial|vital|important|key|pivotal|central)[^。]{0,6}role"),
-        new Template("provide valuable insights", "provid?e?s? valuable insights|shed light on|offer a deep understanding"),
-        new Template("this paper proposes", "this paper (proposes|presents|develops)|in this paper, |the proposed (method|approach|model|framework)"),
-        new Template("in recent years", "in recent years|has been widely (used|applied|adopted|studied)|has attracted (growing|considerable) attention"),
-        new Template("not only but also", "not only[^。]{2,60}but also"),
-        new Template("comprehensive analysis", "comprehensive (analysis|review|investigation)|delve into|a profound impact"),
-    };
-
-    private static final String[] CONNECTIVES = {
-        "首先", "其次", "再次", "然后", "最后", "第一", "第二", "第三", "因此", "所以", "因而", "从而", "而且", "并且",
-        "此外", "另外", "同时", "不仅", "但是", "然而", "不过", "尽管", "虽然", "由于", "因为", "为了", "通过", "根据",
-        "针对", "基于", "总之", "综上", "可见", "换言之", "也就是说", "总的来说", "总体而言", "需要", "应当", "必须", "能够",
-        "可以",
-    };
-
-    private static final String[] EN_CONNECTIVES = {
-        "moreover", "furthermore", "additionally", "in addition", "however", "therefore", "thus",
-        "consequently", "nevertheless", "firstly", "secondly", "finally", "in conclusion",
-        "on the one hand", "on the other hand", "in contrast", "for instance",
-    };
-
-    private static final String[] INTENSIFIERS = {
-        "显著", "有效", "充分", "全面", "极大", "大幅", "明显", "有力", "重要", "关键", "核心", "高效",
-        "稳定", "优异", "突出", "扎实", "深入", "广泛", "严格", "合理",
-    };
 
     private AigcDetector() { }
 
@@ -112,287 +104,152 @@ public final class AigcDetector {
 
     private static Result detectInto(String text, int[] excluded) {
         Result result = new Result();
-        if (text == null || text.length() == 0) return result;
-        String norm = TextCorpus.normalize(text);
-        ArrayList<int[]> spans = TextCorpus.sentences(text);
-        ArrayList<int[]> scored = new ArrayList<int[]>();
-        double[] all = new double[spans.size()];
-        int totalChars = 0;
-        for (int i = 0; i < spans.size(); i++) {
-            int[] span = spans.get(i);
-            int chars = TextCorpus.validCount(norm, span[0], span[1]);
-            all[i] = chars;
-            if (TextCorpus.insideSpan(excluded, span[0])) {
-                result.excludedChars += chars;
-                continue;
+        ArrayList<AigcFeatures.Segment> scored = new ArrayList<AigcFeatures.Segment>();
+        ArrayList<Integer> paragraphs = new ArrayList<Integer>();
+        if (text != null && text.length() > 0) {
+            String norm = TextCorpus.normalize(text);
+            ArrayList<int[]> spans = TextCorpus.sentences(text);
+            int[] lineBreaks = lineBreakOffsets(text);
+            int line = 0;
+            int totalChars = 0;
+            for (int i = 0; i < spans.size(); i++) {
+                int[] span = spans.get(i);
+                while (line < lineBreaks.length && lineBreaks[line] < span[0]) line++;
+                if (TextCorpus.insideSpan(excluded, span[0])) {
+                    result.excludedChars += TextCorpus.validCount(norm, span[0], span[1]);
+                    continue;
+                }
+                AigcFeatures.Segment seg = AigcFeatures.segment(norm, span[0], span[1]);
+                // 只有标点的短串不算一句话：有效字符或实义字符不足 MIN_SENTENCE_CHARS 都不计分。
+                if (!AigcFeatures.scores(seg)) continue;
+                scored.add(seg);
+                paragraphs.add(Integer.valueOf(line));
+                totalChars += seg.validChars;
             }
-            // 只有标点的短串不算一句话：实义字符不足 MIN_SENTENCE_CHARS 就不计分。
-            if (chars < MIN_SENTENCE_CHARS || contentCount(norm, span[0], span[1]) < MIN_SENTENCE_CHARS) continue;
-            scored.add(span);
-            totalChars += chars;
-        }
-        if (scored.isEmpty()) return result;
-        result.comparedChars = totalChars;
-        double[] lengths = new double[scored.size()];
-        HashMap<String, Integer> openings = new HashMap<String, Integer>();
-        for (int i = 0; i < scored.size(); i++) {
-            int[] span = scored.get(i);
-            int chars = TextCorpus.validCount(norm, span[0], span[1]);
-            lengths[i] = chars;
-            String prefix = opening(norm, span[0], span[1]);
-            if (prefix.length() > 0) count(openings, prefix);
-        }
-        double mean = 0d;
-        for (double length : all) mean += length;
-        mean /= all.length;
-        double variance = 0d;
-        for (double length : all) variance += (length - mean) * (length - mean);
-        variance /= all.length;
-        double cv = mean <= 0d ? 0d : Math.sqrt(variance) / mean;
-        boolean flat = lengths.length >= 4 && cv < FLAT_CV;
-        int dominantCount = 0;
-        String dominant = "";
-        for (Map.Entry<String, Integer> entry : openings.entrySet()) {
-            if (entry.getValue().intValue() > dominantCount) {
-                dominantCount = entry.getValue().intValue();
-                dominant = entry.getKey();
+            result.comparedChars = totalChars;
+            AigcFeatures.DocStats stats = AigcFeatures.stats(norm, spans, scored);
+            result.coefficients = AigcScorer.current(AigcFamily.CHINESE);
+            result.coefficientVersion = result.coefficients.version();
+            double weighted = 0d;
+            for (int i = 0; i < scored.size(); i++) {
+                AigcFeatures.Segment seg = scored.get(i);
+                ArrayList<AigcFeatures.Hit> hits = AigcFeatures.of(seg, stats);
+                double score = AigcScorer.score(hits, AigcScorer.current(seg.family));
+                Sentence sentence = new Sentence();
+                sentence.start = seg.start;
+                sentence.end = seg.end;
+                sentence.score = (float) score;
+                for (int k = 0; k < hits.size(); k++) sentence.features.addAll(hits.get(k).evidence);
+                result.sentences.add(sentence);
+                weighted += score * seg.validChars;
             }
+            double rate = totalChars == 0 ? 0d : weighted * 100d / totalChars;
+            result.rate = (float) (rate > 100d ? 100d : rate);
+            aggregate(result, scored, paragraphs, excluded);
         }
-        boolean repeatedOpening = scored.size() >= 5 && dominantCount >= OPENING_RATIO * scored.size();
-        double weighted = 0d;
-        for (int i = 0; i < scored.size(); i++) {
-            int[] span = scored.get(i);
-            int chars = (int) lengths[i];
-            Sentence sentence = score(norm, span, chars, flat, cv, dominant, repeatedOpening);
-            result.sentences.add(sentence);
-            weighted += sentence.score * chars;
-        }
-        double rate = weighted * 100d / totalChars;
-        result.rate = (float) (rate > 100d ? 100d : rate);
-        result.insufficientSample = totalChars < MIN_DOCUMENT_CHARS;
+        // 0 个计分句也算样本不足：宁可不给数，也不给一个看起来像结论的 0.00%。
+        result.insufficientSample = result.comparedChars < MIN_DOCUMENT_CHARS;
+        result.tier = result.insufficientSample ? Tier.INSUFFICIENT_SAMPLE : tierOf(result);
         result.verdict = verdict(result);
         return result;
     }
 
-    /** 样本不足时禁止给比例，其余只说倾向。 */
-    static String verdict(Result result) {
-        if (result.insufficientSample)
-            return "样本不足（有效字符 " + result.comparedChars + "，门槛 " + MIN_DOCUMENT_CHARS + "），只列特征，不给生成比例";
-        if (result.rate >= 45f) return "机器腔明显，建议逐段复核";
-        if (result.rate >= 20f) return "部分段落有机器腔，建议复核高分句";
-        return "未见明显机器腔";
-    }
-
-    private static Sentence score(String norm, int[] span, int chars, boolean flat, double cv,
-                                  String dominant, boolean repeatedOpening) {
-        Sentence sentence = new Sentence();
-        sentence.start = span[0];
-        sentence.end = span[1];
-        String body = norm.substring(span[0], Math.min(norm.length(), span[1]));
-        double total = 0d;
-        int templates = 0;
-        for (Template template : TEMPLATES) {
-            if (!template.pattern.matcher(body).find()) continue;
-            if (templates < 2) total += TEMPLATE_WEIGHT;
-            else if (templates < 4) total += TEMPLATE_WEIGHT * 0.35d;
-            if (templates < 4) sentence.features.add("模板句式：" + template.name);
-            templates++;
-        }
-        int connectives = countOccurrences(body, CONNECTIVES) + countOccurrences(body, EN_CONNECTIVES);
-        if (connectives >= 2) {
-            total += CONNECTIVE_WEIGHT;
-            sentence.features.add("连接词密度偏高");
-        }
-        if (flat) {
-            total += BURST_WEIGHT;
-            sentence.features.add("句长突发度低（变异系数 " + format(cv) + "）");
-        }
-        if (repeatedOpening) {
-            total += OPENING_WEIGHT;
-            sentence.features.add("句首结构重复（常以「" + dominant + "」开头）");
-        }
-        String compact = TextCorpus.compactOf(body);
-        if (compact.length() == 0) {
-            sentence.score = 0f;
-            return sentence;
-        }
-        int semicolons = 0;
-        int dashes = 0;
-        int quotes = 0;
-        int commas = 0;
-        for (int i = 0; i < body.length(); i++) {
-            char c = body.charAt(i);
-            if (c == ';') semicolons++;
-            else if (c == '-') dashes++;
-            else if (c == '"') quotes += 1;
-            else if (c == ',') commas++;
-        }
-        if (semicolons >= 2) {
-            total += PUNCT_WEIGHT;
-            sentence.features.add("分号密集（并列长句）");
-        } else if (semicolons >= 1) {
-            total += PUNCT_WEIGHT * 0.6d;
-            sentence.features.add("分号衔接并列分句");
-        } else if (dashes >= 1) {
-            total += PUNCT_WEIGHT * 0.8d;
-            sentence.features.add("破折号使用");
-        }
-        if (quotes >= 4) {
-            total += PUNCT_WEIGHT * 0.6d;
-            sentence.features.add("引号密度偏高");
-        }
-        if ((semicolons >= 1 && commas >= 3) || (commas >= 4 && body.length() < 90)) {
-            total += PARALLEL_WEIGHT;
-            sentence.features.add("并列排比密集");
-        }
-        int intensifiers = countOccurrences(body, INTENSIFIERS);
-        if (intensifiers >= 2) {
-            total += INTENSIFIER_WEIGHT;
-            sentence.features.add("程度副词/评价词堆叠");
-        }
-        double entropy = bigramEntropy(compact);
-        if (chars >= 24 && entropy <= LOW_ENTROPY) {
-            total += ENTROPY_WEIGHT;
-            sentence.features.add("字符二元组熵偏低（" + format(entropy) + " bit，局部重复表达）");
-        }
-        double diversity = diversity(compact);
-        double floor = isLatin(compact) ? LOW_WORD_DIVERSITY : LOW_DIVERSITY;
-        if (chars >= 24 && diversity <= floor) {
-            total += DIVERSITY_WEIGHT;
-            sentence.features.add("实词多样度低（用词重复，" + format(diversity) + "）");
-        }
-        sentence.score = (float) (total > 1d ? 1d : total);
-        return sentence;
-    }
-
-    /** 实义字符数：汉字、假名、拉丁字母与数字，标点符号不计。 */
-    static int contentCount(String norm, int from, int to) {
-        int count = 0;
-        for (int i = from; i < to; i++) {
-            char c = norm.charAt(i);
-            if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) count++;
-            else if (c >= 0x4E00 && c <= 0x9FFF) count++;
-            else if (c >= 0x3040 && c <= 0x30FF) count++;
-        }
-        return count;
-    }
-
-    private static void count(HashMap<String, Integer> map, String key) {
-        Integer previous = map.get(key);
-        map.put(key, Integer.valueOf(previous == null ? 1 : previous.intValue() + 1));
-    }
-
-    private static int countOccurrences(String body, String[] terms) {
-        int hits = 0;
-        for (int i = 0; i < terms.length; i++) {
-            String term = terms[i];
-            if (term.length() == 0) continue;
-            int at = body.indexOf(term);
-            while (at >= 0) {
-                hits++;
-                at = body.indexOf(term, at + term.length());
+    /**
+     * 分区（五条规则，逐条有断言）：① 每个计分句恰好落进一个区间，低分句也自成区间；② 相邻两句都
+     * ≥ SEGMENT_SCORE_FLOOR、同自然段、同族、中间没有被排除区间穿过，且并完不超过句数与字数上限才并段；
+     * ③ 区间分是成员句分的字符加权平均，不含加成；④ 排除区间把区间切断；⑤ 按 start 升序、互不重叠。
+     */
+    private static void aggregate(Result result, ArrayList<AigcFeatures.Segment> scored,
+                                  ArrayList<Integer> paragraphs, int[] excluded) {
+        int cursor = 0;
+        while (cursor < scored.size()) {
+            int from = cursor;
+            int to = cursor;
+            int chars = scored.get(from).validChars;
+            while (to + 1 < scored.size()
+                    && result.sentences.get(to + 1).score >= SEGMENT_SCORE_FLOOR
+                    && result.sentences.get(to).score >= SEGMENT_SCORE_FLOOR
+                    && (to - from + 1) < MAX_SEGMENT_SENTENCES
+                    && paragraphs.get(to).intValue() == paragraphs.get(to + 1).intValue()
+                    && scored.get(to).family == scored.get(to + 1).family
+                    && !crosses(excluded, scored.get(to).end, scored.get(to + 1).start)
+                    && chars + scored.get(to + 1).validChars <= MAX_SEGMENT_CHARS) {
+                to++;
+                chars += scored.get(to).validChars;
             }
-        }
-        return hits;
-    }
-
-    /** 句首结构签名：中文取前两个字，拉丁文取首个词。 */
-    private static String opening(String norm, int from, int to) {
-        int i = from;
-        while (i < to && !isSignatureChar(norm.charAt(i))) i++;
-        if (i >= to) return "";
-        char first = norm.charAt(i);
-        StringBuilder out = new StringBuilder();
-        if ((first >= 'a' && first <= 'z') || (first >= '0' && first <= '9')) {
-            while (i < to && ((norm.charAt(i) >= 'a' && norm.charAt(i) <= 'z')
-                    || (norm.charAt(i) >= '0' && norm.charAt(i) <= '9'))) {
-                if (out.length() < 12) out.append(norm.charAt(i));
-                i++;
-            }
-            return out.toString();
-        }
-        while (i < to && out.length() < 2) {
-            if (isSignatureChar(norm.charAt(i))) out.append(norm.charAt(i));
-            i++;
-        }
-        return out.toString();
-    }
-
-    private static boolean isSignatureChar(char c) {
-        if (c >= 'a' && c <= 'z') return true;
-        if (c >= '0' && c <= '9') return true;
-        if (c >= 0x4E00 && c <= 0x9FFF) return true;
-        return (c >= 0x3040 && c <= 0x30FF);
-    }
-
-    /** 字符二元组 Shannon 熵（bit/二元组）。 */
-    private static double bigramEntropy(String compact) {
-        int length = compact.length();
-        if (length < 3) return 0d;
-        HashMap<Long, Integer> counts = new HashMap<Long, Integer>();
-        int total = 0;
-        for (int i = 0; i + 1 < length; i++) {
-            Long key = Long.valueOf(((long) compact.charAt(i) << 16) | compact.charAt(i + 1));
-            Integer previous = counts.get(key);
-            counts.put(key, Integer.valueOf(previous == null ? 1 : previous.intValue() + 1));
-            total++;
-        }
-        double entropy = 0d;
-        for (Map.Entry<Long, Integer> entry : counts.entrySet()) {
-            double p = (double) entry.getValue().intValue() / total;
-            entropy -= p * log2(p);
-        }
-        return entropy;
-    }
-
-    /** 实词多样度：拉丁文按词形去重，中文按字去重。 */
-    private static boolean isLatin(String compact) {
-        return latinRatio(compact) >= 0.5d;
-    }
-
-    private static double latinRatio(String compact) {
-        int latin = 0;
-        for (int i = 0; i < compact.length(); i++) {
-            if (compact.charAt(i) >= 'a' && compact.charAt(i) <= 'z') latin++;
-        }
-        return compact.length() == 0 ? 0d : (double) latin / compact.length();
-    }
-
-    private static double diversity(String compact) {
-        int total = 0;
-        if (latinRatio(compact) >= 0.5d) {
-            HashSet<String> words = new HashSet<String>();
-            StringBuilder word = new StringBuilder();
-            for (int i = 0; i < compact.length(); i++) {
-                char c = compact.charAt(i);
-                if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) word.append(c);
-                else if (word.length() > 0) {
-                    words.add(word.toString());
-                    total++;
-                    word.setLength(0);
+            cursor = to + 1;
+            AigcFeatures.Segment head = scored.get(from);
+            Segment segment = new Segment();
+            segment.fromSentence = from;
+            segment.toSentence = to;
+            segment.start = result.sentences.get(from).start;
+            segment.end = result.sentences.get(to).end;
+            segment.family = head.family;
+            segment.chars = chars;
+            double weighted = 0d;
+            for (int i = from; i <= to; i++) {
+                Sentence member = result.sentences.get(i);
+                weighted += (double) member.score * scored.get(i).validChars;
+                for (int k = 0; k < member.features.size(); k++) {
+                    String evidence = member.features.get(k);
+                    if (!segment.evidence.contains(evidence)) segment.evidence.add(evidence);
                 }
             }
-            if (word.length() > 0) {
-                words.add(word.toString());
-                total++;
+            segment.score = chars <= 0 ? 0f : (float) (weighted / chars);
+            segment.flagged = segment.score >= SEGMENT_FLAG_GATE;
+            result.segments.add(segment);
+            if (!segment.flagged) continue;
+            result.flaggedSegments++;
+            result.flaggedChars += segment.chars;
+            if (to - from + 1 > result.longestRunSentences) {
+                result.longestRunSentences = to - from + 1;
+                result.longestRunChars = segment.chars;
             }
-            return total == 0 ? 0d : (double) words.size() / total;
         }
-        HashSet<Character> seen = new HashSet<Character>();
-        for (int i = 0; i < compact.length(); i++) {
-            seen.add(Character.valueOf(compact.charAt(i)));
-            total++;
-        }
-        return total == 0 ? 0d : (double) seen.size() / total;
     }
 
-    private static final double LN2 = Math.log(2d);
-
-    private static String format(double value) {
-        return String.format(java.util.Locale.US, "%.2f", Double.valueOf(value));
+    /** 两个计分句之间是否横着一段被排除的文本（引用、参考文献表、结构性文本）。 */
+    private static boolean crosses(int[] excluded, int from, int to) {
+        for (int i = 0; i + 1 < excluded.length; i += 2)
+            if (excluded[i] < to && excluded[i + 1] > from) return true;
+        return false;
     }
 
-    private static double log2(double value) {
-        return value <= 0d ? 0d : Math.log(value) / LN2;
+    /** 自然段序号：换行符计一段。区间不跨段，因为 1.0.0 要点证据跳正文，跨段区间会跨页，UI 解释不清。 */
+    private static int[] lineBreakOffsets(String text) {
+        int count = 0;
+        for (int i = 0; i < text.length(); i++) if (text.charAt(i) == '\n') count++;
+        int[] out = new int[count];
+        int at = 0;
+        for (int i = 0; i < text.length(); i++) if (text.charAt(i) == '\n') out[at++] = i;
+        return out;
+    }
+
+    /** 置信档位：可疑字数（绝对量）与最长可疑区间的句数（连续度）双门槛，再配两条比例线。 */
+    static Tier tierOf(Result result) {
+        if (result.flaggedChars >= TIER_STRONG_CHARS && result.longestRunSentences >= TIER_STRONG_RUN
+                && result.rate >= TIER_STRONG_RATE) return Tier.STRONG;
+        if (result.flaggedChars >= TIER_REVIEW_CHARS && result.longestRunSentences >= TIER_REVIEW_RUN
+                && result.rate >= TIER_REVIEW_RATE) return Tier.NEEDS_REVIEW;
+        if (result.flaggedChars > 0 || result.rate >= TIER_WATCH_RATE) return Tier.WATCH;
+        return Tier.NONE;
+    }
+
+    /** 样本不足时禁止给比例，其余只说倾向与档位，不做判决（MOSS"分数只用于相对比较"）。 */
+    static String verdict(Result result) {
+        if (result.insufficientSample)
+            return "样本不足（有效字符 " + result.comparedChars + "，门槛 " + MIN_DOCUMENT_CHARS
+                    + "），只列特征，不给生成比例";
+        switch (result.tier) {
+            case STRONG:
+                return "成段机器腔（" + result.flaggedSegments + " 段 / " + result.flaggedChars
+                        + " 字），建议整节复核";
+            case NEEDS_REVIEW:
+                return "部分段落有机器腔，建议复核高分句";
+            case WATCH:
+                return "零散句子有机器腔痕迹，比例与连续度都不足以下判断";
+            default:
+                return "未见明显机器腔";
+        }
     }
 }

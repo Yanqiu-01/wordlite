@@ -1,0 +1,46 @@
+# 机写侧弱标签 M2：12 张段落骨架，占位符 {1}..{n} 由 tests/corpus/real-prose.txt 的真实句子填充。
+# 这份表和 AigcFeatures 的模板正则是两份文件、不共用常量；重叠是故意的，标定台启动时把重叠项逐行点名
+# （OVERLAP 行），让"用骨架造机写侧、再用骨架词判机写侧"这个循环在产物里看得见，而不是留在作者脑子里。
+# 骨架词清单（OVERLAP 审计用，与打分特征表逐条比对）：
+# TOKEN 综上所述
+# TOKEN 总而言之
+# TOKEN 值得注意的是
+# TOKEN 需要指出的是
+# TOKEN 由此可见
+# TOKEN 众所周知
+# TOKEN 总的来说
+# TOKEN 总体而言
+# TOKEN 概括来说
+# TOKEN 首先
+# TOKEN 其次
+# TOKEN 再次
+# TOKEN 然后
+# TOKEN 最后
+# TOKEN 第一
+# TOKEN 第二
+# TOKEN 此外
+# TOKEN 与此同时
+# TOKEN 不仅如此
+# TOKEN 通过
+# TOKEN 可以
+# TOKEN 为后续研究提供了
+# TOKEN 具有重要意义
+# TOKEN 奠定坚实基础
+# TOKEN 有待进一步
+# TOKEN in conclusion
+# TOKEN moreover
+# TOKEN furthermore
+# TOKEN it is worth noting
+# TOKEN in addition
+FRAME 综上所述，{1}。通过上述分析可以发现，{2}，为后续研究提供了重要的参考。值得注意的是，{3}。总体来看，{4}，具有重要的理论意义和广阔的应用前景。
+FRAME 随着研究的不断深入，{1}。在当前的背景下，{2}。通过系统的对比可以发现，{3}，不仅提升了效率，而且为相关工作的推进奠定了坚实的基础。
+FRAME 本文认为，{1}。一方面，{2}；另一方面，{3}。通过实验可以发现，{4}，具有重要意义，同时也为后续研究提供了新的思路。
+FRAME 总的来说，{1}。首先需要指出的是，{2}；其次，{3}；最后，{4}。由此可见，这一系列工作为相关领域的深入研究提供了有力的支撑。
+FRAME 近年来，随着技术的持续发展，{1}。值得注意的是，{2}。不仅如此，{3}。由此可见，这一思路为后续研究提供了重要的借鉴。
+FRAME 众所周知，{1}。因此，{2}。此外，{3}。通过不断的尝试与改进可以发现，{4}，为相关工程实践奠定了坚实的基础。
+FRAME In conclusion, {1}. Moreover, it is worth noting that {2}, which plays a crucial role in the field. Furthermore, in addition to the gains, {3} provides valuable insights for future work.
+FRAME 概括来说，{1}。第一，{2}；第二，{3}；第三，{4}。总体而言，{5}仍有待进一步完善和提升。
+FRAME 本研究围绕{1}展开，认为{2}。通过实验可以发现，{3}，显著提升了整体的稳定性，有效降低了成本，具有重要的应用价值。
+FRAME 需要指出的是，{1}。与此同时，{2}。在此基础上，{3}，不仅具有突出的理论价值，也为后续研究提供了广阔的探索空间。
+FRAME 综上所述，{1}与{2}密切相关。未来的工作有待进一步扩大样本规模，持续优化流程，从而验证结论的普适性，具有重要意义。
+FRAME 首先，{1}。然后，{2}。最后，{3}。可以预见，随着技术的不断演进，{4}必然发挥越来越重要的作用，为行业发展奠定坚实基础。
