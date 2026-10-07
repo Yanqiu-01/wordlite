@@ -101,10 +101,21 @@ public final class DetectRegression {
             + "\"identifiers\":{\"doi\":\"10.5281/zenodo.555\"},"
             + "\"links\":[{\"type\":\"pdf\",\"uri\":\"https://core.example.org/files/555.pdf\"}],"
             + "\"landingPageUri\":\"https://core.example.org/display/555\"}]}";
+    /** 与 deferredNote 文档对题的一条 Crossref 记录：零分闸门之后，答空的第二个窗口要真回对题的料。 */
+    private static final String CROSSREF_ON_TOPIC = "{\"status\":\"ok\",\"message\":{\"total-results\":1,\"items\":[{"
+            + "\"DOI\":\"10.5555/tlp-joint\",\"title\":[\"TLP 互连接头剪切强度实测值的分布研究\"],"
+            + "\"author\":[{\"given\":\"Li\",\"family\":\"Zhang\"}],\"issued\":{\"date-parts\":[[2022]]},"
+            + "\"abstract\":\"TLP 互连接头剪切强度实测值随保温时间上升，窗口切分稳定可预期。\","
+            + "\"link\":[{\"URL\":\"https://publisher.example.org/tlp.pdf\",\"content-type\":\"application/pdf\"}]}]}}";
+    /** 知网空结果页：一条 <div class="list-item"> 都没有，解析器给空表。 */
+    private static final String CNKI_EMPTY = "<html><body class=\"search-result\"></body></html>";
     private static final String FULLTEXT_XML = "<article><body><sec><title>Intro</title>"
             + "<p>Brazing gaps below 0.2 mm produced the strongest joints.</p></sec></body></article>";
 
     public static void main(String[] args) throws Exception {
+        /* 每源 400ms 的间隔是给真机防封 IP 的，回归里全部压成 0；DuplicateEngine 的两个注入值
+           在 finally 里还原，免得下一个套件读到脏字段。 */
+        DuplicateEngine.engineGapMillis = 0L;
         cqvipFixture = fixture(args.length > 0 ? args[0] : "tests/samples/cqvip-search.html");
         ncpssdFixture = fixture(args.length > 1 ? args[1] : "tests/samples/ncpssd-search.json");
         wanfangFixture = binary(args.length > 2 ? args[2] : "tests/samples/wanfang-search.bin");
@@ -127,10 +138,13 @@ public final class DetectRegression {
             respond(exchange, 200, CORE);
         });
         server.createContext("/cqvip", exchange -> { record("/cqvip", queryOf(exchange)); respond(exchange, 200, cqvipFixture); });
+        /* 知网一直没有桩，scan(engines = null) 于是真的打通 search.cnki.com.cn：这句"loopback-only"
+           以前是假的。空结果页就够——回归要的是"这个源被问了几次"有出处，不是知网真回料。 */
+        server.createContext("/cnki", exchange -> { record("/cnki", queryOf(exchange)); respond(exchange, 200, CNKI_EMPTY); });
         server.createContext("/sometimes", exchange -> {
             String asked = queryOf(exchange);
             record("/sometimes", asked);
-            respond(exchange, 200, asked.contains("alpha-marker") ? EMPTY_CROSSREF : CROSSREF);
+            respond(exchange, 200, asked.contains("alpha-marker") ? EMPTY_CROSSREF : CROSSREF_ON_TOPIC);
         });
         server.createContext("/ncpssd", exchange -> {
             record("/ncpssd", queryOf(exchange));
@@ -220,6 +234,8 @@ public final class DetectRegression {
         } finally {
             server.stop(0);
             PaperSources.resetEndpoints();
+            DuplicateEngine.engineGapMillis = DuplicateEngine.MIN_ENGINE_GAP_MILLIS;
+            DuplicateEngine.searchMillis = DuplicateEngine.MAX_SEARCH_MILLIS;
         }
         rewriteEffect();
         System.out.println("SUMMARY " + checks + " assertions passed; loopback-only network");
@@ -246,6 +262,7 @@ public final class DetectRegression {
     }
     /** The loopback fixtures stand in for every built-in connector. */
     private static void loopback(String base) {
+        PaperSources.setEndpoint("cnki", base + "/cnki");
         PaperSources.setEndpoint("cqvip", base + "/cqvip");
         PaperSources.setEndpoint("wanfang", base + "/wanfang");
         PaperSources.setEndpoint("ncpssd", base + "/ncpssd");
@@ -395,12 +412,14 @@ public final class DetectRegression {
     private static void deferredNote(String base) {
         PaperSources.setEndpoint("crossref", base + "/sometimes");
         DocxDocument document = new DocxDocument();
-        add(document, paragraph(0, "alpha-marker 这一段先送去检索，希望这个源第一次答空。", "", ""));
-        add(document, paragraph(1, "中段内容用来把窗口撑满，使第一段单独成为一个检索窗口。", "", ""));
-        add(document, paragraph(2, "这一段同样只是正文，不参与断言，只保证窗口切分稳定可预期。", "", ""));
-        add(document, paragraph(3, "beta-marker 这一段再送去检索，这一次同一个源应当给出候选。", "", ""));
-        add(document, paragraph(4, "再补一段正文，让第二个窗口稳定成型而不受标点影响。", "", ""));
-        add(document, paragraph(5, "最后一段正文，检索窗口到这里就足够覆盖两个窗口的差别。", "", ""));
+        /* 六段正文共用一个题内短语：0.6.0 起与检索词零共同词的候选不再进语料，
+           这个夹具要验的是"先空后中"，不是零分闸门，所以文档得真的与候选对题。 */
+        add(document, paragraph(0, "alpha-marker 这一段先送去检索，TLP 互连接头剪切强度实测值第一次希望答空。", "", ""));
+        add(document, paragraph(1, "中段内容用来把窗口撑满，TLP 互连接头剪切强度实测值使第一段单独成窗口。", "", ""));
+        add(document, paragraph(2, "这一段同样只是正文，TLP 互连接头剪切强度实测值只保证窗口切分稳定。", "", ""));
+        add(document, paragraph(3, "beta-marker 这一段再送去检索，TLP 互连接头剪切强度实测值这次应当给出候选。", "", ""));
+        add(document, paragraph(4, "再补一段正文，TLP 互连接头剪切强度实测值让第二个窗口稳定成型。", "", ""));
+        add(document, paragraph(5, "最后一段正文，TLP 互连接头剪切强度实测值到这里就覆盖两个窗口的差别。", "", ""));
         ArrayList<String> engines = new ArrayList<String>();
         engines.add("crossref");
         DuplicateEngine.Report report = DuplicateEngine.scan(TextSelection.all(document), new TextCorpus(),
@@ -829,8 +848,13 @@ public final class DetectRegression {
                 "candidate counts are tracked per engine");
         int gathered = 0;
         for (String key : report.candidateCount.keySet()) gathered += report.candidateCount.get(key).intValue();
-        check(gathered == report.candidates.size() && gathered <= 5 * limits.perEngine,
-                "per-engine candidate cap honoured and totals consistent");
+        /* 配额语义变了：perEngine 只管每次请求要几条，入库改成「全库 120 篇 + 逐源 perEngine 篇」
+           双上限，"总量 <= 5 x perEngine" 这个旧口径量的是已经不存在的第三个数。 */
+        int overCap = 0;
+        for (String key : report.candidateCount.keySet())
+            if (report.candidateCount.get(key).intValue() > limits.perEngine) overCap++;
+        check(gathered == report.candidates.size() && gathered <= DuplicateEngine.MAX_CORPUS_PAPERS && overCap == 0,
+                "corpus honours the two caps: 120 papers overall and perEngine per source");
         boolean skippedCore = false;
         for (String note : report.notes) if (note.contains("CORE") && note.contains("未配置 API Key")) skippedCore = true;
         check(skippedCore, "keyless CORE is reported as skipped instead of failing the scan");

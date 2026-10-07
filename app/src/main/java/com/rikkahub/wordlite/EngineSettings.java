@@ -11,7 +11,10 @@ public final class EngineSettings {
     public static final String[] DEFAULT_ENGINES = {"cnki", "cqvip", "wanfang", "ncpssd", "openalex", "crossref", "semantic-scholar", "europepmc", "arxiv"};
     public boolean web = true;
     public final ArrayList<String> engines = new ArrayList<String>();
-    public int perEngine = 12, timeoutSeconds = 20, windows = 12;
+    /* windows 的新装机默认从 12 降到 6：实测一轮 9 个源约 10 秒（维普最慢 4062ms），12 轮加限速
+       必然撞 180 秒的挂钟闸门，等于把闸门当默认路径用。用户自己设过的值在 deserialize() 里原样
+       读回，这条只改新装机。perEngine 只管每次请求要几条，不再是整轮配额。 */
+    public int perEngine = 12, timeoutSeconds = 20, windows = 6;
     public String coreKey = "";
     /** Optional HTTP proxy for the built-in sources, written as host:port and empty by default:
      *  a phone on a network that resets these hosts needs one to retrieve anything at all. */

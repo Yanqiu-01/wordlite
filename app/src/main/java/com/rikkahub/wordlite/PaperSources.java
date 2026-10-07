@@ -14,10 +14,17 @@ public final class PaperSources {
     public static final class Candidate {
         public TextCorpus.Source source = new TextCorpus.Source();
         public String abstractText = "", fullTextUrl = "";
+        /** 这条候选最终给本机比对贡献了什么：全文 / 摘要 / 仅题录，由 DuplicateEngine 入库时写，报告逐行可核。 */
+        public String comparableMaterial = "";
     }
     public static final class Limits {
         public int timeoutSeconds = 20;
+        /** 每次请求向该源要几条：只下发成 per-page / rows / limit / pageSize，不再兼作整轮入库配额。 */
         public int perEngine = 12;
+        /** 每篇文档切几个检索窗口 = 每个源最多被问几次，由 EngineSettings.windows 一路传下来。 */
+        public int windows = 12;
+        /** 本次检测允许的开放获取全文抓取次数。 */
+        public int fullTexts = 6;
         public String coreKey = "";
         /** host:port of an HTTP proxy for this retrieval pass, empty to dial out directly. */
         public String proxy = "";

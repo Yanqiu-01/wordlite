@@ -243,6 +243,10 @@ public final class ApiWorkflow {
                 PaperSources.Limits limits = new PaperSources.Limits();
                 limits.timeoutSeconds = options.timeoutSeconds;
                 limits.perEngine = options.perEngine;
+                /* 设置里的窗口数终于到得了检索循环：它是"每个源最多被问几次"，
+                   不再是 PaperSources.Limits 里一个没人读的摆设。 */
+                limits.windows = options.windows;
+                limits.fullTexts = DuplicateEngine.MAX_FULL_TEXTS;
                 limits.coreKey = options.coreKey;
                 limits.proxy = options.proxy;
                 ArrayList<String> engines = new ArrayList<String>();
@@ -260,6 +264,13 @@ public final class ApiWorkflow {
                 });
             } catch (Exception error) { fail(task, error); }
         }, "wordlite-scan"); worker.start();
+    }
+    /** 覆盖率那一行的原文；注记与面板同源，两处不许说法不一。 */
+    private static String coverageLine(DuplicateEngine.Report result) {
+        String line = "检索覆盖 " + result.windowsRetrieved + "/" + result.windowsAvailable + " 窗口";
+        line = line + " · " + result.coveredChars + "/" + result.comparableChars + " 字";
+        if (result.retrievalPartial) line = line + " · 相似率是下限";
+        return line;
     }
     private void applyScan(DuplicateEngine.Report result, TextSelection selection) {
         DocxDocument document = host.document();
@@ -285,6 +296,7 @@ public final class ApiWorkflow {
         LinearLayout box = column(); box.setPadding(dp(16), dp(8), dp(16), dp(8));
         if (scanShowsDuplicates && !result.retrievalIncomplete) {
             box.addView(label(String.format(Locale.CHINA, "总相似度比 %.2f%%", result.overallRate), 20));
+            if (result.windowsPlanned > 0) box.addView(label(coverageLine(result), 12));
             box.addView(label(String.format(Locale.CHINA, "去除引用重复比 %.2f%%  ·  自编率 %.2f%%",
                     result.excludingCitationsRate, result.selfWrittenRate), 13));
             if (!result.byEngine.isEmpty()) {
@@ -294,6 +306,7 @@ public final class ApiWorkflow {
                             .append(String.format(Locale.CHINA, "%.1f%%  ", entry.getValue()));
                 box.addView(label(line.toString().trim(), 12));
             }
+            if (result.retrievalPartial) box.addView(label(result.retrievalPartialReason, 11));
         } else if (result.retrievalIncomplete) {
             // A run that consulted nothing must not read as a clean document: 0.00% here would be
             // the most expensive number in the app to get wrong.

@@ -23,6 +23,9 @@ public final class CheckReport {
                 .append(" &#183; 耗时 ").append(report.elapsedMillis).append(" ms &#183; 相似片段 ")
                 .append(report.hits.size()).append(" 处</p>");
         if (report.retrievalIncomplete) unfinished(out, report); else completed(out, report);
+        /* 未完成也交代问了几个窗口：覆盖率小节在两种头部之后都调。 */
+        coverage(out, report);
+        merges(out, report);
         engines(out, report);
         sourcesLedger(out, report);
         candidates(out, report);
@@ -44,7 +47,8 @@ public final class CheckReport {
         metric(out, "去除引用重复比", report.excludingCitationsRate);
         metric(out, "自编率", report.selfWrittenRate);
         aigcMetric(out, report);
-        out.append("</tbody></table><p>参与比对 ").append(report.comparedChars).append(" 个有效字符，命中相似 ")
+        out.append("</tbody></table><p>参与比对 ").append(report.comparedChars)
+                .append(" 个有效字符（语料侧可比候选 ").append(report.comparableCandidates).append(" 篇），命中相似 ")
                 .append(report.duplicateChars).append(" 个，其中落在引用区间内 ").append(report.citedDuplicateChars).append(" 个。</p>");
     }
     /** A run that consulted nothing gets 未完成查重 as its headline; the AIGC share is local, so it stays. */
@@ -57,19 +61,63 @@ public final class CheckReport {
         aigcMetric(out, report);
         out.append("</tbody></table>");
     }
+    /**
+     * 检索覆盖率：这次到底看了论文的多少。部分覆盖必须把「相似率是下限」写在同一节里，
+     * 否则读者会把 12% 当成上限而不是下限。
+     */
+    private static void coverage(StringBuilder out, DuplicateEngine.Report report) {
+        if (report == null) return;
+        if (report.windowsPlanned <= 0 && report.comparableCandidates <= 0) return;
+        double rate = report.comparableChars <= 0 ? 0 : report.coveredChars * 100d / report.comparableChars;
+        out.append("<h2>检索覆盖率</h2><table><thead><tr><th>项目</th><th>数值</th></tr></thead><tbody>");
+        metricText(out, "已检索窗口数", report.windowsRetrieved + "/" + report.windowsAvailable + " 个窗口组"
+                + "（本次设置允许 " + report.windowsPlanned + " 个）");
+        metricText(out, "已覆盖字数", report.coveredChars + " 字（可检索正文 " + report.comparableChars + " 字）");
+        metricText(out, "覆盖率", percent(rate));
+        metricText(out, "可比候选文献", report.comparableCandidates + " 篇（仅摘要可比 "
+                + report.abstractOnlyCandidates + " 篇，只有题录 " + report.recordOnlyCandidates + " 篇）");
+        metricText(out, "开放获取全文", report.fullTextCandidates + " 篇已抓取；与检索词零共同词被挡掉 "
+                + report.unrankedCandidates + " 篇");
+        out.append("</tbody></table>");
+        if (report.retrievalPartial) {
+            String reason = report.retrievalPartialReason == null ? "" : report.retrievalPartialReason.trim();
+            out.append("<p><strong>").append(escape(reason.isEmpty() ? "本次未检索完全，相似率是下限" : reason))
+                    .append("</strong></p>");
+        }
+    }
+    /** 跨源合并的账目：留下谁、并掉谁、按哪个键并的、凭什么留它。 */
+    private static void merges(StringBuilder out, DuplicateEngine.Report report) {
+        if (report == null || report.merges.isEmpty()) return;
+        out.append("<h2>跨源合并 ").append(report.mergedDuplicates).append(" 篇</h2>")
+                .append("<table><thead><tr><th>合并键</th><th>留下的文献</th><th>被并入的文献</th><th>理由</th></tr></thead><tbody>");
+        for (CandidateRanker.Merged merged : report.merges) {
+            String via = "doi".equals(merged.keyKind) ? "按 DOI " + merged.key : "按标题指纹 " + merged.key;
+            out.append("<tr><td>").append(escape(via)).append("</td><td>").append(escape(describe(merged.kept)))
+                    .append("</td><td>").append(escape(describe(merged.dropped))).append("</td><td>")
+                    .append(escape(merged.reason)).append("</td></tr>");
+        }
+        out.append("</tbody></table>");
+    }
+    private static String describe(PaperSources.Candidate candidate) {
+        if (candidate == null || candidate.source == null) return "空记录";
+        return PaperSources.label(candidate.source.engine) + "《" + candidate.source.title + "》";
+    }
     private static void engines(StringBuilder out, DuplicateEngine.Report report) {
         ArrayList<String> names = new ArrayList<String>();
         for (String name : report.byEngine.keySet()) if (!names.contains(name)) names.add(name);
         for (String name : report.candidateCount.keySet()) if (!names.contains(name)) names.add(name);
         out.append("<h2>按检索源分布</h2>");
         if (names.isEmpty()) { out.append("<p>本次检测没有来源分布。</p>"); return; }
-        out.append("<table><thead><tr><th>检索源</th><th>重复字符占比</th><th>候选文献数</th></tr></thead><tbody>");
+        out.append("<table><thead><tr><th>检索源</th><th>重复字符占比</th><th>候选文献数</th>")
+                .append("<th>提问窗口数</th></tr></thead><tbody>");
         for (String name : names) {
             Double share = report.byEngine.get(name);
             Integer count = report.candidateCount.get(name);
+            Integer asked = report.windowsAsked.get(name);
             out.append("<tr><td>").append(escape(PaperSources.label(name))).append("</td><td>")
                     .append(percent(share == null ? 0 : share.doubleValue())).append("</td><td>")
-                    .append(count == null ? 0 : count.intValue()).append("</td></tr>");
+                    .append(count == null ? 0 : count.intValue()).append("</td><td>")
+                    .append(asked == null ? 0 : asked.intValue()).append("</td></tr>");
         }
         out.append("</tbody></table>");
     }
@@ -177,12 +225,15 @@ public final class CheckReport {
     private static void candidates(StringBuilder out, DuplicateEngine.Report report) {
         out.append("<h2>候选文献 ").append(report.candidates.size()).append(" 篇</h2>");
         if (report.candidates.isEmpty()) { out.append("<p>本次检测没有取回候选文献。</p>"); return; }
-        out.append("<table><thead><tr><th>检索源</th><th>标题</th><th>作者</th><th>年份</th><th>标识符</th></tr></thead><tbody>");
+        out.append("<table><thead><tr><th>检索源</th><th>标题</th><th>作者</th><th>年份</th><th>标识符</th>")
+                .append("<th>可比材料</th></tr></thead><tbody>");
         for (PaperSources.Candidate candidate : report.candidates) {
             TextCorpus.Source source = candidate.source == null ? new TextCorpus.Source() : candidate.source;
+            String material = candidate.comparableMaterial == null ? "" : candidate.comparableMaterial;
             out.append("<tr><td>").append(escape(PaperSources.label(source.engine))).append("</td><td>")
                     .append(escape(source.title)).append("</td><td>").append(escape(source.authors)).append("</td><td>")
-                    .append(escape(source.year)).append("</td><td>").append(escape(source.locator)).append("</td></tr>");
+                    .append(escape(source.year)).append("</td><td>").append(escape(source.locator)).append("</td><td>")
+                    .append(escape(material.isEmpty() ? "未记" : material)).append("</td></tr>");
         }
         out.append("</tbody></table>");
     }

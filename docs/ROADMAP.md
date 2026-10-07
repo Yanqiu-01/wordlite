@@ -39,6 +39,7 @@
 | 0.6.1 | 中文查询短语整形：去标点、去停用词、保留术语块与数字串，同一窗口对不同源给不同长度 | 断言查询串构造 |
 | 0.6.2 | 自建库批量导入：一次选多个 TXT/DOCX，逐文件进度、按正文哈希去重 | `TextCorpusRegression` 断言去重 |
 | 0.6.3 | PDF 抽取进自建库（复用 `PdfFile` 的文字流），扫描版如实报「无文字层」 | `PdfRegression` 加断言 |
+| 0.6.0 对账 | 已交付：`PaperSources.Limits` 新增 `windows/fullTexts` 并真由设置下发（新装机默认窗口 12→6），`perEngine` 只当每页条数；120 次请求与 180 秒挂钟两道闸门撞顶必写注记，每源两次提问之间隔 400ms；新增 `retrievalPartial` 第三态与 HTML「检索覆盖率」小节；入库改由 `CandidateRanker.dedup` + `plan` 按 BM25 名次决定，与检索词零共同词的候选不进语料。仍未解决：中文三库只有摘要可比，正文与图表进不了语料（见 0.6.1/0.6.3），`MAX_SEARCH_MILLIS` 等三个参数还没在真机量过 | 新增 `RetrievalCoverageRegression`，111 条断言 |
 
 ## 0.7.x AIGC 内核（大版本 + 2）
 
