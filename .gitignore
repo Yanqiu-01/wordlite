@@ -7,3 +7,5 @@ checkpoints/
 reports/
 releases/
 tools/debug.keystore
+
+.gradle/
