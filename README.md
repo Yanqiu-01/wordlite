@@ -71,6 +71,8 @@ Android 上的 `.docx` 论文工作台：本地解析与回写 OOXML，按 Word 
 
 | 来源 | 端点 | 取用内容 |
 | --- | --- | --- |
+| 维普 | `www.cqvip.com/search` | 中文期刊与学位论文的摘要、作者、刊名、年期、文献页地址 |
+| 国家哲学社会科学文献中心 | `www.ncpssd.org/searchHandler/search` | 社科期刊题录与摘要 |
 | OpenAlex | `api.openalex.org/works` | 标题、摘要、开放获取全文链接 |
 | Crossref | `api.crossref.org/works` | 题录、摘要、DOI 元数据 |
 | Semantic Scholar | `api.semanticscholar.org/graph/v1` | 题录、摘要、TLDR、OA PDF |
@@ -78,7 +80,9 @@ Android 上的 `.docx` 论文工作台：本地解析与回写 OOXML，按 Word 
 | arXiv | `export.arxiv.org` | 预印本标题与摘要 |
 | CORE | `core.ac.uk` | 聚合开放获取全文（可选配置 API Key） |
 
-开放获取全文按候选题录按需拉取并只做本机比对，命中结果带来源、题名、作者、年份与标识符写进报告。CNKI、万方、维普没有公开检索接口，走`接口设置`里的自定义查重服务（`审阅 → 接口设置`，支持文档上传或选区提交、字段映射、超时重试）；自建库不受此限制，任何来源的文本导进来即可参与比对。
+开放获取全文按候选题录按需拉取并只做本机比对，命中结果带来源、题名、作者、年份与标识符写进报告。知网与万方没有可匿名调用的检索入口（知网检索页跳滑块验证，`brief/grid` 对匿名会话固定返回"暂无数据"；万方检索走 gRPC-web 且带反爬跳转），这两家走`自建库`（任何来源的文本导进来即可参与比对）或`接口设置`里的自定义查重服务（`审阅 → 接口设置`，支持文档上传或选区提交、字段映射、超时重试），机构或代理商的检测 API 也接在这里。
+
+部分移动网络会重置海外源的 TLS 连接：`检索设置 → HTTP 代理`填一个 `host:port` 即可让检索从那里出网（例如 `adb reverse tcp:18899 tcp:7897` 后填 `127.0.0.1:18899`，借电脑上的代理客户端）。代理只隧道 HTTPS；留空即直连，写法不合法也按直连处理，不会把一次查重弄成失败。
 
 ### AIGC 倾向
 
@@ -179,16 +183,16 @@ Robolectric 排版与 UI 回归在 `tests/ui`：
 cd tests/ui && gradle --no-daemon test --console=plain
 ```
 
-`tools/test-host.ps1` 一次跑完 12 个 JVM 套件，920 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 129、`AigcRegression` 逐句倾向 58、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 105、`ApiRegression` 接口配置与加密 30、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
+`tools/test-host.ps1` 一次跑完 12 个 JVM 套件，962 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 129、`AigcRegression` 逐句倾向 58、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 147、`ApiRegression` 接口配置与加密 30、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
 
-联网检索源的解析全部走本地回环服务，避免测试依赖外网；要确认六个源此刻真的能返回题录，跑：
+联网检索源的解析全部走本地回环服务，避免测试依赖外网；要确认八个源此刻真的能返回题录，跑：
 
 ```powershell
 java -cp <classes> com.rikkahub.wordlite.LiveEngineProbe engines"论文关键词"
 java -cp <classes> com.rikkahub.wordlite.LiveEngineProbe scan tests/samples/input-liu.docx
 ```
 
-Robolectric 排版与 UI 回归在 `tests/ui`，覆盖行距、断行、目录分页边界、表格列宽与行高、ribbon 与 PDF 导出、页面缩放与 section 页眉页脚坐标，共 58 例（56 例执行，2 例待真机参考取样），Windows 下全绿。
+Robolectric 排版与 UI 回归在 `tests/ui`，覆盖行距、断行、目录分页边界、表格列宽与行高、ribbon 与 PDF 导出、页面缩放与 section 页眉页脚坐标，共 62 例（60 例执行，2 例待真机参考取样），Windows 下全绿。
 跑这套需要 `build.gradle` 里的 `options.encoding = UTF-8`（已加）：javac 默认按代码页读取，中文断言字符串会全部变成乱码。
 渲染类用例统一 `sdk = 28` + `GraphicsMode.NATIVE`：`robolectric.enabledSdks` 只放行 28，请求别的 sdk 的测试类会被静默略过且不报错；`LEGACY` 图形模式的画布不真正落笔，`getPixel()` 恒为 `00000000`，像素断言在它上面只会假通过。
 
@@ -219,7 +223,7 @@ pwsh tools/word-parity.ps1 -Impl new             # 与 Word 页码表逐段对�
 
 - 上下标行宽与行高改为 Word 语义，修复含 `w:vertAlign` 段落的提前换行与分页漂移。
 - 表格按 `w:tblGrid` 列宽、`w:tcMar` 内边距与 `w:trHeight` 排版，一篇四张表的开题报告从 29 页回到 Word 的 28 页，同页段落从 75.7% 升到 96.6%。
-- 查重内置检索源（OpenAlex / Crossref / Semantic Scholar / Europe PMC / arXiv / CORE）与本机指纹比对，支持自建库。
+- 查重内置检索源（维普 / 国家哲社文献中心 / OpenAlex / Crossref / Semantic Scholar / Europe PMC / arXiv / CORE）、HTTP 代理出网与本机指纹比对，支持自建库。
 - 新增 AIGC 逐句检测与整篇比例、去除引用重复比与自编率。
 - 降重新增离线规则后端，与自定义大模型接口自动回落。
 - 报告补齐来源分布、AIGC 明细与自建库命中。
