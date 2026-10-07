@@ -71,9 +71,9 @@ $committed = & git commit -m $CommitMessage 2>&1
 if ($LASTEXITCODE -ne 0 -and (($committed -join " ") -notmatch "nothing to commit")) { throw ("git commit failed: " + ($committed -join " ")) }
 if (($committed -join " ") -match "nothing to commit") { throw "nothing to commit; this version has no change in it" }
 $sha = (& git rev-parse HEAD).Trim()
-& git tag -f ("v" + $Version) $sha
-if ($LASTEXITCODE -ne 0) { throw "git tag failed" }
-& gh release create ("v" + $Version) $apk $sums --title ("Word Lite " + $Version) --notes-file $notesPath
+# gh creates the tag itself; a stale local tag of the same name makes it refuse.
+& git tag -d ("v" + $Version) 2>&1 | Out-Null
+& gh release create ("v" + $Version) $apk $sums --target $sha --title ("Word Lite " + $Version) --notes-file $notesPath
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed (does v$Version already exist? use gh release upload)" }
 if (-not $NoPush) {
     & git -c ("http.proxy=" + $Proxy) -c ("https.proxy=" + $Proxy) push origin main
