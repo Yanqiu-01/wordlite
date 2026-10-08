@@ -59,6 +59,25 @@ public final class DuplicateEngine {
        摘要里没有被抄的那段正文，判据一句也认不出，报告却照印 0.00%、状态还是"完整检索"。
        这一条把那一档降级成未完成查重：判据与阈值一个字没改，改的是"没得比"不许冒充"没重复"。 */
     static final String GAP_NO_COMPARABLE = "没有任何可比正文，相似度量不到";
+
+    /* 三种"量不到"各有各的下一步（真机实测 Huawei CDY-AN90 / Android 10，2026-10-09）：手机挂在自己
+       那张网上时十个检索源全部拨不上，tools/device-probe.ps1 的 TCP 探针读数是 => 0 of 10 open；电脑上
+       pwsh tools/phone-gateway.ps1 把 Clash 反代到 127.0.0.1:7897 之后，同一份检索代码知网/万方/维普
+       各问回 3 条。"没有任何可比正文"对两种情况都说得通，对第一种却毫无用处——那一步修的是出口。 */
+    static final String GAP_NO_ROUTE = "手机这次没能连上任何检索源";
+    /**
+     * 出口那一档的两条下一步，各救一种：手机自己的网，或者电脑上的那个反代脚本。
+     * 命令与 tools/ 里真在的那个脚本一字不差。
+     */
+    static final String FIX_NO_ROUTE = "下一步：连上 WLAN 或移动数据再查一次；平时走电脑代理的手机插上 USB 线，"
+            + "在电脑上运行 pwsh tools/phone-gateway.ps1 再查一次";
+    /** 手机出得去、源也答了话，却一条条目都没问回来：挡人页、改版后的空响应与真零命中同一个形状。 */
+    static final String GAP_SOURCE_SILENT = "答话的检索源一条条目都没给";
+    /** 答话里带着 403/412 或挡人页——那是被拒绝回答，与"这一式真的零命中"要的两步相反。 */
+    static final String GAP_SOURCE_BLOCKED = "答话的检索源回的是挡人页或拒绝访问（HTTP 403/412）";
+    /* 三个以下主机同时拨不上不敢说"手机没有出口"：一个站挂了是那个站自己的事，三个以上同时拨不上
+       才是这台机器出不去。真机那一轮是 10 个。 */
+    static final int MIN_HOSTS_FOR_NO_ROUTE = 3;
     /* ---- 摘要层（近似）：可比正文 0 篇的那一轮，报告也要能给出一个能核对的数（2.2.x）----
        知网/万方/维普这个公开检索口给的是题名 + 摘要，正文段落与摘要在字符级判据上不是一个层级，
        所以正文级那三个比率在这一轮天然量不到（实测见 artifacts/agent-solver/ABSTRACT-LAYER.md）。
@@ -153,6 +172,14 @@ public final class DuplicateEngine {
         public int recordOnlyCandidates;
         /** 与检索词没有任何共同词（BM25 得分为 0）、因此没让它进语料的候选数。 */
         public int unrankedCandidates;
+
+        /* ---- 检索源连通情况：这一轮顺手记下的账。报告绝不为"手机有没有网"再多发一次请求 ---- */
+        /** 本轮真问到过话的检索源个数（一个源算一个）：那句"10 个检索源里通了 N 个"的分母。 */
+        public int hostsAsked;
+        /** 其中答过话的个数：200/403/412/429 都算对面回了话。 */
+        public int hostsReached;
+        /** 每一次尝试都停在连接层（拨不上、超时、TLS 没谈成）的个数：与"站点拒绝回答"是两回事。 */
+        public int hostsUnreachable;
         /** 跨源合并掉的篇数：同一篇在两个源各出现一次，只占一个比对名额。 */
         public int mergedDuplicates;
         /** 跨源合并的账目，报告里要能说出「为什么留下的是知网那条」。 */
@@ -396,6 +423,12 @@ public final class DuplicateEngine {
             return;
         }
         if (engines.isEmpty()) { gap(report, GAP_NO_SOURCE); return; }
+        /* 形状一（手机没有出口）排在可比正文之前：可比正文 0 篇也是真的，但这一屏真正要回答的是
+           "手机这会儿出不出得去"。拿可比正文的措辞去说没有出口，用户就会去调检索窗口数——那一步没用。 */
+        if (!cancelled(cancellation) && noNetworkExit(report)) {
+            gap(report, noNetworkExitReason(report, engines.size()));
+            return;
+        }
         /* 可比正文这一档排在"有没有取回候选"之前判：取回 36 条而 34 条只有题录、2 条与检索词零共同词，
            等于一篇可比正文都没进来，这一轮不许算"完整检索 + 0.00%"。取消另有一句话，让给它。 */
         if (!report.hasComparableEvidence() && !cancelled(cancellation)) {
@@ -417,9 +450,16 @@ public final class DuplicateEngine {
             return "自建库有 " + report.localDocuments + " 篇材料，但没有一句能用于比对，"
                     + GAP_NO_COMPARABLE + "：导入了原文还是量不到，多半是那些文件读不出正文";
         StringBuilder reason = new StringBuilder();
-        reason.append("联网检索取回 ").append(report.candidates.size()).append(" 条候选，可比正文 0 篇")
+        reason.append("联网检索取回 ").append(report.candidates.size()).append(" 条候选，可比正文 ")
+                .append(report.comparableCandidates).append(" 篇")
                 .append("（只有题录 ").append(report.recordOnlyCandidates).append(" 篇，与检索词零共同词 ")
                 .append(report.unrankedCandidates).append(" 篇）");
+        /* 通了几个源不进这一句：这一句的措辞是 2.2.0 定下来的，"可比正文 0 篇"那几档成因共用它，
+           在这里插一句等于把历史报告的说法刷新掉。那个数排在注记与报告的指标表里说。 */
+        /* 形状二：手机出得去、源也答了话，只是什么都没问回来。它的下一步既不是修出口，也不是放宽
+           全文抓取，而是换一个问法，所以这一句得自己站得住，不能只留"可比正文 0 篇"。 */
+        if (report.candidates.isEmpty() && report.unrankedCandidates == 0 && report.hostsReached > 0)
+            reason.append('，').append(blockedSources(report) > 0 ? GAP_SOURCE_BLOCKED : GAP_SOURCE_SILENT);
         if (report.windowsRetrieved < report.windowsPlanned)
             reason.append("，检索也只跑了 ").append(report.windowsRetrieved)
                     .append("/").append(report.windowsPlanned).append(" 个窗口");
@@ -427,6 +467,78 @@ public final class DuplicateEngine {
                 .append("：把检索设置的窗口数调大、允许开放获取全文抓取，"
                         + "或先把疑似来源的原文导入自建库再查一次");
         return reason.toString();
+    }
+
+    /**
+     * 那句"10 个检索源里通了 3 个"。通了几个是形状一与形状二的分界：全部没建成是手机出不去，
+     * 通了几个却什么都没问回来是站点在挡人。数字出自泳道自己记下的那一笔（Lane.answered /
+     * Lane.deadRoute），报告不为此多发一次请求。
+     */
+    public static String hostTallyLine(Report report) {
+        if (report == null || report.hostsAsked <= 0) return "";
+        StringBuilder out = new StringBuilder();
+        out.append(report.hostsAsked).append(" 个检索源里通了 ").append(report.hostsReached).append(" 个");
+        if (report.hostsReached == 0) out.append("，连接全部没建成");
+        else if (report.hostsUnreachable > 0)
+            out.append("，其余 ").append(report.hostsUnreachable).append(" 个连接没建成");
+        return out.toString();
+    }
+    /** 这一轮是不是"手机没有网络出口"那一档：好几个源同时停在连接层，才敢这么说。 */
+    static boolean noNetworkExit(Report report) {
+        return report != null && report.hostsAsked >= MIN_HOSTS_FOR_NO_ROUTE && report.hostsReached == 0
+                && report.hostsUnreachable >= report.hostsAsked;
+    }
+    /**
+     * 形状一的那一句。第一行是原因，数字跟着原因走：通了几个与拨不上几个是同一件事的两头。
+     * 换行之后才是两条出路：两段都在解释同一片空白，排成一段就没人读第二段。
+     * 老那句"没有任何可比正文"在这一档丢掉——量不到材料是结果，不是这一档的原因。
+     */
+    static String noNetworkExitReason(Report report, int engines) {
+        int asked = report.hostsAsked > 0 ? report.hostsAsked : Math.max(0, engines);
+        return GAP_NO_ROUTE + "：" + asked + " 个检索源里通了 " + report.hostsReached + " 个，"
+                + "对面一个字都没答话，不是它们拒绝回答。\n" + FIX_NO_ROUTE;
+    }
+
+    /**
+     * "全部不可用"那一句。手机没出口那一档另有一句话；留在这一支的轮次必须自己说清通了几个、
+     * 是不是被挡人页挡回来的——不然它与形状一只差一个数，读报告的人看不出来。
+     */
+    static String everyConnectorFailedReason(Report report, int engines) {
+        int asked = report.hostsAsked > 0 ? report.hostsAsked : Math.max(0, engines);
+        StringBuilder reason = new StringBuilder();
+        reason.append(asked).append(" 个检索源本次全部不可用，").append(GAP_NOTHING_RETRIEVED);
+        if (report.hostsReached > 0) {
+            String tally = hostTallyLine(report);
+            if (!tally.isEmpty()) reason.append("：").append(tally);
+            reason.append("，").append(blockedSources(report) > 0 ? GAP_SOURCE_BLOCKED : GAP_SOURCE_SILENT);
+        }
+        return reason.toString();
+    }
+    /** 答过话却在挡人的那几个源：403/412，或留档里已经标成 blocked / js-shell 的那几页。 */
+    static int blockedSources(Report report) {
+        if (report == null) return 0;
+        ArrayList<String> named = new ArrayList<String>();
+        for (PaperSources.ShapeRow row : report.shapes) {
+            if (row == null) continue;
+            boolean blocked = row.status == 403 || row.status == 412
+                    || row.shape != null && (row.shape.contains("blocked") || row.shape.contains("js-shell"));
+            if (blocked && !named.contains(row.engine)) named.add(row.engine);
+        }
+        return named.size();
+    }
+    /**
+     * 一次失败落在哪一头：正数 = 对面答了话（403/412/429/5xx 都是答了话），负数 = 连接本身没建成，
+     * 零 = 说不上（取消、地址无效这一类，两边都不记）。判据认的是 HttpTransport 那句原话的前缀——
+     * 检索侧只往上抛 IOException，状态码只有在这一层还认得回来。
+     */
+    static int reachOf(Throwable error) {
+        if (!(error instanceof ApiClient.Failure)) return 1;   // 能走到解析那一步，响应已经回来了
+        ApiClient.Failure failure = (ApiClient.Failure) error;
+        if (failure.status > 0) return 1;
+        String message = String.valueOf(failure.getMessage());
+        if (message.startsWith("已取消")) return 0;
+        return message.startsWith("网络连接失败") || message.startsWith("安全连接失败")
+                || message.startsWith("请求超时") || message.startsWith("试过的路都没通") ? -1 : 0;
     }
     /** The first named gap wins, so the sharpest reason is the one search() found. */
     private static void gap(Report report, String reason) {
@@ -672,12 +784,16 @@ public final class DuplicateEngine {
         LinkedHashMap<String, Boolean> rawSkipped = new LinkedHashMap<String, Boolean>();
         LinkedHashMap<String, Boolean> rawExhausted = new LinkedHashMap<String, Boolean>();
         LinkedHashMap<String, Boolean> rawSilent = new LinkedHashMap<String, Boolean>();
+        LinkedHashMap<String, Boolean> rawAnswered = new LinkedHashMap<String, Boolean>();
+        LinkedHashMap<String, Boolean> rawDeadRoute = new LinkedHashMap<String, Boolean>();
         boolean requestCap = false, timeCap = false;
         for (int i = 0; i < lanes.size(); i++) {
             Lane lane = lanes.get(i);
             rawSkipped.putAll(lane.skipped);
             rawExhausted.putAll(lane.exhausted);
             rawSilent.putAll(lane.silent);
+            rawAnswered.putAll(lane.answered);
+            rawDeadRoute.putAll(lane.deadRoute);
             failed.putAll(lane.failedLast);
             requestCap = requestCap || lane.quotaCap;
             timeCap = timeCap || lane.timeCap;
@@ -692,6 +808,18 @@ public final class DuplicateEngine {
             int times = 0;
             for (int j = 0; j < lanes.size(); j++) times += lanes.get(j).asksOf(engines.get(i));
             if (times > 0) report.windowsAsked.put(engines.get(i), Integer.valueOf(times));
+        }
+
+        /* 连通情况在这儿并账：泳道逐次分过"答了话"与"连接没建成"，这里只数现成的账。
+           一个源答过一次就算通了——它证明手机这一段走得出去，剩下的是站点自己的事。 */
+        LinkedHashMap<String, Boolean> answered = orderedFlags(engines, rawAnswered);
+        LinkedHashMap<String, Boolean> deadRoute = orderedFlags(engines, rawDeadRoute);
+        for (int i = 0; i < engines.size(); i++) {
+            String engine = engines.get(i);
+            if (count(report.windowsAsked, engine) <= 0) continue;
+            report.hostsAsked++;
+            if (Boolean.TRUE.equals(answered.get(engine))) report.hostsReached++;
+            else if (Boolean.TRUE.equals(deadRoute.get(engine))) report.hostsUnreachable++;
         }
         if (cancelled(cancellation)) note(report, "检索已取消，结果只覆盖已完成的窗口");
         report.windowsRetrieved = sweep.windowsRetrieved();
@@ -862,6 +990,10 @@ public final class DuplicateEngine {
         final LinkedHashMap<String, Boolean> exhausted = new LinkedHashMap<String, Boolean>();
         final LinkedHashMap<String, Boolean> silent = new LinkedHashMap<String, Boolean>();
         final LinkedHashMap<String, Boolean> failedLast = new LinkedHashMap<String, Boolean>();
+        /** 这个源至少答过一次话（200/403/412/429 都算）：连通那本账的正账。 */
+        final LinkedHashMap<String, Boolean> answered = new LinkedHashMap<String, Boolean>();
+        /** 这个源至少有一次停在连接层：整轮都没答过话的源才会被算成"没通"。 */
+        final LinkedHashMap<String, Boolean> deadRoute = new LinkedHashMap<String, Boolean>();
         final ArrayList<String> notes = new ArrayList<String>();
         boolean quotaCap, timeCap;
         private final Sweep sweep;
@@ -910,6 +1042,7 @@ public final class DuplicateEngine {
                             ArrayList<PaperSources.Candidate> found =
                                     PaperSources.search(engine, phrase, sweep.limits, sweep.cancellation);
                             failedLast.remove(engine);
+                            answered.put(engine, Boolean.TRUE);
                             poolFull = poolFull | sweep.collect(engine, found, gained);
                         } catch (IllegalArgumentException error) {
                             sweep.shapes.miss(engine, phrase, message(error), shapesBefore);
@@ -922,6 +1055,10 @@ public final class DuplicateEngine {
                             /* 429 与"这个源挂了"不是一回事：匿名共享配额是暂时的，一次失败就整轮放弃太狠。
                                判据用注记前缀而不是状态码，因为 PaperSources.search() 只往上抛 IOException。 */
                             failedLast.put(engine, Boolean.TRUE);
+                            /* 连通情况按这一次的下场记：403/412 是答了话，拨不上与超时是路没通。 */
+                            int reach = reachOf(error);
+                            if (reach > 0) answered.put(engine, Boolean.TRUE);
+                            else if (reach < 0) deadRoute.put(engine, Boolean.TRUE);
                             boolean throttled = message(error).startsWith(THROTTLED_PREFIX)
                                     && count(retries, engine) < MAX_THROTTLE_RETRIES;
                             if (throttled) {
@@ -1120,6 +1257,12 @@ public final class DuplicateEngine {
             note(report, exhausted.size() + " 个检索源已取尽（连续两个窗口没有新增文献），后续窗口未再提问");
         /* 口径：按"最后一次尝试失败的源"计，不按失败次数累加——限流补试会让同一个源失败两次。 */
         if (!failedLast.isEmpty()) note(report, failedLast.size() + " 个检索源本次不可用");
+        /* 通了几个源就排在"几个源不可用"后面：这两个数并排才分得清"手机出不去"与"站点在挡人"。 */
+        /* 这两个数并排才分得清"手机出不去"与"站点在挡人"，所以只在可比正文一篇都没有的那两轮说；
+           出口那一档也不说：它的原因行里已经带着这个数，同一屏说两遍等于谁都没说。 */
+        String tally = hostTallyLine(report);
+        if (!tally.isEmpty() && report.comparableCandidates == 0 && !noNetworkExit(report))
+            note(report, tally);
         if (poolDropped > 0)
             note(report, "候选池上限 " + poolCap + " 条已用满，后续窗口新取回的 " + poolDropped + " 条未参与排序");
         if (report.unrankedCandidates > 0)
@@ -1192,8 +1335,12 @@ public final class DuplicateEngine {
     /** Every wanted connector threw and nothing usable came back: the web half of the run never happened. */
     private static void everyConnectorFailed(Report report, ArrayList<String> engines,
                                              LinkedHashMap<String, Boolean> skipped) {
-        if (report.candidates.isEmpty() && !engines.isEmpty() && skipped.size() >= engines.size())
-            gap(report, engines.size() + " 个检索源本次全部不可用，" + GAP_NOTHING_RETRIEVED);
+        if (!report.candidates.isEmpty() || engines.isEmpty() || skipped.size() < engines.size())
+            return;
+        /* "全部不可用"有两种成因，下一步正好相反：连接根本没建成要修出口，答了话却被挡要换材料。
+           "候选为空 + 每个想要的源都被跳过"，只在真的一个源都没回来时才发这个因。 */
+        gap(report, noNetworkExit(report) ? noNetworkExitReason(report, engines.size())
+                : everyConnectorFailedReason(report, engines.size()));
     }
     /**
      * 三个段落一组，最多 MAX_WINDOWS 组。封面行、目录行、图表注这类行拿去检索只会命中"毕业论文 专业

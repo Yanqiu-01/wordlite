@@ -356,8 +356,12 @@ public final class ApiWorkflow {
                把两件事混成一句，用户就会去开关飞行模式，而那正是没用的一步。 */
             String phoneNetwork = NetworkStatus.line(activity);
             if (!phoneNetwork.isEmpty()) box.addView(label(phoneNetwork, 13));
-            box.addView(label(result.retrievalReason == null
-                    ? "检索没有取回可比对的文献，相似度类指标无法成立" : result.retrievalReason, 13));
+            String blockage = result.retrievalReason == null
+                    ? "检索没有取回可比对的文献，相似度类指标无法成立" : result.retrievalReason;
+            TextView blockageLine = label(blockage, 13);
+            /* 卡在出口那一档，这一屏只有这一句救得回来：加粗，别被下面那几行说明挤下去。 */
+            if (DuplicateEngine.noNetworkExit(result)) blockageLine.setTypeface(Typeface.DEFAULT_BOLD);
+            box.addView(blockageLine);
             box.addView(label("相似度类指标不成立，只有 AIGC 倾向是本机计算的结果。", 11));
             // 这一屏更要说清比了什么：库里有几篇、各是什么档，直接决定"未完成"这三个字该怎么读。
             String inventory = DuplicateEngine.inventoryLine(result);

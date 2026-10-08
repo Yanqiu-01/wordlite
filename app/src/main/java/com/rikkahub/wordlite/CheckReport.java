@@ -65,9 +65,15 @@ public final class CheckReport {
     /** A run that consulted nothing gets 未完成查重 as its headline; the AIGC share is local, so it stays. */
     private static void unfinished(StringBuilder out, DuplicateEngine.Report report) {
         String reason = report.retrievalReason == null ? "" : report.retrievalReason.trim();
-        out.append("<h2>未完成查重</h2><p><strong>")
-                .append(escape(reason.isEmpty() ? "本次没有可比对的文献来源" : reason)).append("</strong></p>")
-                .append("<p>本次没有可比对的文献材料，相似度类指标无法成立；只有 AIGC 倾向是本机计算的结果。</p>");
+        /* 原因与下一步在手机上是两行（ApiWorkflow 贴的是同一个串），报告里也得是两段：
+           挤成一段，第二段就没人在看了。 */
+        out.append("<h2>未完成查重</h2>");
+        for (String part : (reason.isEmpty() ? "本次没有可比对的文献来源" : reason).split("\n")) {
+            String piece = part.trim();
+            if (piece.isEmpty()) continue;
+            out.append("<p><strong>").append(escape(piece)).append("</strong></p>");
+        }
+        out.append("<p>本次没有可比对的文献材料，相似度类指标无法成立；只有 AIGC 倾向是本机计算的结果。</p>");
         // 这一张表里一个比率都没有（未完成查重不成立任何比率），列名当然也不能叫"比例"。
         out.append("<h2>指标</h2><table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>");
         aigcMetric(out, report);
@@ -95,6 +101,12 @@ public final class CheckReport {
                 + report.abstractOnlyCandidates + " 篇，只有题录 " + report.recordOnlyCandidates + " 篇）");
         metricText(out, "开放获取全文", report.fullTextCandidates + " 篇已抓取；与检索词零共同词被挡掉 "
                 + report.unrankedCandidates + " 篇");
+        /* 通了几个检索源单独占一行，只在"路是通的、可比正文一篇都没有"那一轮印：那一屏要分清的正是
+           "站点只回了题录摘要"与"手机根本没有一条路走到检索站"，两者的下一步相反。出口那一档的原因行
+           里已经带着这个数，跑通的那一轮多这一行没有新信息，报告必须与今天一字不差。 */
+        String tally = DuplicateEngine.hostTallyLine(report);
+        if (!tally.isEmpty() && report.retrievalIncomplete && !DuplicateEngine.noNetworkExit(report))
+            metricText(out, "检索源连通", tally);
         out.append("</tbody></table>");
         if (report.retrievalPartial) {
             String reason = report.retrievalPartialReason == null ? "" : report.retrievalPartialReason.trim();
