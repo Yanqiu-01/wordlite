@@ -87,6 +87,37 @@ public final class PaperSources {
     private static final String[] EMPTY_MARKERS = { "检索结果为空", "没有找到相关", "暂无相关", "records:[]",
             "\"records\":[]", "\"total\":0", "total\":0", "hitCount\":0", "noresults" };
 
+    /* 下面四个数是 2026-10-09 对着真页面量的：opticsjournal.net 对三个不同文章链接回同一份
+       15,999 字节的人机挑战页，把 script 里的代码当字读能"抽出"5,850 字，扔掉代码只剩 402 个可读字
+       （占页面字符数的 2.5%）。宁可回"这篇没正文"，也不许拿壳页冒充正文进比对基线。 */
+    /** 只挡"一句话壳页"：比包内最短的一份真全文夹具（38 字）还短，不可能是正文。 */
+    static final int MIN_BODY_CHARS = 20;
+    /** 带防爬标记的响应只在这个数以下才算壳页；再长就当正文，免得误杀真讲"人机验证"的论文。 */
+    static final int BLOCKED_BODY_CHARS = 2000;
+    /** 页面本身够大才谈得上"内容与字节对不上"这条判据。 */
+    static final int SHELL_BODY_CHARS = 4000;
+    /** 一大页字节只解出这么点可读字 → 壳页（没有标记的那一类，比如纯 JS 跳转页）。 */
+    static final int SHELL_READABLE_CHARS = 1000;
+    /** 防爬/人机验证壳页的标记。shapeOf 里那一份只在"一个字都没解出来"时才看，这里两份都要看。 */
+    private static final String[] CHALLENGE_MARKERS = { "CF_APP_WAF", "cf-chl", "cf-browser-verification",
+            "just a moment", "verify you are human", "challenge-platform", "人机验证", "安全验证",
+            "滑动验证", "访问受限", "access denied", "precondition failed", "captcha" };
+
+    /**
+     * 这一页是来给内容的还是来挡人的。标记和可读字数一起看：只看标记会把"正文里恰好有人机验证"
+     * 这类论文误杀，只看字数会把 5,850 字的防爬页当正文放进来。两个数各挡一半，实测刚好错开。
+     * 回 null 是"当正文读"，否则回留在 shape 里的那两个字。
+     */
+    static String challengeOf(String body, int readableChars) {
+        if (readableChars >= BLOCKED_BODY_CHARS) return null;
+        String lower = body == null ? "" : body.toLowerCase(Locale.ROOT);
+        for (String marker : CHALLENGE_MARKERS)
+            if (lower.contains(marker.toLowerCase(Locale.ROOT))) return "blocked";
+        if (readableChars < MIN_BODY_CHARS) return "thin";
+        int bodyChars = body == null ? 0 : body.length();
+        return bodyChars >= SHELL_BODY_CHARS && readableChars <= SHELL_READABLE_CHARS ? "thin" : null;
+    }
+
     /** 文本响应的形状。它回答的是"这一页是来给内容的、来挡人的、还是明说没有"。 */
     static String shapeOf(String body, int entries, long declaredTotal) {
         String text = body == null ? "" : body;
@@ -590,10 +621,18 @@ public final class PaperSources {
                 recordText(limits, engine, url, response, 0, "binary-body", "响应是二进制，没当正文读");
                 return "";
             }
-            String text = body.indexOf('<') >= 0 ? Xml.stripTags(body) : collapse(body);
-            String shape = shapeOf(body, text.trim().isEmpty() ? 0 : 1, -1L);
-            recordText(limits, engine, url, response, text.length(),
-                    text.trim().isEmpty() ? "text-empty" : ("text-" + shape), text.length() + " chars");
+            /* 正文只取给人读的那部分：脚本与样式里的代码不是字，留着会把比对基线泡成乱码。 */
+            String text = body.indexOf('<') >= 0 ? Xml.readable(body) : collapse(body);
+            int chars = text.trim().length();
+            String blocked = challengeOf(body, chars);
+            if (blocked != null) {
+                recordText(limits, engine, url, response, 0, "text-" + blocked,
+                        chars + " chars / " + blocked);
+                return "";
+            }
+            String shape = shapeOf(body, chars == 0 ? 0 : 1, -1L);
+            recordText(limits, engine, url, response, chars,
+                    chars == 0 ? "text-empty" : ("text-" + shape), chars + " chars");
             return text.length() > MAX_TEXT ? text.substring(0, MAX_TEXT) : text;
         } catch (IOException error) {
             recordFetchFailure(limits, engine, url, error);
@@ -1597,6 +1636,51 @@ public final class PaperSources {
                 return unescape(tagText.substring(at2, close));
             }
             return "";
+        }
+        /**
+         * HTML/XML 里给人读的那部分：<script>、<style>、<noscript>、<template>、<svg>、<iframe>
+         * 连内容一起整块扔掉再拆标签。stripTags 只拆标签不扔内容，防爬页里的 JS 会被当成论文正文。
+         * 标签没闭合就从那儿截断——后面的字节已经没法保证还是给人读的了。
+         */
+        static String readable(String html) {
+            String value = html == null ? "" : html;
+            String[] codeTags = { "script", "style", "noscript", "template", "svg", "iframe" };
+            for (String tag : codeTags) {
+                StringBuilder out = new StringBuilder(value.length());
+                int at = 0;
+                while (at < value.length()) {
+                    int open = indexOfTag(value, at, tag, false);
+                    if (open < 0) { out.append(value, at, value.length()); break; }
+                    int head = value.indexOf('>', open);
+                    if (head < 0) break;
+                    int close = indexOfTag(value, head + 1, tag, true);
+                    if (close < 0) break;
+                    out.append(value, at, open).append(' ');
+                    int end = value.indexOf('>', close);
+                    at = end < 0 ? value.length() : end + 1;
+                }
+                value = out.toString();
+            }
+            return stripTags(value);
+        }
+        /** 找 <tag 或 </tag：名字必须整个对上，<styled-content 不算 <style。 */
+        private static int indexOfTag(String value, int from, String name, boolean closing) {
+            int at = Math.max(0, from);
+            while (at < value.length()) {
+                int found = value.indexOf('<', at);
+                if (found < 0) return -1;
+                int p = found + 1;
+                boolean slash = p < value.length() && value.charAt(p) == '/';
+                if (slash) p++;
+                if (closing != slash) { at = found + 1; continue; }
+                if (!value.regionMatches(true, p, name, 0, name.length())) { at = found + 1; continue; }
+                int boundary = p + name.length();
+                if (boundary >= value.length()) return found;
+                char next = value.charAt(boundary);
+                if (next == '>' || next == '/' || Character.isWhitespace(next)) return found;
+                at = found + 1;
+            }
+            return -1;
         }
         static String stripTags(String value) {
             if (value == null) return "";

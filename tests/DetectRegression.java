@@ -164,6 +164,11 @@ public final class DetectRegression {
             } catch (Exception ignored) { }
             exchange.close();
         });
+        /* HTML 正文的四种形状：防爬壳页、壳页没脚本、真论文页、正文里恰好带验证字样的论文页。 */
+        server.createContext("/shell/waf", exchange -> { record("/shell/waf", queryOf(exchange)); respond(exchange, 200, wafPage()); });
+        server.createContext("/shell/hollow", exchange -> { record("/shell/hollow", queryOf(exchange)); respond(exchange, 200, hollowPage()); });
+        server.createContext("/shell/article", exchange -> { record("/shell/article", queryOf(exchange)); respond(exchange, 200, articlePage()); });
+        server.createContext("/shell/security", exchange -> { record("/shell/security", queryOf(exchange)); respond(exchange, 200, securityPage()); });
         server.createContext("/oa-big", exchange -> {
             record("/oa-big", queryOf(exchange));
             byte[] big = new byte[3000];
@@ -280,6 +285,7 @@ public final class DetectRegression {
             reports();
             unfinishedReport();
             cidTableBody(base);
+            htmlBody(base);
         } finally {
             server.stop(0);
             PaperSources.resetEndpoints();
@@ -289,6 +295,89 @@ public final class DetectRegression {
         rewriteEffect();
         System.out.println("SUMMARY " + checks + " assertions passed; loopback-only network");
     }
+    /** 实测的防爬壳页（opticsjournal.net，2026-10-09）：HTTP 200、15,999 字节，给人读的字只剩一行 TraceID。 */
+    private static String repeat(String unit, int times) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < times; i++) out.append(unit);
+        return out.toString();
+    }
+    private static String wafPage() {
+        StringBuilder js = new StringBuilder();
+        while (js.length() < 12000) js.append("var requestInfo={\"token\":\"18deab0f6e5f25a1e74073609ca429c7\",\"type\":\"GET\"};");
+        return "<html><head><script>appkey:\"CF_APP_WAF\"," + js + "</script></head>"
+                + "<body><div>TraceID: 781bad4817914855087858834ecb6c</div></body></html>";
+    }
+    /** 真论文页：正文两千字以上，页面里照样挂着统计脚本和样式，那些不该进比对基线。 */
+    private static String articlePage() {
+        StringBuilder prose = new StringBuilder();
+        while (prose.length() < 2400) prose.append("瞬态液相连接层的等温凝固过程决定互连接头的服役温度上限。");
+        StringBuilder js = new StringBuilder();
+        while (js.length() < 6000) js.append("ga('send','pageview');SCRIPTONLY");
+        return "<!DOCTYPE html><html><head><style>.doi{color:red}STYLEONLY</style><script>" + js
+                + "</script></head><body><h1>多孔铜与瞬态液相连接</h1><p>" + prose
+                + "</p><p>结论：连接层在 250 摄氏度时效一千小时后剪切强度保持率百分之八十六。</p></body></html>";
+    }
+    /** 正文里就带"人机验证""安全验证"字样的论文（讲认证的方案）：不许被防爬标记误杀。 */
+    private static String securityPage() {
+        return articlePage().replace("<h1>多孔铜", "<h1>移动端人机验证与安全验证方案：多孔铜");
+    }
+    /** 没有防爬标记的空壳页：一大页 JS，给人读的字不到两百个——按"内容与字节对不上"这条判。 */
+    private static String hollowPage() {
+        StringBuilder js = new StringBuilder();
+        while (js.length() < 9000) js.append("window.__data=(function(a){return decode(a)})([1,2,3,4,5]);");
+        StringBuilder nav = new StringBuilder();
+        while (nav.length() < 180) nav.append("<span>首页 期刊 在线投稿 作者指南 联系我们</span>");
+        return "<html><head><script>" + js + "</script></head><body><div>请开启 JavaScript 后重试。</div>"
+                + nav + "</body></html>";
+    }
+    private static String bodyOf(String base, String path, PaperSources.Limits limits) {
+        PaperSources.Candidate candidate = new PaperSources.Candidate();
+        candidate.source.engine = "openalex";
+        candidate.fullTextUrl = base + path;
+        try { return PaperSources.fullText(candidate, limits, null); }
+        catch (IOException error) { return "IOException: " + error.getMessage(); }
+    }
+    /** HTML 正文的形状：防爬壳页不许冒充正文，页面里的脚本样式也不许混进比对基线。 */
+    private static void htmlBody(String base) {
+        String stripped = PaperSources.Xml.readable("<p>正文在这里</p><styled-content>留着</styled-content>"
+                + "<script>SCRIPTONLY var a=1;</script><style>STYLEONLY</style>");
+        check(stripped.contains("正文在这里") && stripped.contains("留着")
+                        && !stripped.contains("SCRIPTONLY") && !stripped.contains("STYLEONLY"),
+                "HTML 正文只留给人读的字：script/style 连内容一起扔，<styled-content> 不会被当成 <style>");
+        check(PaperSources.MIN_BODY_CHARS == 20 && PaperSources.BLOCKED_BODY_CHARS == 2000
+                        && PaperSources.SHELL_BODY_CHARS == 4000 && PaperSources.SHELL_READABLE_CHARS == 1000
+                        && PaperSources.challengeOf("<p>人机验证</p>", 2000) == null
+                        && "blocked".equals(PaperSources.challengeOf("<p>人机验证</p>", 1999))
+                        && "thin".equals(PaperSources.challengeOf("<html>" + repeat("x", 5000) + "</html>", 39))
+                        && "thin".equals(PaperSources.challengeOf("<html>" + repeat("x", 5000) + "</html>", 1000))
+                        && PaperSources.challengeOf("<html>" + repeat("x", 5000) + "</html>", 1001) == null
+                        && "thin".equals(PaperSources.challengeOf("<html>请开启</html>", 19))
+                        && PaperSources.challengeOf("<html>请开启 JavaScript 后重试</html>", 20) == null,
+                "阈值的真值：可读字 20 下限、大页面只解出 ≤ 1000 字算空壳、带防爬标记的到 2000 为止");
+
+        final ArrayList<PaperSources.ShapeRow> rows = new ArrayList<PaperSources.ShapeRow>();
+        PaperSources.Limits limits = limits();
+        limits.shapes = rows::add;
+        String waf = bodyOf(base, "/shell/waf", limits);
+        check(waf.isEmpty() && rows.size() == 1 && rows.get(0).shape.equals("text-blocked")
+                        && rows.get(0).status == 200 && rows.get(0).entries == 0,
+                "防爬挑战页不再冒充正文：HTTP 200 也判成 text-blocked（实测同一份壳页挂在三个不同文章链接上）");
+        String hollow = bodyOf(base, "/shell/hollow", limits);
+        check(hollow.isEmpty() && rows.size() == 2 && rows.get(1).shape.equals("text-thin")
+                        && rows.get(1).bodyBytes > 8000,
+                "没标记的空壳页也拦住：一大页 JS 只解出不到两百个可读字，判 text-thin");
+        String article = bodyOf(base, "/shell/article", limits);
+        check(article.contains("剪切强度保持率百分之八十六") && !article.contains("SCRIPTONLY")
+                        && !article.contains("STYLEONLY") && rows.get(2).shape.equals("text-entries")
+                        && rows.get(2).excerpt.endsWith("chars"),
+                "真论文页照常收进正文，字数量的是拆掉脚本之后的数：" + rows.get(2).excerpt);
+        String security = bodyOf(base, "/shell/security", limits);
+        check(security.contains("人机验证") && rows.get(3).shape.equals("text-entries"),
+                "正文里带人机验证字样的论文不被防爬标记误杀");
+        check(hits("/shell/waf") == 1 && hits("/shell/article") == 1 && hits("/shell/hollow") == 1,
+                "这四份全文各只发一次请求");
+    }
+
     private static void readQuietly(HttpExchange exchange) {
         try { InputStream input = exchange.getRequestBody(); while (input.read() >= 0) { } }
         catch (IOException ignored) { }
