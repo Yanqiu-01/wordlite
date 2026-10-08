@@ -356,6 +356,7 @@ public final class PaperSources {
         }
         recordShape(safe, name, phrase, response, found.size(), declared,
                 shapeOf(response.body, found.size(), declared), "", false);
+        if (name.equals("europepmc")) recordNoAccessEvidence(safe, name, phrase, response, found);
         return found;
     }
 
@@ -658,12 +659,18 @@ public final class PaperSources {
             got = HttpTransport.getPdf(url, headers, seconds(limits), HttpTransport.MAX_PDF_BODY, cancellation,
                     proxyFor(limits), plainHttpAllowed(url));
         } catch (IOException error) {
-            out.shape = "fetch-failed";
+            /* PDF 这一路以前把所有答复都压成 fetch-failed：实测 sioc-journal.cn 那个下载口回的是
+               301（跳到 https 的同一条地址，跟过去是 500 / 3,134 B 的 HTML 错误页），账上却和
+               "网断了"长一个样。状态能说明的地方就用状态。 */
+            out.shape = fetchFailureShape(error instanceof ApiClient.Failure
+                    ? ((ApiClient.Failure) error).status : -1);
             out.error = clipLine(error.getMessage(), 60);
             out.millis = System.currentTimeMillis() - began;
             return out;
         } catch (RuntimeException error) {
-            out.shape = "fetch-failed";
+            /* 这一路接不住 ApiClient.Failure（它是 IOException），状态只可能藏在 cause 里。 */
+            out.shape = fetchFailureShape(error.getCause() instanceof ApiClient.Failure
+                    ? ((ApiClient.Failure) error.getCause()).status : -1);
             out.error = clipLine(error.getMessage(), 60);
             out.millis = System.currentTimeMillis() - began;
             return out;
@@ -739,14 +746,33 @@ public final class PaperSources {
         if (host.isEmpty() || !url.trim().toLowerCase(Locale.ROOT).startsWith("http://")) return false;
         return hostedBy(host, OA_PDF_HOSTS);
     }
-    /** 这条全文链接值不值得先花额度：0 白名单站点、1 其它 HTTPS 直链、2 其它 http、3 doi.org 跳转壳。 */
+    /**
+     * 这条全文链接值不值得先花额度：0 白名单站点、1 其它 HTTPS 直链、2 其它 http 直链、
+     * 3 doi.org 跳转壳、4 路径自己明写是 XML/HTML 的"全文"端点、9 没链接。
+     * <p>4 这一档是 2026-10-09 量出来的，不是猜的：<code>https://pdf.hanspub.org/....pdf</code> 带回
+     * 12,853 字，而 Europe PMC 的 <code>.../PMC<id>/fullTextXML</code> 六次全 404（143 B JSON 报错），
+     * 以前这两条同为 1，只能靠 BM25 分胜负——fullTexts=6 的额度就是被六个这样的平手决定的。
+     * 路径都说了自己是 XML 的，就不是 PDF 的同级，别拿它抢额度（CandidateRanker.fetchWeight 对 >=3 给 0）。
+     */
     static int pdfUrlRank(String url) {
         String value = url == null ? "" : url.trim();
         if (value.isEmpty()) return 9;
         String host = hostOf(value);
         if (host.endsWith("doi.org") || host.endsWith("dx.doi.org")) return 3;
         if (hostedBy(host, OA_PDF_HOSTS)) return 0;
+        if (!pdfLink(value) && markupPath(value)) return 4;
         return value.toLowerCase(Locale.ROOT).startsWith("https://") ? 1 : 2;
+    }
+
+    /** 路径末段（查询串不算）明写 xml/html 的链接：Europe PMC 的 fullTextXML、期刊的 article.html 都在内。 */
+    static boolean markupPath(String url) {
+        String value = url == null ? "" : url.trim().toLowerCase(Locale.ROOT);
+        int cut = value.indexOf('?');
+        if (cut >= 0) value = value.substring(0, cut);
+        int slash = value.lastIndexOf('/');
+        String last = slash < 0 ? value : value.substring(slash + 1);
+        return last.endsWith(".xml") || last.endsWith(".html") || last.endsWith(".htm")
+                || last.endsWith("fulltextxml") || last.endsWith("fulltexthtml");
     }
     private static boolean hostedBy(String host, String[] suffixes) {
         for (String suffix : suffixes)
@@ -843,9 +869,52 @@ public final class PaperSources {
         ShapeRow row = new ShapeRow();
         row.engine = engine == null ? "" : engine;
         row.probe = clipProbe(linkLabel(url));
-        row.shape = "fetch-failed";
+        ApiClient.Failure refusal = error instanceof ApiClient.Failure ? (ApiClient.Failure) error : null;
+        row.shape = fetchFailureShape(refusal == null ? -1 : refusal.status);
         row.failed = true;
         row.error = clipLine(error == null ? "" : error.getMessage(), 60);
+        try { sink.record(row); } catch (RuntimeException ignored) { }
+    }
+
+    /**
+     * 抓取失败要带上源答了什么："这条链接是编的"(404)、"要权限或要 cookie"(403)、"要跳转才给"(301/302)、
+     * "这会儿不行"(5xx)、"拨不上"(没有状态)。这五种以前都叫 fetch-failed，所以拿 pmcid 拼出来的假 404
+     * 和一篇真挂着但要 cookie 的论文在账上长一个样，用户下一步该做什么也就分不出来。
+     */
+    static String fetchFailureShape(int status) {
+        if (status == 404 || status == 410) return "link-not-found";
+        if (status == 401 || status == 403) return "needs-entitlement";
+        if (status == 402) return "paywalled";
+        if (status == 429) return "throttled";
+        if (status >= 300 && status < 400) return "redirect-not-followed";
+        if (status >= 500) return "source-unavailable";
+        return "fetch-failed";
+    }
+
+    /**
+     * 源自己没说这篇有正文，就不去抓，但"为什么这条候选没去抓"要在同一本响应账里留下字：一次检索一行，
+     * 写清几条候选是被证据挡下的。少了这一行，账上只剩"没抓"这个动作，分不清是不值得抓还是忘了抓。
+     */
+    private static void recordNoAccessEvidence(Limits limits, String engine, String phrase,
+                                               ApiClient.Response response, ArrayList<Candidate> found) {
+        ShapeSink sink = limits == null ? null : limits.shapes;
+        if (sink == null || found == null) return;
+        int missing = 0;
+        for (int i = 0; i < found.size(); i++) {
+            Candidate candidate = found.get(i);
+            if (candidate != null && (candidate.fullTextUrl == null || candidate.fullTextUrl.trim().isEmpty()))
+                missing++;
+        }
+        if (missing == 0) return;
+        ShapeRow row = new ShapeRow();
+        row.engine = engine == null ? "" : engine;
+        row.probe = clipProbe(phrase);
+        row.status = response == null ? -1 : response.status;
+        row.bodyBytes = response == null || response.raw == null ? -1 : response.raw.length;
+        row.entries = missing;
+        row.shape = "no-open-access-evidence";
+        row.error = clipLine(missing + " 条候选既没有 isOpenAccess=Y，也没有 documentStyle=pdf/xml 的全文链接，"
+                + "不编造 URL，不占全文额度", SHAPE_EXCERPT_CHARS);
         try { sink.record(row); } catch (RuntimeException ignored) { }
     }
     private static boolean binary(String body) {
@@ -1273,34 +1342,31 @@ public final class PaperSources {
 
     private static ArrayList<Candidate> parseEuropePmc(Object root, int limit) {
         ArrayList<Candidate> out = new ArrayList<Candidate>();
-        String base = restBase();
         for (Object item : listAt(root, "resultList.result")) {
             Candidate candidate = new Candidate();
             candidate.source.engine = "europepmc";
-            String source = text(item, "source"), pmid = text(item, "pmid"), pmcid = text(item, "pmcid"), doi = text(item, "doi");
+            String pmid = text(item, "pmid"), pmcid = text(item, "pmcid"), doi = text(item, "doi");
             candidate.source.id = first(pmid, text(item, "id"));
             candidate.source.title = text(item, "title");
             candidate.source.authors = joinedName(item, "authorList.author", "firstName", "lastName");
             candidate.source.year = year(text(item, "pubYear", "bookOrReportDetails.pubYear"));
             candidate.source.locator = first(first(doi, pmid.isEmpty() ? "" : "PMID:" + pmid), pmcid);
             candidate.abstractText = clip(Xml.stripTags(text(item, "abstractText")));
+            /* 全文链接只认响应自己给的证据，不替源编一条。以前这里拿 pmcid 拼 <base>/<source>/<pmcid>/fullTextXML，
+               MED 行就成了 .../rest/MED/PMC13522914/fullTextXML，而 Europe PMC 没有这条路由：2026-10-09 经
+               127.0.0.1:7897 实测两种拼法共六次，全 404 / 143 B 的 JSON 报错，其中一条既是 isOpenAccess=Y
+               又是 inEPMC=Y 也照样 404。六个全文额度里有五个烧在这种假链接上，抓回来的 JSON 报错在账上
+               又只长成"抓到空正文"，于是 0.13% 那种数能被当成比过。现在要的是源自己写的两样东西：
+               isOpenAccess=Y 当门，fullTextUrlList 里 documentStyle=pdf（其次 xml）的那条当链接。
+               只有 documentStyle=html 的不算数——实测那两条一条要追 301（传输层不追跳转）、一条 403/5,485 B。 */
             boolean open = text(item, "isOpenAccess").equalsIgnoreCase("Y");
-            String fullText = pmcid.isEmpty() ? "" : base + "/" + (source.isEmpty() ? "PMC" : source) + "/" + pmcid + "/fullTextXML";
-            if (fullText.isEmpty())
-                fullText = first(urlFrom(item, "fullTextUrlList.fullTextUrl", "availability", "fulltexthtml", "url"),
-                        urlFrom(item, "fullTextUrlList.fullTextUrl", "documentStyle", "xml", "url"));
-            candidate.fullTextUrl = open || !fullText.isEmpty() ? first(fullText, url(item, "fullTextUrlList.fullTextUrl.0.url")) : "";
+            String pdfStyle = urlFrom(item, "fullTextUrlList.fullTextUrl", "documentStyle", "pdf", "url");
+            String xmlStyle = urlFrom(item, "fullTextUrlList.fullTextUrl", "documentStyle", "xml", "url");
+            candidate.fullTextUrl = open ? first(pdfStyle, xmlStyle) : "";
             add(out, candidate, limit);
         }
         return out;
     }
-    /** Full text xml lives beside the configured search endpoint, so fixtures stay on loopback. */
-    private static String restBase() {
-        String value = endpoint("europepmc");
-        int cut = value.indexOf("/search");
-        return cut > 0 ? value.substring(0, cut) : value;
-    }
-
     private static ArrayList<Candidate> parseArxiv(String xml, int limit) {
         ArrayList<Candidate> out = new ArrayList<Candidate>();
         for (String entry : Xml.elements(xml, "entry")) {
