@@ -11,7 +11,8 @@ param(
     [switch]$SkipBuild,
     [switch]$NoPush,
     [switch]$AllowEmpty,
-    [switch]$AllowDirty
+    [switch]$AllowDirty,
+    [switch]$AllowNewKey
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -87,6 +88,46 @@ $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $apk).Hash.ToLower()
 $sums = Join-Path $dest "SHA256SUMS"
 [IO.File]::WriteAllText($sums, ("{0}  {1}`n" -f $digest, $apkName), (New-Object System.Text.UTF8Encoding($false)))
 Write-Host ("apk {0} bytes sha256 {1}" -f (Get-Item $apk).Length, $digest) -ForegroundColor Cyan
+
+# --- 签名必须和上一版是同一把钥匙 ---
+# 换钥匙的后果不是"不好看"：装了旧版的人更新会 INSTALL_FAILED_UPDATE_INCOMPATIBLE，
+# 只能卸载重装，自建库跟着一起没。2.4.0 就踩过：发版从一个干净检出出包，而 tools/debug.keystore
+# 是被 git 忽略的，构建脚本发现它不在就当场生成了一张新的，包签得漂漂亮亮却装不上老版本。
+function Get-ApkCert([string]$path) {
+    $lines = & keytool -printcert -jarfile $path 2>&1
+    $hit = $lines | Select-String -Pattern "SHA256:\s*([0-9A-Fa-f:]+)" | Select-Object -First 1
+    if (-not $hit) { throw ("读不出 " + $path + " 的签名证书（keytool 没给 SHA256）") }
+    return ($hit.Matches[0].Groups[1].Value -replace ":", "").ToLower()
+}
+$builtCert = Get-ApkCert $built
+$expected = ""
+$certFile = Join-Path $root "tools/signing-cert.txt"
+if (Test-Path -LiteralPath $certFile) {
+    $line = Select-String -LiteralPath $certFile -Pattern "certificate-sha256:\s*([0-9a-fA-F]+)" | Select-Object -First 1
+    if ($line) { $expected = $line.Matches[0].Groups[1].Value.ToLower() }
+}
+$expectedFrom = "tools/signing-cert.txt"
+if (-not $expected) {
+    # 干净检出里还没有这个文件时退一步：拿 releases/ 里最新的那个包当对照
+    $prior = @(Get-ChildItem (Join-Path $root "releases") -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne $Version } | Sort-Object { VersionKey $_.Name } -Descending |
+        ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter *.apk -ErrorAction SilentlyContinue } |
+        Select-Object -First 1)
+    if ($prior.Count -gt 0) { $expected = Get-ApkCert $prior[0].FullName; $expectedFrom = $prior[0].Name }
+}
+Write-Host ("signing cert   built:    " + $builtCert) -ForegroundColor Cyan
+Write-Host ("                 " + $expectedFrom + ": " + $expected) -ForegroundColor Cyan
+if (-not $expected) {
+    Write-Warning "没有可以比对的签名指纹（tools/signing-cert.txt 与 releases/ 都没有）"
+} elseif ($expected -ne $builtCert) {
+    if (-not $AllowNewKey) {
+        throw ("这一版的签名与仓库里写死的那把钥匙不同（期望 " + $expected + " 来自 " + $expectedFrom +
+              "，实际 " + $builtCert + "）。换钥匙之后装了旧版的人更新只能卸载重装、" +
+              "自建库跟着没。把签名用的 tools/debug.keystore 放回来重出包；" +
+              "确实要换钥匙再加 -AllowNewKey 并改 tools/signing-cert.txt。")
+    }
+    Write-Warning "-AllowNewKey: 这一版换了签名密钥，老用户必须卸载重装"
+}
 
 # --- commit, tag, release, push ---
 if (-not $CommitMessage) { $CommitMessage = "Release $Version" }

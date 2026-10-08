@@ -1,0 +1,8 @@
+# 这一直是同一把签名钥匙
+# 随包工具针发的所有发布 APK（v0.3.4 起）都用 tools/debug.keystore（被 git 忽略，不进仓库）签名。
+# 下面那行指纹是这张钥匙的证书 SHA-256（keytool -printcert -jarfile 一个已发布的 APK 得到）。
+# release-version.ps1 每次发版都把新包的签名与它比一次：对不上就拒绝发版。
+# 不是习惯问题：换钥匙之后，装了旧版的人更新会得到 INSTALL_FAILED_UPDATE_INCOMPATIBLE，
+# 只能卸载重装，自建库跟着一起没。确要换才改这里，并在 CHANGELOG 里写清楚。
+certificate-sha256: aa515d1c6c4cdacf39ea340997f77ad4545531163835e029fa7d57e6e89aab51
+subject: CN=WordLite Debug, O=Rikkahub, C=CN
