@@ -14,7 +14,13 @@ import java.util.Locale;
  * 这一台直接吃 tests/samples/input-liu.docx 这种真稿，量的是"这篇稿子跑一遍，最后有几篇真正文进了比对、
  * 花了多少流量、多少时间、命中了谁"。改前改后各跑一次，报的就是同一把尺上的两个数。
  *
- * <p>用法：{@code java DocxScanProbe <file.docx> <out-prefix> [proxy] [per-page] [windows] [fullTexts]}
+ * <p>用法：{@code java DocxScanProbe <file.docx|file.txt> <out-prefix> [proxy] [per-page] [windows]
+ *              [fullTexts] [--cmap=文件] [--engines=a,b,c]}
+ * 三个开关各管一件事：
+ *   --cmap=    随包的 Adobe-GB1 表在 host/探针上没有 Context 可取，从文件装（不装就是 2.3.0 的取字水平）；
+ *   --engines= 只问这几家。OpenAlex 按出口 IP 计配额（X-RateLimit-Limit: 1000，一条 0.0001，
+ *              突发完就 429 并回 Retry-After: 3600），所以一轮真跑要能把配额花在哪家说清楚；
+ *   .txt 稿件  手机那条路（app_process）没有 DocxParser 可用，纯文本走同一条 DuplicateEngine.scan。
  * 产出：{@code <out-prefix>.txt} 人读的一页，{@code <out-prefix>-shapes.tsv} 每一次请求/下载一行。
  * 不在闸门里（一轮几十到上百个真请求），见 {@code tools/docx-scan-probe.ps1}。
  */
@@ -31,11 +37,25 @@ public final class DocxScanProbe {
         int per = argv.length > 3 ? Integer.parseInt(argv[3]) : 12;
         int windows = argv.length > 4 ? Integer.parseInt(argv[4]) : 12;
         int fullTexts = argv.length > 5 ? Integer.parseInt(argv[5]) : DuplicateEngine.MAX_FULL_TEXTS;
+        String cmap = flag(argv, "--cmap=");
+        String engineList = flag(argv, "--engines=");
+        String openAlex = flag(argv, "--openalex=");
+        if (openAlex != null && !openAlex.isEmpty()) PaperSources.setEndpoint("openalex", openAlex);
+        if (cmap != null && !cmap.isEmpty()) {
+            FileInputStream table = new FileInputStream(cmap);
+            try { CidUnicodeTables.install(table); } finally { table.close(); }
+        }
 
         DocxDocument document;
-        FileInputStream input = new FileInputStream(docx);
-        try { document = DocxParser.parse(input, docx); } finally { input.close(); }
+        if (docx.toLowerCase(Locale.ROOT).endsWith(".txt") || docx.toLowerCase(Locale.ROOT).endsWith(".md")) {
+            document = fromText(new String(Files.readAllBytes(Paths.get(docx)), StandardCharsets.UTF_8));
+        } else {
+            FileInputStream input = new FileInputStream(docx);
+            try { document = DocxParser.parse(input, docx); } finally { input.close(); }
+        }
         TextSelection selection = TextSelection.all(document);
+        ArrayList<String> engines = engineList == null || engineList.isEmpty()
+                ? PaperSources.engines() : listOf(engineList);
 
         final PaperSources.Limits limits = new PaperSources.Limits();
         limits.perEngine = per;
@@ -50,7 +70,7 @@ public final class DocxScanProbe {
         StringBuilder log = new StringBuilder();
         long began = System.currentTimeMillis();
         DuplicateEngine.Report report = DuplicateEngine.scan(selection, new TextCorpus(), true,
-                PaperSources.engines(), limits, null, new DuplicateEngine.Progress() {
+                engines, limits, null, new DuplicateEngine.Progress() {
                     public void step(String label, int done, int total) {
                         System.out.println("  [" + done + "/" + total + "] " + label);
                     }
@@ -60,8 +80,13 @@ public final class DocxScanProbe {
         line(log, "docx=" + docx + " chars=" + selection.text.length()
                 + " comparableChars=" + report.comparableChars);
         line(log, "limits per-page=" + per + " windows=" + windows + " fullTexts=" + fullTexts
-                + " proxy=" + (proxy.isEmpty() ? "直连优先" : proxy)
-                + " engines=" + PaperSources.engines().size());
+                + " proxy=" + (proxy.isEmpty() ? "直连优先" : proxy) + " engines=" + engines);
+        CidUnicodeTables table = CidUnicodeTables.active();
+        if (openAlex != null && !openAlex.isEmpty())
+            line(log, "openalex-endpoint " + openAlex + "（本机转发器直连上游：Routes 对海外源是代理优先，"
+                    + "而这条代理出口的 OpenAlex 配额已见底、直连那条还有——见 tools/openalex-relay.py）");
+        line(log, "cid-table " + (table == null ? "没装：这一版的取字水平等于 2.3.0" : table.describe())
+                + "（来源 " + (cmap == null || cmap.isEmpty() ? "无" : cmap) + "）");
         line(log, "windows available=" + report.windowsAvailable + " planned=" + report.windowsPlanned
                 + " retrieved=" + report.windowsRetrieved + " coveredChars=" + report.coveredChars
                 + String.format(Locale.ROOT, " coverage=%.2f%%",
@@ -127,6 +152,32 @@ public final class DocxScanProbe {
         Files.write(Paths.get(prefix + "-shapes.tsv"), tsv.toString().getBytes(StandardCharsets.UTF_8));
         Files.write(Paths.get(prefix + ".txt"), log.toString().getBytes(StandardCharsets.UTF_8));
         System.out.println("wrote " + prefix + ".txt and " + prefix + "-shapes.tsv");
+    }
+
+    /** 纯文本稿件：一行一段，与 FullScanProbe 同样的搭法，走的还是同一条 scan 链路。 */
+    static DocxDocument fromText(String text) {
+        DocxDocument document = new DocxDocument();
+        String[] lines = (text == null ? "" : text).split("\n", -1);
+        for (int i = 0; i < lines.length; i++) {
+            DocxDocument.ParagraphBlock block = new DocxDocument.ParagraphBlock();
+            block.index = i;
+            block.text = lines[i];
+            document.blocks.add(block);
+            document.paragraphs.add(block);
+        }
+        return document;
+    }
+
+    static ArrayList<String> listOf(String engines) {
+        ArrayList<String> out = new ArrayList<String>();
+        for (String engine : engines.split(",")) if (engine.trim().length() > 0) out.add(engine.trim());
+        return out;
+    }
+
+    static String flag(String[] argv, String name) {
+        for (int i = 0; i < argv.length; i++)
+            if (argv[i] != null && argv[i].startsWith(name)) return argv[i].substring(name.length()).trim();
+        return null;
     }
 
     static int charsOf(String excerpt) {

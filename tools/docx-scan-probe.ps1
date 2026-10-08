@@ -9,6 +9,11 @@
 #   pwsh tools/docx-scan-probe.ps1                                   # 直连优先
 #   pwsh tools/docx-scan-probe.ps1 -Proxy 127.0.0.1:7897             # 外网走本机代理（OpenAlex 等）
 #   pwsh tools/docx-scan-probe.ps1 -Docx tests/samples/input-liu.docx -Out artifacts/tmp/liu-after
+#   pwsh tools/docx-scan-probe.ps1 -Engines openalex -Windows 6      # 只问一家：OpenAlex 按出口 IP 计配额
+#   pwsh tools/docx-scan-probe.ps1 -Cmap ""                          # 不装随包 CID 表，量取字水平
+#   pwsh tools/docx-scan-probe.ps1 -Engines openalex -OpenAlex http://127.0.0.1:8797
+#       OpenAlex 按出口 IP 计配额，Routes 对海外源又是代理优先；把这一家指到本机转发器
+#       （tools/openalex-relay.py，它直连上游），才能把配额花在还有货的那条出口上。
 #
 # 中文库（知网/万方/维普）不吃这个 -Proxy 之外的额外配置：Limits.proxy 只是一个 host:port，
 # Routes 会先试显式路由、再试直连与自动发现的端口，报告里 via= 那一列才是真走了哪条路。
@@ -19,6 +24,9 @@ param(
     [int]$Per = 12,
     [int]$Windows = 12,
     [int]$FullTexts = 10,
+    [string]$Engines = "",
+    [string]$Cmap = "app/src/main/assets/cmaps/adobe-gb1.cid",
+    [string]$OpenAlex = "",
     [string]$JavaHome = ""
 )
 $ErrorActionPreference = "Stop"
@@ -42,6 +50,10 @@ Write-Host "== compile probe closure =="
 if ($LASTEXITCODE -ne 0) { throw "probe compile failed" }
 
 Write-Host "== DocxScanProbe (live, production path) ==" -ForegroundColor Cyan
+$extra = @()
+if ($Cmap -and (Test-Path $Cmap)) { $extra += "--cmap=$Cmap" } else { Write-Warning "no cid table ($Cmap): 取字水平等于随包表之前" }
+if ($Engines) { $extra += "--engines=$Engines" }
+if ($OpenAlex) { $extra += "--openalex=$OpenAlex" }
 & java "-Dfile.encoding=UTF-8" -classpath "$classes;$android" "com.rikkahub.wordlite.DocxScanProbe" `
-    $Docx $Out $Proxy $Per $Windows $FullTexts
+    $Docx $Out $Proxy $Per $Windows $FullTexts @extra
 exit $LASTEXITCODE
