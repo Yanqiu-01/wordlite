@@ -628,7 +628,9 @@ public class EditorActivity extends Activity {
     }
 
     private void chooseFont() {
-        final String[] names = DocxFontAssets.PICKER.clone();
+        final java.util.ArrayList<DocxFonts.Used> used = DocxFonts.usedIn(document);
+        // 稿子用过的脸排最前面：手机上来回翻 27 个名字比在电脑上是另一回事。
+        final String[] names = DocxFontAssets.orderForDocument(usedFamilies(used));
         /* 说明和列表分开放。AlertDialog 的 setMessage 和 setItems 同时给，EMUI 上只渲染说明、
            列表整个消失，所以这里自建一个可滚动视图：先一行"本文用了哪些字体、各自拿什么显示"，
            再一行一个候选字体，每一行用它自己那张脸写自己——不用先选中再回去看效果。 */
@@ -638,7 +640,7 @@ public class EditorActivity extends Activity {
         report.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
         report.setTextColor(0xFF757575);
         report.setPadding(dp(20), dp(10), dp(20), dp(6));
-        report.setText(DocxFonts.summary(DocxFonts.usedIn(document)));
+        report.setText(DocxFonts.summary(used));
         rows.addView(report);
         ScrollView scroll = new ScrollView(this);
         scroll.addView(rows);
@@ -691,6 +693,13 @@ public class EditorActivity extends Activity {
     }
 
     /** 把字体名写到选区（没选区就整段）上，五种字体槽一起改，和 Word 的字体下拉一致。 */
+    /** 面板排序只看"这篇稿子用过哪些字体名"，顺序就是它们出现的先后。 */
+    private static java.util.ArrayList<String> usedFamilies(java.util.ArrayList<DocxFonts.Used> used) {
+        java.util.ArrayList<String> out = new java.util.ArrayList<String>();
+        for (DocxFonts.Used one : used) out.add(one.family);
+        return out;
+    }
+
     private void applyFontFamily(String family) {
         EditText editor = currentEditor();
         if (editor == null) return;

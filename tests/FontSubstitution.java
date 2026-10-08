@@ -295,6 +295,31 @@ public final class FontSubstitution {
         check("6,763".equals(DocxFontCoverage.group(6763)) && "20,992".equals(DocxFontCoverage.group(20992))
                         && "1,234,567".equals(DocxFontCoverage.group(1234567)),
                 "覆盖数按三位一组写：" + DocxFontCoverage.group(20992));
+        /* 13. 面板顺序：用过的那几张排最前面，其余照 Word 的顺序。出来的必须还是 PICKER 的一个排列，
+               一个不多一个不少，也不能出现两次——手机上少一行字体就等于选不到它。 */
+        check(Arrays.equals(DocxFontAssets.PICKER, DocxFontAssets.orderForDocument(null))
+                        && Arrays.equals(DocxFontAssets.PICKER,
+                        DocxFontAssets.orderForDocument(new ArrayList<String>())),
+                "没告诉它用过什么，就照 Word 的顺序原样列");
+        ArrayList<String> usedFirst = new ArrayList<String>(Arrays.asList("华文新魏", "Times New Roman"));
+        String[] ordered = DocxFontAssets.orderForDocument(usedFirst);
+        check(ordered.length == DocxFontAssets.PICKER.length
+                        && "华文新魏".equals(ordered[0]) && "Times New Roman".equals(ordered[1]),
+                "用过的两张排到最前：" + ordered[0] + " / " + ordered[1]);
+        check(sameSet(ordered, DocxFontAssets.PICKER), "重排之后还是那 27 项，一项不许多也不许少");
+        check(DocxFontAssets.PICKER.length
+                        == new HashSet<String>(Arrays.asList(ordered)).size(), "重排之后没有重复项");
+        ArrayList<String> byOtherName = new ArrayList<String>(Arrays.asList("SimSun", "华文新魏"));
+        String[] orderedByOtherName = DocxFontAssets.orderForDocument(byOtherName);
+        check("宋体".equals(orderedByOtherName[0]) || "宋体".equals(orderedByOtherName[1]),
+                "稿子里写 SimSun 就算用了宋体：" + orderedByOtherName[0]);
+        check(!orderedByOtherName[1].startsWith("MS Mincho"),
+                "ＭＳ 明朝 落的是宋体那张脸，但它是替代，不许冒充“你用过的字体”上浮");
+        String[] unknown = DocxFontAssets.orderForDocument(
+                new ArrayList<String>(Arrays.asList("方正清刻本悦宋", null)));
+        check(Arrays.equals(DocxFontAssets.PICKER, unknown),
+                "没有本尊的名字与 null 都不许打乱顺序");
+
         check(DocxFontCoverage.hanzi(DocxFontAssets.ST_XINWEI) == 6763
                         && DocxFontCoverage.hanzi(DocxFontAssets.ST_CAIYUN) == 6763
                         && DocxFontCoverage.hanzi(DocxFontAssets.SONG) >= 20990,
@@ -374,6 +399,11 @@ public final class FontSubstitution {
     }
 
     /** 这张脸在基本汉字区画得出多少个字。 */
+    /** 同样一些名字，只比集合，不比顺序。 */
+    private static boolean sameSet(String[] a, String[] b) {
+        return new HashSet<String>(Arrays.asList(a)).equals(new HashSet<String>(Arrays.asList(b)));
+    }
+
     private static long countHanzi(String path) throws Exception {
         Font face = Font.createFont(Font.TRUETYPE_FONT, new File("app/src/main/assets/" + path));
         long got = 0;

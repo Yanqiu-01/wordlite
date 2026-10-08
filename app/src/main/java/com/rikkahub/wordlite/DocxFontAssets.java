@@ -70,6 +70,36 @@ public final class DocxFontAssets {
 
     private DocxFontAssets() { }
 
+    /**
+     * 字体面板的顺序：这篇稿子已经用过的脸排最前面（按它们出现的先后），其余照 Word 的顺序跟在后面。
+     * 两件事按"是不是同一张脸"判，不按名字写法判——稿子写 SimSun 就是宋体那一行，写 MS Gothic 就是
+     * ＭＳ ゴシック那一行。只有本尊在包里的名字才许上浮：ＭＳ 明朝 落的是宋体那张脸，让它跟着
+     * 宋体一起浮上来，等于把一张没有本尊的名字塞进"你正在用的字体"里。
+     */
+    public static String[] orderForDocument(java.util.Collection<String> used) {
+        String[] out = PICKER.clone();
+        if (used == null || used.isEmpty()) return out;
+        java.util.ArrayList<String> wanted = new java.util.ArrayList<String>();
+        for (String name : used) {
+            if (name == null || !substitution(name).isEmpty()) continue;
+            String path = pathFor(name);
+            if (path == null || wanted.contains(path)) continue;
+            wanted.add(path);
+        }
+        int at = 0;
+        for (String path : wanted) {
+            for (int i = at; i < out.length; i++) {
+                if (!path.equals(pathFor(out[i])) || substitution(out[i]).length() > 0) continue;
+                String hit = out[i];
+                System.arraycopy(out, at, out, at + 1, i - at);
+                out[at] = hit;
+                at++;
+                break;
+            }
+        }
+        return out;
+    }
+
     public static String pathFor(String family) {
         return pathFor(family, 0);
     }
