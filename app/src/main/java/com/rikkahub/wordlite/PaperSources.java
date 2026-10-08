@@ -30,6 +30,18 @@ public final class PaperSources {
         public String proxy = "";
     }
     static final int MAX_TEXT = 64 * 1024, MAX_AUTHORS = 6;
+    /**
+     * 万方翻页游标的三条上限，三个数各管一件事，谁也不许替谁下结论（标定依据见
+     * docs/retrieval-recall.md 瓶颈三，2026-10-08 经 127.0.0.1:7897 真接口实测）：
+     * WANFANG_MAX_PAGES 是游标最多推到第几页，WANFANG_ZERO_PAGE_LIMIT 是连续几页
+     * "按 URL 一条新的都没多"才算这个检索式取尽。取 3 的依据：同一检索式重复问 5 轮，
+     * 第二轮起新增恒为 0（4/4 个检索式），所以阈值只要等于 2 就还是那把提前判死的尺；
+     * 游标往前推的 36 次换页请求里 0 次出现"空页之后又有货"，可靠下限是 1，
+     * 3 = 1（实测可靠性）+ 2（至少比现值宽一档，每页实测 125-530ms，多花两页买得起）。
+     */
+    static final int WANFANG_MAX_PAGES = 6, WANFANG_ZERO_PAGE_LIMIT = 3;
+    /** 同源相邻两页之间的间隔：翻页等于把同一个源连问好几次，防封 IP 那把尺不许从翻页这条后门绕过去。 */
+    static long wanfangPageGapMillis = 400L;
     private static final LinkedHashMap<String, String> ENDPOINTS = defaults();
     private PaperSources() { }
 
@@ -95,10 +107,7 @@ public final class PaperSources {
         /* 万方走 gRPC-web：请求体和响应都不是文本，编解码在 WanfangProtocol 里，
            这条路上没有查询串，检索式整个装在 protobuf 消息里发出去。 */
         if (name.equals("wanfang")) {
-            ApiClient.Response binary = HttpTransport.postBytes(endpoint(name),
-                    WanfangProtocol.request(phrase, 1, per), WanfangProtocol.CONTENT_TYPE, headers,
-                    safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation, proxyFor(safe));
-            return WanfangProtocol.parse(binary.raw, per);
+            return searchWanfang(phrase, per, safe, headers, cancellation);
         }
         /* 知网这个检索口只认 POST 表单，而且要看一眼浏览器样的请求头，回来的还是带高亮标签的 HTML，
            所以它不进下面那套 JSON 解析，整个交给 CnkiSearch。 */
@@ -129,6 +138,109 @@ public final class PaperSources {
             else found = parseCore(root, per);
         } catch (RuntimeException error) { throw new IOException("检索响应格式无效"); }
         return found;
+    }
+
+    /**
+     * 万方：一个检索式问到尽为止，但"要第几页""什么算重复""什么时候收摊"是三个独立的量，各管各的。
+     *
+     * <p>翻页游标 —— CommonRequest.currentPage（protobuf 字段 5）从 1 往后推。实测这个游标是活的：
+     * 同一检索式连要四页，每页 12 条著录项，URL 两两零重合；而 2.1.0 之前这一路把页码写死成 1，
+     * 一个检索式最多只拿得到第一页。
+     * <p>页间去重 —— 只认 locator（文献页 URL），locator 空的退到题名；名次、分数、摘要像不像一律不参与，
+     * 那是排序阶段的事，拿它去重等于把换页回来的同一条当新货。
+     * <p>零新增阈值 —— 连续 WANFANG_ZERO_PAGE_LIMIT 页一条新的都没多，才认这个检索式的游标取尽。
+     *
+     * <p>"没货"有两种，不许混：整页连著录项都没带（实测是固定的 25 字节空帧，服务端明说这一式零命中，
+     * 换页也不会再有，实测 18/18 次无一例外）就地收摊，一次配额也不许多花；页带了著录项但全是见过的，
+     * 那才算进零新增那一串。
+     */
+    private static ArrayList<Candidate> searchWanfang(String phrase, int per, Limits safe,
+                                                      Map<String, String> headers,
+                                                      ApiClient.Cancellation cancellation) throws IOException {
+        ArrayList<Candidate> found = new ArrayList<Candidate>();
+        LinkedHashMap<String, Boolean> seen = new LinkedHashMap<String, Boolean>();
+        int quietPages = 0;
+        for (int page = 1; page <= WANFANG_MAX_PAGES; page++) {
+            if (page > 1 && !waitBeforePage(cancellation)) break;
+            ApiClient.Response binary;
+            try {
+                binary = HttpTransport.postBytes(endpoint("wanfang"),
+                        WanfangProtocol.request(phrase, page, per), WanfangProtocol.CONTENT_TYPE, headers,
+                        safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation, proxyFor(safe));
+            } catch (IOException error) {
+                /* 第一页失败就是这一路失败，照原话抛上去（限流补试、本次不可用都靠它）。
+                   后面几页失败只该少拿几条，不该把已经到手题录一起作废。 */
+                if (!found.isEmpty()) break;
+                throw error;
+            }
+            Envelope envelope = envelopeOf(binary.raw);
+            int added = 0;
+            for (Candidate candidate : WanfangProtocol.parse(binary.raw, per))
+                if (keep(seen, candidate)) { found.add(candidate); added++; }
+            quietPages = added > 0 ? 0 : quietPages + 1;
+            /* 这一式要下发的条数已经凑够，或服务端声称的命中总数已经取满：游标没必要再推。 */
+            if (found.size() >= per) break;
+            if (envelope.total >= 0 && found.size() >= envelope.total) break;
+            if (envelope.records == 0) break;
+            if (quietPages >= WANFANG_ZERO_PAGE_LIMIT) break;
+        }
+        return found;
+    }
+
+    /** 翻页之间的间隔与取消检查：返回 false 表示这一路该收摊，别再花配额。 */
+    private static boolean waitBeforePage(ApiClient.Cancellation cancellation) {
+        if (cancellation != null && cancellation.cancelled()) return false;
+        long gap = Math.max(0L, wanfangPageGapMillis);
+        if (gap > 0L) {
+            try { Thread.sleep(gap); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); return false; }
+        }
+        return cancellation == null || !cancellation.cancelled();
+    }
+
+    /** 一页响应的信封账目：帧里带了几条著录项，以及服务端声称这一式总共命中几条（没带这个字段就是 -1）。 */
+    private static final class Envelope {
+        int records;
+        long total = -1L;
+    }
+
+    /**
+     * 只读信封，不碰著录项。"这一页带了几条"和"我们能解出几条"必须是两个数：实测万方一页常混进
+     * 我们编不出著录项的载荷类型（12 条里只解得出 9 条），把那种页当成"源没货"就是拿自己的解析缺口
+     * 去判取尽。帧解不动时这里安静地交白卷，格式无效那笔账由 WanfangProtocol.parse 去报。
+     */
+    private static Envelope envelopeOf(byte[] raw) {
+        Envelope envelope = new Envelope();
+        int at = 0;
+        try {
+            while (raw != null && at + 5 <= raw.length) {
+                int flags = raw[at] & 0xFF;
+                long declared = ((long) (raw[at + 1] & 0xFF) << 24) | ((long) (raw[at + 2] & 0xFF) << 16)
+                        | ((long) (raw[at + 3] & 0xFF) << 8) | (long) (raw[at + 4] & 0xFF);
+                at += 5;
+                if (declared < 0 || at + declared > raw.length) return envelope;
+                int length = (int) declared;
+                byte[] payload = java.util.Arrays.copyOfRange(raw, at, at + length);
+                at += length;
+                if ((flags & 0x80) != 0) continue;
+                for (ProtoWire.Field field : ProtoWire.read(payload)) {
+                    if (field.bytes != null) { if (field.number == 4) envelope.records++; continue; }
+                    if (field.number == 3) envelope.total = field.varint;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            /* 交白卷即可：帧长无效由 parse 那一路报，取尽判据不拿半截账目说话。 */
+        }
+        return envelope;
+    }
+
+    /** 页间去重只认这一把尺：URL 优先，空的退到题名；分数与名次不参与。 */
+    private static boolean keep(LinkedHashMap<String, Boolean> seen, Candidate candidate) {
+        String key = candidate.source.locator.isEmpty() ? candidate.source.title : candidate.source.locator;
+        if (key.isEmpty()) return true;
+        if (Boolean.TRUE.equals(seen.get(key))) return false;
+        seen.put(key, Boolean.TRUE);
+        return true;
     }
 
     /**

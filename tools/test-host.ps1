@@ -50,6 +50,7 @@ $suites = New-Object System.Collections.ArrayList
 function Add-Suite([string]$name, $argv) { [void]$suites.Add([pscustomobject]@{ Name = $name; Args = $argv }) }
 Add-Suite "Regression"             @("tests/fixture.docx", "$out/roundtrip")
 Add-Suite "ScriptRegression"       @()
+Add-Suite "WordLineHeightRegression" @()
 Add-Suite "TextCorpusRegression"   @()
 Add-Suite "SourceLedgerRegression" @()
 Add-Suite "CharLedgerRegression"   @()
@@ -63,6 +64,7 @@ Add-Suite "AigcRegression"         @()
 Add-Suite "LocalRewriteRegression" @()
 Add-Suite "DetectRegression"       @()
 Add-Suite "RetrievalCoverageRegression" @()
+Add-Suite "WanfangPagingRegression"    @()
 Add-Suite "CnkiSearchRegression"   @()
 
 Add-Suite "CnkiTouchRegression"    @()

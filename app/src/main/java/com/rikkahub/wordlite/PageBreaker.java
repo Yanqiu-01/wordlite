@@ -10,6 +10,14 @@ public final class PageBreaker {
         public int blockIndex;
         public float[] lines;
         public float before, after;
+        /**
+         * 段末那一行允许垂到版心以下的量（文档 px）。Word 分页看的是基线：最后一行的基线（外加它自己的
+         * 上伸）还在版心里，这一行就归这一页，下伸垂过下边距它也不管——桌面 Word 16.0 在 12pt 宋体 /
+         * w:line=300 这篇稿子上每页实打实排 33 行（artifacts/word/page_budget.tsv），而 33 × 26.267px
+         * = 866.81px 已经超出 865.53px 的版心，按"整行行盒都得装下"只能排 32 行，一页少一行、整篇就多两页。
+         * 0 表示这一段按老规则整行行盒算（没量过行高的字体就走这条，行为与改动前一字不差）。
+         */
+        public float hang;
         public boolean pageBreakBefore, keepNext, keepLines, widowControl = true;
         /** Section-local pagination group. */
         public int sectionIndex;
@@ -31,17 +39,25 @@ public final class PageBreaker {
         public final Item item;
         public final int startLine, endLine;
         public final float top, height;
+        /** 这一片末尾那一行垂到版心以下的量，见 Item.hang。 */
+        public final float hang;
         public Fragment(Item item, int start, int end, float top) {
+            this(item, start, end, top, 0f);
+        }
+        public Fragment(Item item, int start, int end, float top, float hang) {
             this.item = item; startLine = start; endLine = end; this.top = top;
+            this.hang = hang;
             height = item.height(start, end);
         }
     }
     public static final class Page {
         public final List<Fragment> fragments = new ArrayList<Fragment>();
         public float usedHeight;
+        /** 本页最后那一片用掉的垂下量：判断是否溢出时要把它还给版心，见 Item.hang。 */
+        public float hang;
         public boolean overflow;
     }
-    public static List<Page> paginate(List<Item> items, float capacity) {
+        public static List<Page> paginate(List<Item> items, float capacity) {
         if (!(capacity > 0) || Float.isInfinite(capacity)) throw new IllegalArgumentException("Invalid page height");
         List<Page> pages = new ArrayList<Page>();
         Page page = new Page();
@@ -62,8 +78,10 @@ public final class PageBreaker {
             // Keep an entire paragraph only when it can fit on an empty page.
             float required = item.keepLines ? full : 0;
             if (item.keepNext) required = Math.max(required, keepGroupHeight(items, index));
-            if (required > 0 && required + before <= capacity + EPS
-                    && y + gap + required > capacity + EPS && !page.fragments.isEmpty()) {
+            // 整段（或整个 keepNext 组）也要按基线判生死：它末行的下伸同样允许垂出下边距，
+            // 否则一篇 33 行的正文段会被这条判断整段推走，白白多占一页。
+            if (required > 0 && required + before - item.hang <= capacity + EPS
+                    && y + gap + required - item.hang > capacity + EPS && !page.fragments.isEmpty()) {
                 page = new Page(); pages.add(page); y = 0; pendingAfter = 0;
             }
             int start = 0;
@@ -71,7 +89,8 @@ public final class PageBreaker {
                 gap = start == 0 ? Math.max(pendingAfter, before) : 0;
                 int end = start;
                 float height = 0;
-                while (end < item.lines.length && y + gap + height + item.lines[end] <= capacity + EPS)
+                while (end < item.lines.length
+                        && y + gap + height + item.lines[end] - item.hang <= capacity + EPS)
                     height += item.lines[end++];
                 if (end < item.lines.length && item.widowControl) {
                     // Do not leave a single final line on the following page.
@@ -88,10 +107,11 @@ public final class PageBreaker {
                     // One oversize object/line: show it, report overflow, never loop forever.
                     end = start + 1;
                 }
-                Fragment fragment = new Fragment(item, start, end, y + gap);
+                Fragment fragment = new Fragment(item, start, end, y + gap, item.hang);
                 page.fragments.add(fragment);
                 y = fragment.top + fragment.height;
-                page.overflow |= y > capacity + EPS;
+                page.hang = item.hang;
+                page.overflow |= y - page.hang > capacity + EPS;
                 page.usedHeight = y;
                 start = end;
                 pendingAfter = 0;

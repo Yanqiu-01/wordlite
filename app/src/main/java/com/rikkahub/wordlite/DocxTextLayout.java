@@ -26,6 +26,19 @@ public final class DocxTextLayout {
         public final StaticLayout layout;
         public final float x;
         public final DocxFieldEngine.DisplayMap displayMap;
+        /**
+         * Word 的相邻基线距离是小数（宋体 12pt、w:line=300 实测 26.267px），Android 的行顶只会落在
+         * 整数上。这一段每行差多少就记在这里，交给分页器按行补——0.267px 一行、Word 每页实排 33 行就是
+         * 8.8px，够把一段翻到下一页去。只有行高来自 WordLineHeights 实测值的段落才有这个余量。
+         */
+        public float lineCarry;
+        /**
+         * Word 分页看基线：末行的基线还在版心里，这一行就归这一页，下伸垂过下边距它不管。这个量就是允许
+         * 垂下去的那一截（= 实测行距 - 画出来的上伸），交给 PageBreaker 在判页尾时还给版心。真值账：
+         * 版心 865.53px、行距 26.267px、上伸 21px，Word 每页 33 行（artifacts/word/page_budget.tsv），
+         * 而整行行盒装进版心只装得下 32 行。与 lineCarry 同一条门槛：没量过行高的字体这里是 0。
+         */
+        public float lineHang;
         Paragraph(DocxDocument.ParagraphBlock source, StaticLayout layout, float x,
                   DocxFieldEngine.DisplayMap displayMap) {
             this.source = source; this.layout = layout; this.x = x; this.displayMap = displayMap;
@@ -80,10 +93,11 @@ public final class DocxTextLayout {
         } else {
             text.setSpan(new LeadingMarginSpan.Standard(firstMargin, restMargin), 0, text.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
         }
+        Spacing spacing = null;
         if (text.length() > 0) {
-            text.setSpan(new Spacing(f, 1f, wordSingleLineHeightPt(paragraph),
-                        wordAscentFraction(paragraph), lineGridPitchTwips),
-                    0, text.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
+            spacing = new Spacing(f, 1f, wordSingleLineHeightPt(paragraph),
+                    wordAscentFraction(paragraph), lineGridPitchTwips, lineHeightMeasured(paragraph));
+            text.setSpan(spacing, 0, text.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
             applyAutoSpace(text, f);
             int tabAt = text.toString().indexOf('\t');
             if (f.rightTabTwips > 0 && tabAt >= 0) {
@@ -119,7 +133,10 @@ public final class DocxTextLayout {
         // platform pass left over gets spread, so a line Android already filled stays filled.
         if (f.alignment == 3 && hasEastAsian(text))
             layout = justifyEastAsian(text, paint, layout, width, alignment, allowWordWrap);
-        return new Paragraph(paragraph, layout, x, display);
+        Paragraph out = new Paragraph(paragraph, layout, x, display);
+        out.lineCarry = spacing == null ? 0f : spacing.lineCarry;
+        out.lineHang = spacing == null ? 0f : spacing.lineHang;
+        return out;
     }
 
     private static StaticLayout build(Spannable text, TextPaint paint, int width,
@@ -541,39 +558,26 @@ public final class DocxTextLayout {
      * how Word picks the tallest line box per-line for "auto" line spacing.
      */
     private static float wordSingleLineHeightPt(DocxDocument.ParagraphBlock p) {
-        float maxH = 0;
-        int baseHalf = p.baseRunStyle != null ? p.baseRunStyle.fontSizeHalfPoints : -1;
-        String baseEA = p.baseRunStyle != null ? p.baseRunStyle.eastAsiaFontFamily : null;
-        String baseLatin = p.baseRunStyle != null && p.baseRunStyle.asciiFontFamily != null
-                ? p.baseRunStyle.asciiFontFamily
-                : (p.baseRunStyle != null ? p.baseRunStyle.fontFamily : null);
-        for (DocxDocument.Run run : p.runs) {
-            if (run.text.trim().isEmpty()) continue;
-            int half = run.style.fontSizeHalfPoints > 0 ? run.style.fontSizeHalfPoints : baseHalf;
-            if (half <= 0) half = 24; // Word default
-            float pt = half / 2f;
-            String ea = run.style.eastAsiaFontFamily != null ? run.style.eastAsiaFontFamily : baseEA;
-            String latin = run.style.asciiFontFamily != null ? run.style.asciiFontFamily : baseLatin;
-            FontScriptMetrics mEA = ea != null ? metricsFor(ea) : FontScriptMetrics.DEFAULT;
-            FontScriptMetrics mLatin = latin != null ? metricsFor(latin) : FontScriptMetrics.DEFAULT;
-            float runH = pt * Math.max(mEA.lineHeightRatio, mLatin.lineHeightRatio);
-            if (run.style.superscript || run.style.subscript)
-                // A script run is typeset at its OS/2 script size, so an 8 pt
-                // reference inside 12 pt text cannot lift the paragraph box.
-                runH *= ScriptGeometry.of(run.style.superscript,
-                        mLatin.lineHeightRatio >= mEA.lineHeightRatio ? mLatin : mEA).scale;
-            if (runH > maxH) maxH = runH;
-        }
-        if (maxH <= 0) {
-            float pt = baseHalf > 0 ? baseHalf / 2f : effectiveDefaultPt(p);
-            String ea = baseEA != null ? baseEA : effectiveDefaultFamily(p);
-            String latin = baseLatin != null ? baseLatin : effectiveDefaultFamily(p);
-            float eaR = metricsFor(ea).lineHeightRatio;
-            float latinR = metricsFor(latin).lineHeightRatio;
-            maxH = pt * Math.max(eaR, latinR);
-        }
-        return maxH;
+        // 扫描本身在 WordLineHeights.tallest（纯 Java，Host 侧测得到），这里只负责喂字体度量。
+        return WordLineHeights.tallest(p, METRICS, effectiveDefaultFamily(p)).pt;
     }
+
+    /**
+     * 撑起这一段最高一行的是哪张脸，而那张脸的行高是不是 WordLineHeights 里的实测值。
+     * 只有实测撑起来的段落才允许带小数行距（`Spacing.lineCarry`）：没量过的字体照旧走两步取整，
+     * 行为一个字节都不改——这条改动必须可逆，不许顺手把没量过的字体一起改了。
+     */
+    static boolean lineHeightMeasured(DocxDocument.ParagraphBlock p) {
+        // 与 wordSingleLineHeightPt 共用同一次扫描：谁的 pt × 比值最高谁说了算，不是比值单独最大。
+        return WordLineHeights.carries(p, METRICS, effectiveDefaultFamily(p));
+    }
+
+    /** 把 FontManager 的字体度量喂给纯 Java 的行高扫描。 */
+    private static final WordLineHeights.Metrics METRICS = new WordLineHeights.Metrics() {
+        @Override public FontScriptMetrics forFamily(String family) {
+            return family != null ? metricsFor(family) : FontScriptMetrics.DEFAULT;
+        }
+    };
 
     /**
      * The ascent fraction within the font's single-line box. Word positions
@@ -1046,7 +1050,8 @@ public final class DocxTextLayout {
         if (paragraph.format.lineSpacingTwips > 0) {
             float scale = pxPerPoint / PageGeometry.points(1f);
             text.setSpan(new Spacing(paragraph.format, scale,
-                    wordSingleLineHeightPt(paragraph), wordAscentFraction(paragraph), -1),
+                            wordSingleLineHeightPt(paragraph), wordAscentFraction(paragraph), -1,
+                            lineHeightMeasured(paragraph)),
                     0, text.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
         }
     }
@@ -1066,10 +1071,14 @@ public final class DocxTextLayout {
         private boolean computed;
         private int desiredHeight;
         private int gridPitchPx;
+        /** 分页要补的那一小截小数，见 Paragraph.lineCarry。 */
+        private float lineCarry;
+        /** 末行允许垂到版心以下的量，见 Paragraph.lineHang。 */
+        private float lineHang;
         private boolean clipScripts;
 
         Spacing(DocxDocument.ParagraphFormat f, float coordinateScale,
-                float singleLineHeightPt, float ascentFrac, int lineGridPitchTwips) {
+                float singleLineHeightPt, float ascentFrac, int lineGridPitchTwips, boolean measuredAdvance) {
             lineTwips = f.lineSpacingTwips;
             rule = f.lineRule == null ? "" : f.lineRule;
             this.coordinateScale = coordinateScale;
@@ -1089,6 +1098,7 @@ public final class DocxTextLayout {
             } else {
                 desiredHeight = singlePx;
             }
+            int autoHeight = desiredHeight;
             // Word's generated TOC uses a right-aligned dot leader in a
             // section with a document grid. Word keeps those TOC baselines on
             // the section grid even though the generated paragraph explicitly
@@ -1110,6 +1120,21 @@ public final class DocxTextLayout {
             // Word clips raised text under exact line spacing and grows the line
             // for it under auto, multiple and at-least spacing.
             clipScripts = "exact".equalsIgnoreCase(rule);
+            /* Word 的 auto 行距是一步算完的小数：单一行高 × w:line/240，中间不取整。我们原来按
+               "两步取整"建模（先把单一行高取整再乘比例），那个模型对得上我们自己的旧数，对不上 Word：
+               宋体 12pt / w:line=300 Word 量到 26.267px，两步取整只给 26。差的那截按行累计，
+               一页 27 行差 7.2px。网格地板真的把行顶起来时不补——那是另一种情形，还没量过。 */
+            boolean autoRule = !"exact".equalsIgnoreCase(rule) && !"atLeast".equalsIgnoreCase(rule);
+            if (measuredAdvance && autoRule && desiredHeight == autoHeight && singleLineHeightPt > 0f) {
+                float advance = WordLineHeights.advancePx(singleLineHeightPt, lineTwips, coordinateScale);
+                float carry = advance - desiredHeight;
+                if (Math.abs(carry) < 1f) {
+                    lineCarry = carry;
+                    // 上伸按 chooseHeight 画出来的那个整数算，两者必须同源，否则版心还回去的量
+                    // 与屏幕上真正的基线位置就对不上。
+                    lineHang = advance - Math.max(1, Math.round(desiredHeight * ascentFraction));
+                }
+            }
             computed = true;
         }
 

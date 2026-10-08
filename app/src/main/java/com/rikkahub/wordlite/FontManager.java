@@ -70,6 +70,12 @@ public final class FontManager {
         if (cached != null) return cached;
         try (InputStream input = context.getAssets().open(path)) {
             cached = FontScriptMetrics.read(input);
+            /* Word 实测过行高的那几张脸用实测值（WordLineHeights）：字体表里的任何一个和都算不出
+               Word 的行距，差的 0.77-3.27px/行按一页 27 行累计就是把段落提前一页。
+               没量过的脸照旧走表推导，不猜。 */
+            // 实测行高默认不套用：见 WordLineHeights.APPLIED_TO_LAYOUT 那笔真机对账。
+            Float measured = WordLineHeights.APPLIED_TO_LAYOUT ? WordLineHeights.ratioFor(path) : null;
+            if (measured != null) cached = cached.withLineHeight(measured.floatValue());
             metrics.put(path, cached);
             return cached;
         } catch (Exception error) { return FontScriptMetrics.DEFAULT; }

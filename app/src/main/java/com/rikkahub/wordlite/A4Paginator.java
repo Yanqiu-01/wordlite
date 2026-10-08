@@ -187,17 +187,21 @@ public final class A4Paginator {
                             && sectionGrid(document, sectionIndex) > 0;
                     boolean gridAdvance = (tocGrid || p.format.snapToGrid)
                             && sectionGrid(document, sectionIndex) > 0;
+                    float carry = layout.text == null ? 0f : layout.text.lineCarry;
+                    float hang = layout.text == null ? 0f : layout.text.lineHang;
                     for (int i = 0; i < heights.length; i++) {
                         heights[i] = Math.max(1, l.getLineTop(i + 1) - l.getLineTop(i));
-                        // StaticLayout rounds each line to an integer. Word's
-                        // generated TOC and body docGrid rows retain the
-                        // fractional grid remainder during pagination and
-                        // drawing; otherwise the first body page fits too much.
-                        if (gridAdvance) heights[i] += 0.5f;
+                        /* StaticLayout 把每一行的行顶取整，Word 不取：宋体 12pt / w:line=300 的相邻基线
+                           距离实测 26.267px。行高量过的段落带着自己那一截小数（Paragraph.lineCarry）
+                           按行补回去。补的位置正是原来那个 +0.5f 网格经验值的位置——两者是同一件事的
+                           两种写法，有实测值就换掉它，绝不叠加。没量过的字体照旧走 +0.5f。 */
+                        if (carry != 0f) heights[i] += carry;
+                        else if (gridAdvance) heights[i] += 0.5f;
                     }
                     if (heights.length == 0)
                         heights = new float[]{Math.max(1, PageGeometry.points(DocxTextLayout.defaultFontSizePoints(p)))};
                     PageBreaker.Item item = new PageBreaker.Item(p.index, heights);
+                    item.hang = hang;
                     int gridPitch = sectionGrid(document, sectionIndex);
                     item.before = PageGeometry.twips(effectiveSpacingTwips(p, true, gridPitch));
                     item.after = p.images.isEmpty()

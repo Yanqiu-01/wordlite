@@ -26,6 +26,17 @@ public final class FontScriptMetrics {
     public float scale(boolean superscript) {
         return superscript ? superscriptScale : subscriptScale;
     }
+    /**
+     * 只换行高比值，上下标的缩放/偏移与上下伸占比原样保留：Word 的实测行高是一条总高，
+     * 把它按原来的比例拆回上伸与下伸，是为了让基线位置跟改动前一致——动了基线就会动到
+     * 每行的视觉位置，那是另一件事，要动就得另外拿真值。
+     */
+    FontScriptMetrics withLineHeight(float ratioEm) {
+        if (!(ratioEm > 0f) || !(lineHeightRatio > 0f)) return this;
+        float fraction = ascentFraction;
+        return new FontScriptMetrics(superscriptScale, superscriptOffset, subscriptScale, subscriptOffset,
+                ratioEm * fraction, ratioEm * (1f - fraction));
+    }
 
     public float offset(boolean superscript) {
         return superscript ? -superscriptOffset : subscriptOffset;
