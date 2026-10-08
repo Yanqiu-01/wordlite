@@ -7,6 +7,10 @@ repositories {
     maven { url 'https://dl.google.com/dl/android/maven2/' }
 }
 
+// 被测的 app 类默认还是共享编译目录；-PappClasses=<目录> 可以指到自己那份私有编译结果，
+// 这样量自己的改动时不必去覆盖别人正在编译的那一份。
+def appClasses = providers.gradleProperty('appClasses').getOrElse('../../artifacts/build/classes')
+
 // Windows javac defaults to the platform codepage; every Chinese literal in app/ and tests/ is UTF-8.
 tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
 
@@ -15,7 +19,7 @@ configurations {
 }
 
 dependencies {
-    testImplementation files('../../artifacts/build/classes', '../../tools/android-35.jar')
+    testImplementation files(appClasses, '../../tools/android-35.jar')
     testImplementation 'junit:junit:4.13.2'
     testImplementation('org.robolectric:robolectric:4.14.1') {
         exclude group: 'androidx.test', module: 'monitor'

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Standalone ribbon-ergonomics probe. Separate applicationId so it never replaces the installed
+     Word Lite; built by tools/build-uiaudit-probe.ps1, purpose in tools/device-probe/RibbonErgonomicsActivity.java -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.rikkahub.wordlite.uiaudit"
+    android:versionCode="1"
+    android:versionName="probe">
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="29" />
+    <application android:label="WordLiteUiAudit" android:debuggable="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name="com.rikkahub.wordlite.RibbonErgonomicsActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- 第二台：竖向 ScrollView 的"看不见 vs 没有"分辨器，跑法见 tools/ui-visibility-oracle.ps1 -->
+        <activity android:name="com.rikkahub.wordlite.ScrollCensusActivity" android:exported="true" />
+    </application>
+</manifest>

@@ -55,6 +55,37 @@ public class EditorWorkflowTest {
         assertTrue(styleAt(p, 1).italic); assertTrue(styleAt(p, 1).bold);
         assertTrue(styleAt(p, 3).italic); assertFalse(styleAt(p, 3).bold);
     }
+    /**
+     * ribbon 的段落状态跟着正在编辑的那一段走，编辑行上的撤销/重做是真接上活的：
+     * 键盘抬起来的那一会儿，ribbon 那一排要横滑才够得着，撤销重做就摆在编辑行上。
+     */
+    @Test public void ribbonStateFollowsTheParagraphAndHeaderUndoRedoAreWired() throws Exception {
+        EditorActivity activity = editor();
+        DocxDocument document = ReflectionHelpers.getField(activity, "document");
+        DocxDocument.ParagraphBlock p = document.paragraphs.get(0);
+        p.text = "正文"; p.runs.clear();
+        ReflectionHelpers.callInstanceMethod(activity, "openParagraphEditor",
+                ReflectionHelpers.ClassParameter.from(int.class, p.index),
+                ReflectionHelpers.ClassParameter.from(int.class, 0));
+        RibbonUI ribbon = ReflectionHelpers.getField(activity, "ribbon");
+        ribbon.select("开始");
+        assertFalse("这一段没加粗，B 不许亮",
+                ((android.widget.TextView) ribbon.findViewWithTag("command-bold")).isActivated());
+        p.format.alignment = 3;
+        ReflectionHelpers.callInstanceMethod(activity, "updateRibbonState");
+        assertTrue("这一段是两端对齐的，两端就该亮着",
+                ((android.widget.TextView) ribbon.findViewWithTag("command-justify")).isActivated());
+        assertNotNull("编辑行上要有撤销", activity.getWindow().getDecorView().findViewWithTag("edit-undo"));
+        assertNotNull("编辑行上要有重做", activity.getWindow().getDecorView().findViewWithTag("edit-redo"));
+        command(activity, "bold");
+        assertTrue("加粗之后 B 亮着",
+                ((android.widget.TextView) ribbon.findViewWithTag("command-bold")).isActivated());
+        ((android.widget.TextView) activity.getWindow().getDecorView().findViewWithTag("edit-undo")).performClick();
+        assertFalse("编辑行上的撤销按下去真的撤销了", styleAt(p, 0).bold);
+        assertFalse("撤销完 B 也要跟着灭",
+                ((android.widget.TextView) ribbon.findViewWithTag("command-bold")).isActivated());
+    }
+
     private void command(EditorActivity activity, String command) {
         ReflectionHelpers.callInstanceMethod(activity, "ribbonCommand", ReflectionHelpers.ClassParameter.from(String.class, command));
     }
