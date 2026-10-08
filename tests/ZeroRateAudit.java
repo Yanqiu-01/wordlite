@@ -264,10 +264,16 @@ public final class ZeroRateAudit {
             line("桩收到的请求", requests);
             check(requests.size() > 0, "D：请求确实发出去了，不是没问");
             check(d.candidates.isEmpty(), "D：候选 0 篇");
-            check(d.retrievalIncomplete == false,
-                    "D：HTTP 200 + 零条目进不了 everyConnectorFailed（它只看 skipped），retrievalIncomplete 仍为 false");
-            check(!ReportStore.STATE_UNFINISHED.equals(state(d)),
-                    "D：报告中心不进\"未完成查重\"那一档，总相似度比按百分比照印");
+            /* 2.2.0：这一档不再是"完整检索 + 0.00%"。HTTP 200 + 零条目在 everyConnectorFailed 里
+            仍然不算失败（它只看 skipped），但可比正文 0 篇本身就是未完成：百分比不许出口。 */
+            check(d.retrievalIncomplete,
+                    "D：HTTP 200 + 零条目骗得过 everyConnectorFailed，骗不过可比正文 0 篇这一档");
+            check(ReportStore.STATE_UNFINISHED.equals(state(d))
+                    && !ReportStore.recordFor(d, "audit.docx").metricsValid(),
+                    "D：报告中心进未完成查重那一档，总相似度比不印");
+            check(d.overallRate == 0d && d.retrievalReason != null
+                    && d.retrievalReason.contains("可比正文 0 篇"),
+                    "D：账本仍是 0.00%（分子真的是 0），但理由必须写明是可比正文 0 篇");
             check(d.overallRate == 0d, "D：这一轮实测就是 0.00%");
 
             mode = "error";
@@ -286,10 +292,11 @@ public final class ZeroRateAudit {
             DuplicateEngine.Report m = scan(new TextCorpus(), true, engines(ALL_ENGINES));
             dump("E2 联网：只有 1 个源答话（200 + 零条目），其余 8 个源全部 HTTP 500", m, 0);
             line("桩收到的请求", requests);
-            check(m.retrievalIncomplete == false,
-                    "E2：只要有一个源回了 200，everyConnectorFailed 就不成立——8 个源的失败换不来\"未完成查重\"");
-            check(!ReportStore.STATE_UNFINISHED.equals(state(m)),
-                    "E2：状态不是未完成，比率照印给用户");
+            check(m.retrievalIncomplete,
+                    "E2：1 个源答话不再等于这一轮成立——可比正文 0 篇照样是未完成");
+            check(ReportStore.STATE_UNFINISHED.equals(state(m))
+                    && !ReportStore.recordFor(m, "audit.docx").metricsValid(),
+                    "E2：状态是未完成查重，比率不印给用户");
             check(m.overallRate == 0d && m.candidates.isEmpty(), "E2：实测 0.00%，候选 0 篇");
 
             mode = "offtopic";
@@ -299,8 +306,9 @@ public final class ZeroRateAudit {
             line("桩收到的请求", requests);
             check(f.unrankedCandidates > 0 && f.comparableCandidates == 0,
                     "F：候选被零分闸门整条挡住，一篇都没进语料（report.candidates 是闸门之后那份，所以为 0）");
-            check(f.overallRate == 0d && !f.retrievalIncomplete,
-                    "F：语料里没有任何可比对象，率仍是 0.00%，且不被标成未完成");
+            check(f.overallRate == 0d && f.retrievalIncomplete
+                    && f.retrievalReason.contains("零共同词"),
+                    "F：可比对象一篇都没进语料，0.00% 被标成未完成，不许读成这篇干净");
 
             mode = "ontopic";
             requests.clear();

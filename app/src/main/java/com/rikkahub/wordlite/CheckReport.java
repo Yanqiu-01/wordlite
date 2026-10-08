@@ -60,7 +60,7 @@ public final class CheckReport {
         String reason = report.retrievalReason == null ? "" : report.retrievalReason.trim();
         out.append("<h2>未完成查重</h2><p><strong>")
                 .append(escape(reason.isEmpty() ? "本次没有可比对的文献来源" : reason)).append("</strong></p>")
-                .append("<p>本次没有取回任何可比对的文献，相似度类指标无法成立，只有 AIGC 倾向是本机计算的结果。</p>");
+                .append("<p>本次没有可比对的文献材料，相似度类指标无法成立；只有 AIGC 倾向是本机计算的结果。</p>");
         // 这一张表里一个比率都没有（未完成查重不成立任何比率），列名当然也不能叫"比例"。
         out.append("<h2>指标</h2><table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>");
         aigcMetric(out, report);

@@ -41,6 +41,10 @@ public final class DuplicateEngine {
     static final String GAP_CANCELLED = "检索已取消，没有联网取候选文献";
     static final String GAP_NO_SOURCE = "没有可用的检索源，本次没有执行联网检索";
     static final String GAP_EMPTY_LIBRARY = "未启用联网检索，自建库为空，没有可比对的语料";
+    /* 问到了条目不等于问到了可比正文（2.2.0）。真机最常落的正是这一档：知网、万方、维普只回摘要，
+       摘要里没有被抄的那段正文，判据一句也认不出，报告却照印 0.00%、状态还是"完整检索"。
+       这一条把那一档降级成未完成查重：判据与阈值一个字没改，改的是"没得比"不许冒充"没重复"。 */
+    static final String GAP_NO_COMPARABLE = "没有任何可比正文，相似度量不到";
     /** 「机器腔均分」那一栏的名字：它是一条 0-100 的分而不是占比，所以不许挂"比例"两个字。 */
     public static final String AIGC_SCORE_LABEL = "机器腔均分";
     private static final String AIGC_TIER_INSUFFICIENT = "样本不足";
@@ -110,6 +114,15 @@ public final class DuplicateEngine {
         public boolean retrievalPartial;
         /** 与注记同句的部分完成原因；完整检索为空串。 */
         public String retrievalPartialReason = "";
+        /** 检索之前自建库里有几篇材料；检索回来的另计 comparableCandidates。 */
+        public int localDocuments;
+        /**
+         * 有没有资格印一个百分比。三态只说了检索做没做，没说比对对象存不存在：
+         * comparableCandidates=0 且自建库也空时，0.00% 不是"没有重复"，是"没得比"。
+         */
+        public boolean hasComparableEvidence() {
+            return !hits.isEmpty() || comparableCandidates > 0 || localDocuments > 0;
+        }
     }
 
     private DuplicateEngine() { }
@@ -122,6 +135,9 @@ public final class DuplicateEngine {
         report.sourceText = text;
         TextCorpus library = corpus == null ? new TextCorpus() : corpus;
         report.baseline = library;
+        /* 检索之前语料侧有几篇，是"有没有得比"的另一半：只数 comparableCandidates 会把离线只跟
+           自建库比的那种正常场合误判成没得比。 */
+        report.localDocuments = library.sourceCount();
         PaperSources.Limits safe = limits == null ? new PaperSources.Limits() : limits;
         ArrayList<String> wanted = new ArrayList<String>();
         boolean aborted = false;
@@ -178,9 +194,37 @@ public final class DuplicateEngine {
             return;
         }
         if (engines.isEmpty()) { gap(report, GAP_NO_SOURCE); return; }
+        /* 可比正文这一档排在"有没有取回候选"之前判：取回 36 条而 34 条只有题录、2 条与检索词零共同词，
+           等于一篇可比正文都没进来，这一轮不许算"完整检索 + 0.00%"。取消另有一句话，让给它。 */
+        if (!report.hasComparableEvidence() && !cancelled(cancellation)) {
+            gap(report, noComparableMaterial(report, true));
+            return;
+        }
         if (!report.candidates.isEmpty()) return;
         if (cancelled(cancellation)) gap(report, GAP_CANCELLED);
         else if (aborted) gap(report, GAP_NOTHING_RETRIEVED);
+    }
+    /**
+     * 为什么这一轮的相似度量不到，写成一句能进报告的话。
+     *
+     * 措辞里必须带着数字与下一步：只说"未完成"等于把球踢回给用户，而这一幕的成因
+     * （只回摘要、窗口太少、自建库空）是检索设置里就能改的。
+     */
+    static String noComparableMaterial(Report report, boolean useWeb) {
+        if (!useWeb)
+            return "自建库有 " + report.localDocuments + " 篇材料，但没有一句能用于比对，"
+                    + GAP_NO_COMPARABLE + "：导入了原文还是量不到，多半是那些文件读不出正文";
+        StringBuilder reason = new StringBuilder();
+        reason.append("联网检索取回 ").append(report.candidates.size()).append(" 条候选，可比正文 0 篇")
+                .append("（只有题录 ").append(report.recordOnlyCandidates).append(" 篇，与检索词零共同词 ")
+                .append(report.unrankedCandidates).append(" 篇）");
+        if (report.windowsRetrieved < report.windowsPlanned)
+            reason.append("，检索也只跑了 ").append(report.windowsRetrieved)
+                    .append("/").append(report.windowsPlanned).append(" 个窗口");
+        reason.append("，").append(GAP_NO_COMPARABLE)
+                .append("：把检索设置的窗口数调大、允许开放获取全文抓取，"
+                        + "或先把疑似来源的原文导入自建库再查一次");
+        return reason.toString();
     }
     /** The first named gap wins, so the sharpest reason is the one search() found. */
     private static void gap(Report report, String reason) {
