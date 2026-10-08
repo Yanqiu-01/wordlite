@@ -353,6 +353,96 @@ public final class WordLineHeightRegression {
         }
     }
 
+    /**
+     * 本轮这一族的行高：带 w:line + lineRule=auto + snapToGrid=false，且撑起行高那张脸在 Word 实测表里。
+     * 真值与前后数字见 docs/layout-parity-target.md 第 17 节：这一族在全篇 140 行中文 + 68 行纯西文，
+     * 之前每行 23px（那 23px 是 Times 的 1.1074 em 经两步取整垫出来的，宋体表里只给 20px），
+     * Word 是 26.267px（中文）/ 23.533px（纯西文）。
+     */
+    private static void autoNoGridFamilyBillsTheMeasuredFace() {
+        boolean measuredFamilyOn = WordLineHeights.MEASURED_AUTO_NO_GRID;
+        WordLineHeights.MEASURED_AUTO_NO_GRID = true;   // 下面这堆断言量的是"打开这一族"的样子
+        try {
+        DocxDocument.ParagraphBlock cjk = family("宋体", "Times New Roman", "auto", 300, false, 0, "",
+                new Object[]{"接头性能随连接时间变化。", "宋体", "Times New Roman", 12, false});
+        close(WordLineHeights.measuredFamilyPt(cjk, TABLE, "宋体"), 12d * SONG_EM, 0.002d,
+                "本轮这一族按 Word 实测 em 给行高：12pt 宋体 = 15.7602pt（字体表口径只给 12.0）");
+        close(WordLineHeights.advancePx(WordLineHeights.measuredFamilyPt(cjk, TABLE, "宋体"), 300, 1f),
+                WORD_CJK_PX, 0.02d, "同一族的分页行距 = Word 实测的 26.267px");
+        check(Math.round(WordLineHeights.measuredFamilyPt(cjk, TABLE, "宋体") * 4d / 3d) == 21
+                        && Math.round(21f * 300f / 240f) == 26,
+                "画出来的行盒：singlePx=21 -> w:line=300 得 26px，与 26.267px 只差分页补的那 0.267px");
+        check(WordLineHeights.measuredFamilyPt(cjk, REAL, "宋体")
+                        == WordLineHeights.measuredFamilyPt(cjk, TABLE, "宋体"),
+                "同一族在两种字体度量口径下给同一个数：实测 em 由 WordLineHeights 表说了算，不随字库表漂");
+
+        DocxDocument.ParagraphBlock latin = family("宋体", "Times New Roman", "auto", 300, false, 0, "",
+                new Object[]{"[12] Kim T, Su W.", "宋体", "Times New Roman", 12, false});
+        close(WordLineHeights.measuredFamilyPt(latin, TABLE, "宋体"), 12d * TIMES_EM, 0.002d,
+                "同一族里的纯西文行按西文脸的实测 em：14.1198pt -> 23.533px，不被中文脸抬走");
+
+        DocxDocument.ParagraphBlock mixed = family("宋体", "Times New Roman", "auto", 300, false, 0, "",
+                new Object[]{"接头性能随", "宋体", "Times New Roman", 12, false},
+                new Object[]{"Cu/Cu", "宋体", "Times New Roman", 12, false},
+                new Object[]{"界面反应明显。", "宋体", "Times New Roman", 12, false});
+        close(WordLineHeights.measuredFamilyPt(mixed, TABLE, "宋体"), 12d * SONG_EM, 0.002d,
+                "一段里有中文笔也有西文笔：按字符挑脸，中文笔在段里就轮到宋体实测 em");
+
+        DocxDocument.ParagraphBlock snapped = family("宋体", "Times New Roman", "auto", 300, true, 0, "",
+                new Object[]{"接头性能随连接时间变化。", "宋体", "Times New Roman", 12, false});
+        check(WordLineHeights.measuredFamilyPt(snapped, TABLE, "宋体") == 0f,
+                "snapToGrid=true 不在本轮这一族：那 268 行 25.5px 由文档网格垫着，另算一轮");
+        DocxDocument.ParagraphBlock toc = family("宋体", "Times New Roman", "auto", 300, false,
+                9000, "dot", new Object[]{"1.1 课题背景", "宋体", "Times New Roman", 12, false});
+        check(WordLineHeights.measuredFamilyPt(toc, TABLE, "宋体") == 0f,
+                "目录点线条目不在本轮这一族：Word 把它们钉在节网格上（同 Spacing 里的 tocLeaderGrid）");
+        check(WordLineHeights.measuredFamilyPt(family("宋体", "Times New Roman", "exact", 300, false, 0, "",
+                new Object[]{"正文。", "宋体", "Times New Roman", 12, false}), TABLE, "宋体") == 0f,
+                "lineRule=exact 的行高由 twips 定死，不参与实测 em");
+        check(WordLineHeights.measuredFamilyPt(family("宋体", "Times New Roman", "atLeast", 300, false, 0, "",
+                new Object[]{"正文。", "宋体", "Times New Roman", 12, false}), TABLE, "宋体") == 0f,
+                "lineRule=atLeast 同样不参与：三种 lineRule 里本轮只动 auto");
+        check(WordLineHeights.measuredFamilyPt(family("宋体", "Times New Roman", "auto", -1, false, 0, "",
+                new Object[]{"正文。", "宋体", "Times New Roman", 12, false}), TABLE, "宋体") == 0f,
+                "没有 w:line 的段不参与（这一族的真值只在 w:line=300 上量过）");
+        DocxDocument.ParagraphBlock hei = family("黑体", "黑体", "auto", 300, false, 0, "",
+                new Object[]{"结果与讨论", "黑体", "黑体", 12, false});
+        check(WordLineHeights.measuredFamilyPt(hei, TABLE, "黑体") == 0f,
+                "撑行高的脸没量过就不给数：黑体照旧走字体表，不拿宋体的 1.31335 凑");
+
+        boolean savedFamily = WordLineHeights.MEASURED_AUTO_NO_GRID;
+        try {
+            WordLineHeights.MEASURED_AUTO_NO_GRID = false;
+            check(WordLineHeights.measuredFamilyPt(cjk, TABLE, "宋体") == 0f,
+                    "关掉这一族的开关：同一句正文回到字体表口径，一个字节都不改");
+            close(WordLineHeights.tallest(cjk, TABLE, "宋体").pt, 12d * 1.1074d, 0.002d,
+                    "关掉之后仍然是 Times 的 1.1074 em 垫出 23px（docs 第 17.3 节那笔钱）");
+        } finally {
+            WordLineHeights.MEASURED_AUTO_NO_GRID = savedFamily;
+        }
+        } finally {
+            WordLineHeights.MEASURED_AUTO_NO_GRID = measuredFamilyOn;
+        }
+        // 出厂状态：这一族关着。关掉的理由是真机对账量出来的，不是猜。
+        check(!WordLineHeights.MEASURED_AUTO_NO_GRID,
+                "MEASURED_AUTO_NO_GRID 出厂为 false：这一族单独打开时行高三条过线（中位 0.000px、每页 0.00 行、p90 0.934px），"
+                        + " 但错页段 7 到 70、页数 28 到 29（真机对账 tag lh-family1，docs/layout-parity-target.md 第 18 节）");
+    }
+
+    /** 段落格式可设的造段助手：{文本, 中文字体, 西文字体, 字号pt, 是否上标}。 */
+    private static DocxDocument.ParagraphBlock family(String baseEA, String baseLatin, String lineRule,
+                                                      int lineTwips, boolean snapToGrid,
+                                                      int rightTabTwips, String tabLeader, Object[]... runs) {
+        DocxDocument.ParagraphBlock block = paragraph(baseEA, baseLatin, runs);
+        block.format.lineSpacingTwips = lineTwips;
+        block.format.lineRule = lineRule;
+        block.format.snapToGrid = snapToGrid;
+        block.format.rightTabTwips = rightTabTwips;
+        block.format.tabLeader = tabLeader;
+        return block;
+    }
+
+
     public static void main(String[] args) {
         tableHoldsOnlyMeasuredFaces();
         advanceIsOneStepFractional();
@@ -360,6 +450,7 @@ public final class WordLineHeightRegression {
         onlyMeasuredFacesCarry();
         faceFollowsTheCharactersOnTheLine();
         characterFaceRuleTravelsWithTheSwitch();
+        autoNoGridFamilyBillsTheMeasuredFace();
         pageBudgetCountsBaselinesNotLineBoxes();
         overrideKeepsEverythingElse();
         System.out.println("SUMMARY " + checks + " line-height assertions passed (Word truth from "

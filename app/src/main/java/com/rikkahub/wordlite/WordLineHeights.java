@@ -33,6 +33,23 @@ final class WordLineHeights {
      * 等那处多算被单独定出来并修掉再开；不许把比值调小去凑页码。
      */
     static boolean APPLIED_TO_LAYOUT = false;
+
+    /**
+     * 本轮放开的那一族：带 w:line、lineRule=auto、不吃文档网格（snapToGrid=false）的段落，行高按
+     * Word 实测 em 算（`measuredFamilyPt`）。这一族在全篇是 140 行 12pt / w:line=300 的中文正文加
+     * 68 行纯西文参考文献，现在每行 23px、Word 26.267/23.533px（`docs/layout-parity-target.md` 第 17.3 节）。
+     *
+     * 为什么只放这一族：`snapToGrid=true` 那 268 行现在 25.5px，是被文档网格垫起来的（格距 24px + 1px
+     * 的经验值），把它一起放到 26.267px 要给全篇再加 205.6px；两族一起下去就是第 13 节 cand-lh1 那次
+     * 28 页变 29 页。所以一次一族，先看这一族对六条的影响。
+     *
+     * 关掉它就退回 2.1.0 的取法（无条件取 max(中西) + 两步取整），排版读数一个字节都不改。
+     *
+     * 出厂为 false 是真机对账定的（`docs/layout-parity-target.md` 第 18 节，tag `lh-family1`）：这一族打开之后
+     * 逐行行高中位误差 -0.767px 变 0.000px、p90 2.533px 变 0.934px、每页累计 0.79 行变 0.00 行，可错页段
+     * 7 → 70（全 +1 晚一页）、页数 28 → 29，只花了 +493.6px = 0.57 个版心页。等那笔反向多算定出来再开。
+     */
+    static boolean MEASURED_AUTO_NO_GRID = false;
     /** 键取 DocxFontAssets 的资源路径：决定行高的是真正落笔那张脸，不是文档里写的字体名。 */
     private static final LinkedHashMap<String, Float> EM = new LinkedHashMap<String, Float>();
     static {
@@ -106,6 +123,17 @@ final class WordLineHeights {
      * 结果拿 Times 的实测小数去补一段没量过的黑体——那是凭空造出来的行高。
      */
     static Height tallest(DocxDocument.ParagraphBlock p, Metrics metrics, String fallbackFamily) {
+        return tallest(p, metrics, fallbackFamily, APPLIED_TO_LAYOUT, false);
+    }
+
+    /**
+     * 同一份"取最高那一张脸"的扫描，两种口径各一个开关：
+     *   byChar=false —— 出厂取法：无条件取中西两脸里比值较大的那一张（与 2.1.0 一字不差）。
+     *   byChar=true  —— Word 的取法：这一笔里出现了中日韩文字或全角标点才轮到中文脸。
+     *   measured=true —— 比值换成 Word 实测 em（没量过的脸退回字体表比值），于是选脸与行高出自同一串数。
+     */
+    static Height tallest(DocxDocument.ParagraphBlock p, Metrics metrics, String fallbackFamily,
+                          boolean byChar, boolean measured) {
         int baseHalf = p != null && p.baseRunStyle != null ? p.baseRunStyle.fontSizeHalfPoints : -1;
         String baseEA = p != null && p.baseRunStyle != null ? p.baseRunStyle.eastAsiaFontFamily : null;
         String baseLatin = p == null || p.baseRunStyle == null ? null
@@ -122,10 +150,15 @@ final class WordLineHeights {
                 String latin = run.style.asciiFontFamily != null ? run.style.asciiFontFamily : baseLatin;
                 FontScriptMetrics mEA = metrics.forFamily(ea);
                 FontScriptMetrics mLatin = metrics.forFamily(latin);
+                /* measured=true 时把比值换成 Word 实测 em（没量过的脸退回字体表比值）。选脸和出行高
+                   必须用同一串数：否则"谁撑起行高"按字体表算、"行高多少"按实测算，等于替没量过的脸
+                   造出一个行高——tallest 头上那条注释说的是同一件事。 */
+                float rEA = measured ? measuredRatio(ea, mEA) : mEA.lineHeightRatio;
+                float rLatin = measured ? measuredRatio(latin, mLatin) : mLatin.lineHeightRatio;
                 String face;
                 float ratio;
                 FontScriptMetrics scriptMetrics;
-                if (APPLIED_TO_LAYOUT) {
+                if (byChar) {
                     /* Word 按字符挑脸：这一笔里出现了中日韩文字或全角标点才轮到中文脸，只有西文字母、
                        数字和半角符号才轮到西文脸。无条件取 max(中西) 等于让没参与这一行的中文脸替纯西文行
                        定行高：真机对账量到 19 段纯西文参考文献被抬到 26.267px，Word 是 23.533px，每行多算
@@ -135,14 +168,14 @@ final class WordLineHeights {
                     boolean eaSide = (kinds & EAST_ASIAN) != 0;
                     boolean latinSide = (kinds & LATIN) != 0;
                     if (eaSide && ea != null
-                            && (!latinSide || mEA.lineHeightRatio >= mLatin.lineHeightRatio)) {
+                            && (!latinSide || rEA >= rLatin)) {
                         face = ea;
-                        ratio = mEA.lineHeightRatio;
+                        ratio = rEA;
                     } else {
                         // 只剩一个宽度歧义的符号（— … “ ” ·）也按西文脸算：全角标点 、。「」 在
                         // scriptsIn 里已经归到中文脸，所以中文行不会因为这条矮下去。
                         face = latin != null ? latin : ea;
-                        ratio = latin != null ? mLatin.lineHeightRatio : mEA.lineHeightRatio;
+                        ratio = latin != null ? rLatin : rEA;
                     }
                     scriptMetrics = face == ea ? mEA : mLatin;
                 } else {
@@ -151,9 +184,9 @@ final class WordLineHeights {
                        HEAD 一直是靠西文脸的 1.1074 em 把中文行垫到 23px；先按字符选脸会把它们垫到 20px，
                        离 Word 的 25.8px 更远——snap 段还有网格地板兜底，170 段非 snap 的没有。所以这条改动
                        与实测行高同进同退，不单独开。上下标的折算脸也沿用原取法，保持逐字节一致。 */
-                    boolean eastAsiaWins = mEA.lineHeightRatio >= mLatin.lineHeightRatio;
+                    boolean eastAsiaWins = rEA >= rLatin;
                     face = eastAsiaWins ? ea : latin;
-                    ratio = eastAsiaWins ? mEA.lineHeightRatio : mLatin.lineHeightRatio;
+                    ratio = eastAsiaWins ? rEA : rLatin;
                     scriptMetrics = mLatin.lineHeightRatio >= mEA.lineHeightRatio ? mLatin : mEA;
                 }
                 float runH = half / 2f * ratio;
@@ -171,6 +204,38 @@ final class WordLineHeights {
             return new Height((baseHalf > 0 ? baseHalf / 2f : 11f) * only.lineHeightRatio, winner);
         }
         return new Height(maxH, winner);
+    }
+
+    /** 这一段能不能带 Word 实测的小数行距：只有撑起行高那张脸在实测表里才行。 */
+    /**
+     * 本轮这一族（`MEASURED_AUTO_NO_GRID`）的行高：按 Word 实测 em 算出的单一行高（pt）。
+     * 返回 0 表示这一段不在这族里，或撑起行高那张脸没量过——调用方必须退回字体表口径，不许猜。
+     */
+    static float measuredFamilyPt(DocxDocument.ParagraphBlock p, Metrics metrics, String fallbackFamily) {
+        if (!autoNoGridFamily(p)) return 0f;
+        Height h = tallest(p, metrics, fallbackFamily, true, true);
+        return h.family != null && ratioFor(DocxFontAssets.pathFor(h.family)) != null ? h.pt : 0f;
+    }
+
+    /**
+     * 这一族只按段落格式判定，与稿子内容无关，好复述也好复采：
+     *   w:line 有值、lineRule 是 auto（exact/atLeast 的行高由 twips 说了算，另算）、
+     *   snapToGrid=false（snap=true 那族被文档网格垫着，本轮不动）、
+     *   不是目录那种带右对齐点线的条目——那种条目 Word 把它们钉在节网格上，
+     *   `DocxTextLayout.Spacing` 里同一条 tocLeaderGrid 规则，也不在本轮。
+     */
+    static boolean autoNoGridFamily(DocxDocument.ParagraphBlock p) {
+        if (!MEASURED_AUTO_NO_GRID || p == null || p.format == null) return false;
+        DocxDocument.ParagraphFormat f = p.format;
+        if (f.snapToGrid || f.lineSpacingTwips <= 0) return false;
+        if (f.lineRule != null && f.lineRule.length() > 0 && !"auto".equalsIgnoreCase(f.lineRule)) return false;
+        return !(f.rightTabTwips > 0 && f.tabLeader != null && f.tabLeader.length() > 0);
+    }
+
+    /** 这张脸在实测表里就用实测 em，不在就用字体表推出来的比值；不拿邻近字体的数凑。 */
+    private static float measuredRatio(String family, FontScriptMetrics tableRatio) {
+        Float em = ratioFor(DocxFontAssets.pathFor(family));
+        return em != null ? em.floatValue() : tableRatio.lineHeightRatio;
     }
 
     /** 这一段能不能带 Word 实测的小数行距：只有撑起行高那张脸在实测表里才行。 */

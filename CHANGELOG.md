@@ -13,6 +13,18 @@
 
 
 
+## 未发布（排版对账：把 `snapToGrid=false` 那一族的行高抬到 Word 的实测值）
+
+**一句话：行高这一族单独打开后，逐行行高误差中位 -0.767px 变 0.000px、每页累计 0.79 行变 0.00 行（这两条第一次过线），但段落页归属从 7 段错页退到 70 段、页数 28 变 29，所以开关关掉留在代码里；顺带把"按字库 ascent+descent 算行高"这条路用度量表实测否掉了。**
+
+- 新增 `tools/parity-six.ps1`：第 0 节那六条一次跑完（真机采样、行高探针、页归属、换行点、右边界、逐行行高），只调已有脚本不重新定义量法；Word 真值走缓存，不重开 Word 会话（Word 只允许一个会话）。每一轮的输出带 `head_sha` 与 `lines-all.tsv` 的 sha，对不上就作废。
+- 行高口径（`WordLineHeights.MEASURED_AUTO_NO_GRID`，出厂 `false`）：带 `w:line` + `lineRule=auto` + `snapToGrid=false` 的段落，且撑起这一段行高那张脸在 Word 实测表里（宋体 1.31335 em、Times 1.17665 em），行高就按实测 em 一步算成小数（`measuredFamilyPt`），画出来的行盒 23px 变 26px、分页再补 0.267px 的小数。`snapToGrid=true` 那 268 行、目录点线行、`exact` / `atLeast`、没量过的脸（黑体等）不参与。
+- 打开后的真机对账（同一篇 `tests/samples/input-liu.docx`，CDY-AN90，改完重打包并 `adb install -r` 再采）：**涨**——逐行行高误差中位 -0.767px → 0.000px（n=91）、`|误差|` p90 2.533px → 0.934px、每页累计 0.79 行 → 0.00 行、目标队列每行 23.0px（差 -3.267）→ 26.2725px（差 +0.006，Word 26.267px）、纯西文参考文献行 23.0px → 23.54px（Word 23.533px）；**退**——段落页归属 7 段错页 → **70 段**（exact 96.6% → 66.0%，全部是晚一页，首个错页段从 para 121 变 para 163），总页数 28 → **29**（Word 28）。这一族全篇只多算 +493.6px（0.57 个版心页）就换来这个退步，原因是 Word 的页尾本来只剩 2.1~5.7px（第 9 节实测），我们另一处每页多占的钱必须同时定出来，所以这一族关掉，逐页高度对平排在下一步。
+- 关掉后与改前逐字节相同：`lines-all.tsv`、`pages.tsv` 的 sha 与改前基线一字不差（`D9822E2C3396D6EC` / `921A8FAB4D3D09F8`），六条读数回到 `-0.767 / 2.533 / 0.79 行 / 62.4% / 0 超`。
+- 否掉一条走不通的路：手机字库换成 Windows 原字库之后，"行高取本脸字体的 ascent+descent 乘行距"仍然算不出 Word 的数。本机 Word 真正用的 `simsun.ttc`（与打包的 `song.ttc` 同一套度量）win=1.000 em、hhea=1.000 em、hhea+lineGap=1.1406 em，而 Word 的中文行高反推是 1.3134 em；Times 表里 1.1074 / 1.1499 em，Word 要 1.1767 em。字库同源也推不出来——行高只能按脸取 Word 实测值，测量命令写在 `docs/layout-parity-target.md` 第 17.2 节。
+- 顺手量清了一件事：`snapToGrid=false` 的中文行现在每行 23px，那 23px 是 **Times 的 1.1074 em** 经两步取整垫出来的，宋体自己那张表只给 20px。所以"改比值"改的其实是西文脸，先把脸选对才有意义。
+- 测试：`tests/WordLineHeightRegression.java` 行高断言 59 → 78 条，新增的覆盖这一族的四种排除条件（`snapToGrid=true`、目录点线行、`exact` / `atLeast`、没量过的脸）、纯西文行按西文脸实测 em、混排行按字符选脸、以及出厂值为 false 这条。`tools/test-host.ps1` 全绿。
+
 ## 2.3.0（`versionCode 45`）
 
 **一句话：目录的页码与点线在编辑视图、阅读视图也按 Word 的右对齐制表位排了；联网查重第一次真的抓回可比正文（0 篇 → 5–6 篇）；上下角标的行盒规则换成 Word 真值**
