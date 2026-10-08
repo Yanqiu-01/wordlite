@@ -113,6 +113,15 @@ public class MainActivity extends Activity {
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
         root.addView(title, matchWrap());
 
+        /* 版本号写在开屏这一眼能看到的地方。真机对账时被问过"手机上装的到底是哪一版"：以前应用
+           里没有一个角落说自己是什么版本，屏幕上看到的和仓库里编出来的对不上时谁也证不了谁。 */
+        String build = buildLine();
+        if (build.length() > 0) {
+            TextView version = text(build, 12, 0xFF8A938F);
+            version.setPadding(0, dp(4), 0, 0);
+            root.addView(version, matchWrap());
+        }
+
         Button open = actionButton("打开文档");
         open.setOnClickListener(v -> chooseDocument());
         LinearLayout.LayoutParams openParams = new LinearLayout.LayoutParams(-1, dp(54));
@@ -211,6 +220,19 @@ public class MainActivity extends Activity {
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         return layout;
+    }
+
+    /** 版本与构建号。取不到就留空——这一行只用来认装的是哪一版，不该为此崩。 */
+    private String buildLine() {
+        try {
+            android.content.pm.PackageInfo info = getPackageManager()
+                    .getPackageInfo(getPackageName(), 0);
+            String installed = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.CHINA)
+                    .format(new java.util.Date(info.lastUpdateTime));
+            return "版本 " + info.versionName + "（构建 " + info.versionCode + "）· 装于 " + installed;
+        } catch (Exception ignored) {
+            return "";
+        }
     }
 
     private TextView text(String value, float size, int color) {
