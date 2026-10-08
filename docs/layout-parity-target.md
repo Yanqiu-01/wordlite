@@ -18,7 +18,7 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 量不出来按没过算。这一节是验收线，谁改排版引擎都拿它复核；复核由常驻的排版对账子代理执行，
 每轮改动重跑一遍，结果贴回本文与 `docs/edge-parity-baseline.md`。
 
-| # | 指标 | 量法（真值来源） | HEAD 复采（tag `head898`，2026-10-09；engine head_sha `594c1a6`；与 tag `autospace1` 逐项一字不差，见第 22 节） | 验收线 |
+| # | 指标 | 量法（真值来源） | HEAD 复采（tag `revert-linear`，2026-10-09；engine head_sha `168fd1e`；与 tag `head898`、`autospace1` 逐项一字不差，见第 23.6 节） | 验收线 |
 | --- | --- | --- | --- | --- |
 | 1 | 段落页归属 | `tools/word-parity.ps1`（Word 28 页真值 `artifacts/word/pages.tsv`） | 7 段错页 / 206（exact 96.6%，页差全是 -1，首个 para 121；28/28 页） | exact >= 99%，错页 <= 2 段 |
 | 2 | 逐行行高误差中位 | `artifacts/agent-typeset/line-height-rows.ps1`（Word 相邻基线距离，COM） | -0.767 px（n=91，Word 26.267 px） | 绝对值 <= 0.10 px |
@@ -32,6 +32,12 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 本轮落到的 HEAD 是 tag `autospace1`（第 20 节）：`w:autoSpaceDE` / `w:autoSpaceDN` 的缺省从"没写=关"改成 Word 的"没写=开"，第 5 条 62.4% → 69.1%，其余五条一字不差（`pages.tsv` sha `921A8FAB4D3D09F8` 不变、右边界仍 0/32、`lines-all.tsv` sha `D9822E2C3396D6EC` → `AC44D355853F4616`）。
 
 再后一轮（第 21 节，U+207B 上下标单位那条线索）没有动引擎：量完确认这个字符两边用的是同一张随包 Times New Roman、advance 也一致（0.3384 em 对 Word 的 0.338 em），所以六个数与上一行完全相同，新增的只是量台 `tools/font-advance-audit.py`（逐字把 Word 导出 PDF 的脸/advance 与我们随包字库对账）。发版前又按最新 HEAD（engine head_sha `594c1a6`，含别人那笔字库装载改动）真机复采一次，六个数与三个指纹（`lines-all` / `pages.tsv` / 字体表）全部一字不差，见第 22 节。
+
+最近一轮（第 23 节）没有留下引擎改动：在真机应用进程里量死"每个字的 advance 被就近取整到整像素"这个缺陷之后，试过把度量那把 paint 换成线性度量
+`setLinearText(true)`（40 个 `m` 的行宽 480.00 → 497.81，正好等于 hmtx 精确和），真机复采是第 5 条
+69.1% → 64.8%、第 6 条 0/32 → 1/33，另外四条一项不动，于是把那 19 行整体退回原状，只把量台
+（`tools/build-metrics-probe.ps1`、`tools/device-probe/MetricsActivity.java`、`MetricsManifest.xml`）留在版本库里，
+下一版和"西文行的宽度多收"放在同一轮改。六个数因此仍是上表那一列。
 
 三条规矩：
 
@@ -909,3 +915,137 @@ CDY-AN90 / Android 10）
 - 相对 2.3.0 的净变化只有第 5 条 `62.4% → 69.1%`（`w:autoSpaceDE/DN` 缺省按 Word 当开，第 20 节），
   其余五条与页归属分布未动，行高没有单独去补（原因见第 19、20.3 节）。
 
+## 23. 线性度量（`setLinearText(true)`）：缺陷在真机应用进程里量死了，但单独上线六条退两条，本轮整体退回原状
+
+### 23.1 先把 21.4 那个问号关掉：整像素取整不是量具造成的
+
+量台：`tools/build-metrics-probe.ps1` 打一个独立包名 `com.rikkahub.wordlite.metrics` 的探针 APK，用 `am start`
+起一个真正的 zygote 应用进程（真 AssetManager、真随包字库、真屏幕密度），在里面跑
+`tools/device-probe/MetricsActivity.java`。它量的字符串和 `app_process` 那批探针一字不差，只为回答一件事：
+取整是量具的现象，还是装机应用的现象。
+
+命令：`pwsh tools/build-metrics-probe.ps1 -Serial EAMUT20528011355`（CDY-AN90 / Android 10 / API 29；
+读数留在 `artifacts/agent-layout-verify/metrics-probe-20261009.txt`）
+
+| 同一个串（随包 `fonts/times-new-roman.ttf`，12pt = 16.0 px 文档像素） | `app_process` 探针 | 真应用进程 |
+| --- | --- | --- |
+| `m` | 12.000 | 12.000 |
+| `m` x20 | 240.000 | 240.000 |
+| `WWWW` | 60.000 | 60.000 |
+| U+207B | 5.000 | 5.000 |
+| `中`（宋体） | 16.000 | 16.000 |
+| `Paint.getHinting()` | 1 | 1 |
+
+两边完全一致，所以**装在手机上、画在屏幕上的 Word Lite 断行时用的也是整像素 advance**——21.4 节留的
+"会不会只是探针环境如此"这个问号关掉：不是探针的锅。20.5 节归到"西文与数字 advance"那一档的 21 行
+按真缺陷查，但按 23.4 的顺序查，不能只把精度补上。
+
+### 23.2 修法是知道的：一把度量 paint、一个开关
+
+同一次读数，40 个 `m`。hmtx 精确和先从随包字库里自己算一遍：
+
+```text
+py -c "from fontTools.ttLib import TTFont; f=TTFont('app/src/main/assets/fonts/times-new-roman.ttf'); print(f['hmtx']['m'], f['head'].unitsPerEm)"
+→ (1593, 2048)，即 1593/2048 em = 0.77783 em = 12.4453125 px，x40 = 497.8125 px
+```
+
+Word 按这张脸的 hmtx 逐字相加收的就是 497.81 px。
+
+| 度量用的 paint | `measureText` | `StaticLayout.getLineWidth(0)`（断行真正用的数） |
+| --- | --- | --- |
+| 默认（anti+subpixel，hinting=1） | 12.000 / 字，240.000 / 20 字 | 480.000 |
+| 再 `setHinting(HINTING_OFF)` | 12.000 / 字，240.000 / 20 字 | **480.000（关掉 hinting 不动它）** |
+| 再 `setLinearText(true)` | 13.000 / 字，249.000 / 20 字 | **497.813 = hmtx 精确和** |
+
+两点：`hinting` 不是那个开关；`setLinearText(true)` 之后断行用的行宽正好等于 Word 按这张脸 hmtx 逐字相加的
+数（Word 侧 40 个 `m` = 497.81 px，与上面 497.8125 对得上）。改法一共 19 行：在 `DocxTextLayout.measure()`
+那把度量 `TextPaint` 上调一个新加的 `applyMeasuringFlags(paint)`，里面做
+`setFlags(getFlags() | Paint.LINEAR_TEXT_FLAG)` + `setLinearText(true)`；layout 复制这把 paint 的几处
+（span 度量、两端对齐拉伸）会跟着一起走。
+
+### 23.3 单独上线的实测：六条退两条（tag `linearmeas1`，engine head_sha `168fd1e`，layout_dirty=True）
+
+命令：`pwsh tools/parity-six.ps1 -Serial EAMUT20528011355 -Tag linearmeas1`。对比基准是"把那 19 行退回原状"
+之后再真机采一次的 tag `revert-linear`：同一台手机、同一份工作树源码，差别只有那 19 行。
+
+| # | 指标 | 原状 `revert-linear` | 加线性度量 `linearmeas1` |
+| --- | --- | --- | --- |
+| 1 | 段落页归属 | 7 段错页 / 206（exact 96.6%，首个 para 121，28/28 页） | 一样，没退 |
+| 2 | 逐行行高中位 | -0.767 px（n=91） | 一样 |
+| 3 | 逐行行高 p90 | 2.533 px | 一样 |
+| 4 | 每页累计高度 | 0.79 行 | 一样 |
+| 5 | 逐行换行点 | 114/165 = 69.1% | **107/165 = 64.8%（少 7 行对上，退 4.3 分）** |
+| 6 | 右边界不在版心 +/-1 px 的行数 | 0 / 32 | **1 / 33（退，样本也从 32 行变 33 行）** |
+
+指纹能对上才敢叫"一样"：`linearmeas1` 的 `lines-all.tsv` sha `4A0C912BD6AF324B`、`pages.tsv` sha
+`428FA8CA1BC23506`；原状那两次（`head898` 与 `revert-linear`）都是 `AC44D355853F4616` /
+`921A8FAB4D3D09F8`，两个 sha 一字不差。
+
+第 6 条那一行退在"短"而不是"超"：`artifacts/agent-layout-verify/linearmeas1/edge.tsv` 里页 18 blk153
+那一行 `our_right = 561.90`，比版心 566.93 短 5.03 px（Word 自己那一行 564.53，也短 2.40 px）。
+两个 tag 里都没有任何一行越过版心右界：`our_right` 最大 567.00，版心 566.9333，仍在 +/-1 px 内。
+样本从 32 变 33 是因为多出来的那一行我们的断点和 Word 对上了，才被算进两端对齐那一族。
+"线性度量之后有一行两端对齐没拉满"这件事本身要单独查（23.5 第 3 条）。
+
+分歧行按成因分档（`<tag>/parity/line-delta.tsv` 的 `cause` 列，两次样本都是 165 行）：
+
+| 成因 | 原状 | 加线性度量 |
+| --- | --- | --- |
+| 西文与数字字符宽度量差 | 21 | **26** |
+| 全角字宽与行尾余量取整 | 13 | 14 |
+| 上下标小字号 run 参与行宽计量 | 6 | 8 |
+| 长西文或数字串不可断（`w:wordWrap`） | 3 | 4 |
+| 中西文混排留白未计入（`autoSpaceDE/DN`） | 4 | **2** |
+| 首行缩进计量（`firstLineChars`） | 2 | 2 |
+| 行尾标点悬挂与行首标点禁则 | 2 | 2 |
+
+每页余量（末行基线到页底，`pwsh tools/page-fill-ledger.ps1 -Tag <tag>`，单位 px）：
+
+| 每页余量 C | Word | 原状 `revert-linear` | 加线性度量 `linearmeas1` |
+| --- | --- | --- | --- |
+| 最小 | 120.5 | 119.4 | 119.4 |
+| p25 | 137.9 | 133.9 | 133.9 |
+| 中位 | 155.0 | 162.4 | **156.9** |
+| 最大 | 859.0 | 936.9 | 936.9 |
+| 页差 dC 中位 | - | +9.4 | **+7.2** |
+| 全篇行数 | 749 | 766（多 17 行） | 767（多 18 行） |
+
+### 23.4 为什么会退：整像素取整此刻正好在抵消另一处宽度多收
+
+我们全篇比 Word 多排 17 行（749 → 766），也就是每行装的字比 Word 少：同一行文本我们把行"量宽了"，
+于是提前换行。整像素取整平均每个西文字符削掉 0.4 px 上下（`m` 12.445 → 12.000），方向正好相反，
+替我们把多收的那一截顶掉了一部分。只把取整换成精确 advance 是只加不减：那一档从 21 行变 26 行，
+全篇多一行，第 5 条掉 4.3 分，第 6 条也多出一行没拉满。
+
+同一轮里每页余量倒是更贴 Word（中位 162.4 → 156.9，Word 155.0；页差 dC 中位 +9.4 → +7.2），
+说明方向不错，但先亏掉的是第 5、6 条。结论写死：
+
+**线性度量和"西文行的宽度多收"必须放在同一轮改。** 顺序是先盯第 5、6 条，把每行宽度里多收的那部分
+减到 Word 那一侧（要查的三处：第 20 节那条 1/4 em 自动空隙的口径、全角字宽、`A4Paginator` 里那个
+`+= 0.5f` 网格经验值，现在是 `A4Paginator.java:230`），再打开线性度量。量台和改法都已经在版本库里，
+下一版按这个顺序动。
+
+### 23.5 留给下一轮的四条
+
+1. 量亚像素的 advance 必须在装机的应用进程里量。这次 `app_process` 与真进程读数一致，但"一致"是量出来的，
+   不是推定出来的；入口 `pwsh tools/build-metrics-probe.ps1 -Serial <sn>`。
+2. `hinting` 不是整数化的原因，别再试 `HINTING_OFF`（23.2 那张表的第二行就是这个实验）。
+3. 线性度量下有一行两端对齐只到 561.90（比版心短 5.03 px）：查 `StaticLayout` 在 `LINEAR_TEXT_FLAG` 下
+   对带尾随空格/末字那一行的拉伸。
+4. `measureText` 在线性度量下仍把整个串收成整数（20 个 `m` 给 249.000 而不是 248.906），
+   只有 `StaticLayout.getLineWidth` 是精确的 497.813。凡是拿 `measureText` 判"放不放得下"的地方，
+   换成线性度量后都要改成按行宽度量。
+
+### 23.6 本轮工作树与提交
+
+- 引擎那 19 行整体退回 HEAD（`git checkout -- app/src/main/java/com/rikkahub/wordlite/DocxTextLayout.java`），
+  `git diff -- app/src` 为空，不留"关掉的开关加一段不跑的死代码"这种半状态。
+- 配套断言暂存在 `artifacts/parked-LinearMetricsTest.java.txt`（`artifacts/` 在 `.gitignore` 内，
+  版本库里不留死代码）。断言内容是"度量那把 paint 必须带 `LINEAR_TEXT_FLAG`"，等 23.4 那一轮一起回来。
+- 真机复采确认退回干净：`pwsh tools/parity-six.ps1 -Serial EAMUT20528011355 -Tag revert-linear` →
+  7 段错页 / -0.767 px / 2.533 px / 0.79 行 / 114/165 = 69.1% / 0/32，`layout_dirty=False`，
+  `lines-all.tsv` 与 `pages.tsv` 两个 sha 与 `head898` 一字不差。
+- 主机侧：`git archive HEAD` 的源码 `javac` 83 个文件通过，七组断言全绿（`Regression 74 /`
+  `OriginalDocx 19 / WordLineHeight 63 / Script 65 / TableGeometry 31 / Preservation 11 / TextCorpus 209`）。
+- 这一轮进版本库的只有量台三件（`tools/build-metrics-probe.ps1`、`tools/device-probe/MetricsActivity.java`、
+  `tools/device-probe/MetricsManifest.xml`）加本节文档；排版引擎一字未动。

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Standalone measurement probe. Separate applicationId so it never replaces the installed
+     Word Lite; built by tools/build-metrics-probe.ps1, purpose in tools/device-probe/MetricsActivity.java -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.rikkahub.wordlite.metrics"
+    android:versionCode="1"
+    android:versionName="probe">
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="29" />
+    <application android:label="WordLiteMetrics" android:debuggable="true">
+        <activity android:name=".MetricsActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
