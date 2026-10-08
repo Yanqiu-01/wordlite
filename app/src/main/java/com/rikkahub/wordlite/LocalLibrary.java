@@ -7,6 +7,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -18,10 +19,37 @@ public final class LocalLibrary {
         public long bytes;
         public long addedAt;
         public int sentences;
+        /** 正文哈希（归一化正文的 SHA-256）。version 1 的索引没这个字段，读到空值就补算。 */
+        public String hash = "";
+    }
+
+    /** 抽取结果：正文之外还得说清"为什么没有正文"，扫描版和空文件不是一回事。 */
+    public static final class Extract {
+        public String text = "";
+        public int pages;
+        /** PDF 一页文字算子都没有 = 扫描版，得先 OCR。 */
+        public boolean noTextLayer;
+        /** PDF 有文字算子，但字体编码映射不出 Unicode。 */
+        public boolean undecodable;
+    }
+
+    /** 入库回执：批量导入要知道落库的文件名与"重复撞在哪一篇上"，只回一个错误串不够用。 */
+    public static final class AddResult {
+        public boolean ok;
+        public String name = "";
+        public String error = "";
+        public String duplicateOf = "";
     }
 
     private static final String INDEX_NAME = "index.json";
-    private static final int INDEX_VERSION = 1;
+    /**
+     * 版本 2 起每条带正文哈希。批量导入是一串连续写盘，中途取消或进程被杀都是常态，
+     * 所以索引必须任何时候都读得回来，见 persist() 的临时文件 + 改名。
+     */
+    private static final int INDEX_VERSION = 2;
+    private static final String INDEX_TMP_NAME = "index.json.tmp";
+    /** 扫描版 PDF 单独一句口径：它不是"读出来正好是空"，是压根没有文字层。 */
+    public static final String NO_TEXT_LAYER_MESSAGE = "这个 PDF 没有文字层（扫描版），请先转成可复制文字的 PDF";
     private static final long MAX_DOCUMENT_BYTES = 24L * 1024 * 1024;
     private static final long MAX_TOTAL_BYTES = 96L * 1024 * 1024;
     private static final int MAX_ENTRIES = 400;
@@ -48,33 +76,56 @@ public final class LocalLibrary {
         return entries.size();
     }
 
-    /** 返回错误信息，成功返回 null。文件名净化后写入私有目录，重名自动加序号。 */
+    /** 返回错误信息，成功返回 null。文件名净化后写入私有目录，重名自动加序号，不做去重。 */
     public String addDocument(String fileName, byte[] content) {
+        AddResult result = addDocument(fileName, content, null, false);
+        return result.ok ? null : result.error;
+    }
+
+    /**
+     * 批量导入入口：正文哈希由调用方算好传进来（一份文件只抽一次正文），
+     * skipDuplicates 为真时撞上同一正文就整个跳过，不落盘也不动索引。
+     * 两参版本的语义一个字没改——它从来不去重，去重只在新重载里生效。
+     */
+    public AddResult addDocument(String fileName, byte[] content, String bodyHash, boolean skipDuplicates) {
+        AddResult result = new AddResult();
         load();
-        if (content == null || content.length == 0) return "文件内容为空";
-        if (content.length > MAX_DOCUMENT_BYTES) return "单个文件不能超过 24 MB";
+        if (content == null || content.length == 0) return fail(result, "文件内容为空");
+        if (content.length > MAX_DOCUMENT_BYTES) return fail(result, "单个文件不能超过 24 MB");
         String safe = sanitize(fileName);
-        if (safe == null) return "文件名无效";
-        if (!isSupported(extensionOf(safe))) return "只支持 .docx/.txt/.md 文件";
+        if (safe == null) return fail(result, "文件名无效");
+        if (!isSupported(extensionOf(safe))) return fail(result, "只支持 .docx/.txt/.md/.pdf 文件");
+        String text;
         try {
-            String text = textOf(content, safe);
-            if (text.trim().length() == 0) return "没有从文件里读到文本";
+            Extract extract = extract(safe, content);
+            // 扫描版 PDF 单独一档：落进库也只占地方不参与比对，用户会误以为这篇没抄。
+            if (extract.noTextLayer) return fail(result, NO_TEXT_LAYER_MESSAGE);
+            text = extract.text;
         } catch (Exception error) {
-            return describe(error);
+            return fail(result, describe(error));
         }
-        if (entries.size() >= MAX_ENTRIES) return "自建库最多 " + MAX_ENTRIES + " 个文件";
+        if (text.trim().length() == 0) return fail(result, "没有从文件里读到文本");
+        String hash = bodyHash == null || bodyHash.length() == 0 ? bodyHash(text) : bodyHash;
+        if (skipDuplicates) {
+            String known = nameForHash(hash);
+            if (known != null) {
+                result.duplicateOf = known;
+                return fail(result, "库里已有同一篇正文：" + known);
+            }
+        }
+        if (entries.size() >= MAX_ENTRIES) return fail(result, "自建库最多 " + MAX_ENTRIES + " 个文件");
         long total = 0L;
         for (int i = 0; i < entries.size(); i++) total += entries.get(i).bytes;
-        if (total + content.length > MAX_TOTAL_BYTES) return "自建库容量已满（上限 96 MB）";
-        if (!directory.isDirectory() && !directory.mkdirs()) return "无法创建自建库目录";
+        if (total + content.length > MAX_TOTAL_BYTES) return fail(result, "自建库容量已满（上限 96 MB）");
+        if (!directory.isDirectory() && !directory.mkdirs()) return fail(result, "无法创建自建库目录");
         File target = place(uniqueName(safe));
-        if (target == null) return "文件名越出自建库目录";
+        if (target == null) return fail(result, "文件名越出自建库目录");
         FileOutputStream out = null;
         try {
             out = new FileOutputStream(target);
             out.write(content);
         } catch (IOException error) {
-            return "写入失败：" + describe(error);
+            return fail(result, "写入失败：" + describe(error));
         } finally {
             close(out);
         }
@@ -83,9 +134,29 @@ public final class LocalLibrary {
         entry.bytes = content.length;
         entry.addedAt = System.currentTimeMillis();
         entry.sentences = 0;
+        entry.hash = hash;
         entries.add(entry);
+        // 每成功一篇就落一次索引：批量跑到一半被杀，已经进来的那些不至于看不见。
         persist();
-        return null;
+        result.ok = true;
+        result.name = entry.name;
+        return result;
+    }
+
+    private static AddResult fail(AddResult result, String error) {
+        result.error = error;
+        return result;
+    }
+
+    /** 还剩几个名额：批量导入靠它提前收工，而不是把剩下几十个文件全撞成失败回执。 */
+    public int capacityRemaining() {
+        load();
+        return Math.max(0, MAX_ENTRIES - entries.size());
+    }
+
+    /** 上限本身也要说得出：界面那句"自建库名额已满（上限 400 个文件）"不该把数字抄两份。 */
+    public int capacity() {
+        return MAX_ENTRIES;
     }
 
     /** 删除库内文件与条目，成功返回 true。 */
@@ -131,6 +202,7 @@ public final class LocalLibrary {
                 changed = true;
                 continue;
             }
+            if (entry.hash == null || entry.hash.length() == 0) entry.hash = bodyHash(text);
             int before = corpus.sentenceCount();
             corpus.add(sourceOf(entry), text);
             entry.sentences = corpus.sentenceCount() - before;
@@ -150,15 +222,38 @@ public final class LocalLibrary {
         return source;
     }
 
-    /** .docx 走 DocxParser 抽正文，.txt/.md 按 UTF-8（容忍 BOM）。 */
+    /** .docx 走 DocxParser，.txt/.md 按 UTF-8（容忍 BOM），.pdf 走 PdfFile 的文字流。 */
     public static String textOf(byte[] content, String fileName) throws IOException {
-        if (content == null || content.length == 0) return "";
+        return extract(fileName, content).text;
+    }
+
+    /**
+     * 抽正文，并把"没有正文"的两种原因分开带回来。
+     * PDF 复用 PdfFile.extractText（导出侧那套文字流的反向读法），不引第三方 PDF 库。
+     * 扫描版与"字体编码读不出来"绝不能都塞成一份成功的空正文：空正文进了比对基线
+     * 只会白白摊薄分母，用户还以为是这篇论文没抄。
+     */
+    public static Extract extract(String fileName, byte[] content) throws IOException {
+        Extract result = new Extract();
+        if (content == null || content.length == 0) return result;
         String extension = extensionOf(fileName == null ? "" : fileName);
-        if ("docx".equals(extension)) return docxText(content, fileName);
+        if ("docx".equals(extension)) {
+            result.text = docxText(content, fileName);
+            return result;
+        }
         if ("txt".equals(extension) || "md".equals(extension)) {
             String text = new String(content, "UTF-8");
             if (text.length() > 0 && text.charAt(0) == 0xFEFF) text = text.substring(1);
-            return text.length() <= MAX_TEXT_CHARS ? text : text.substring(0, MAX_TEXT_CHARS);
+            result.text = text.length() <= MAX_TEXT_CHARS ? text : text.substring(0, MAX_TEXT_CHARS);
+            return result;
+        }
+        if ("pdf".equals(extension)) {
+            PdfFile.Extracted pdf = PdfFile.extractText(content, MAX_TEXT_CHARS);
+            result.pages = pdf.pages;
+            result.undecodable = pdf.undecodable;
+            result.noTextLayer = pdf.textOps == 0;
+            result.text = pdf.text;
+            return result;
         }
         throw new IOException("不支持的文件类型：" + fileName);
     }
@@ -257,7 +352,7 @@ public final class LocalLibrary {
         return file;
     }
 
-    private static String extensionOf(String name) {
+    static String extensionOf(String name) {
         int dot = name.lastIndexOf('.');
         if (dot < 0 || dot == name.length() - 1) return "";
         String extension = name.substring(dot + 1).toLowerCase(java.util.Locale.US);
@@ -269,8 +364,10 @@ public final class LocalLibrary {
         return dot <= 0 ? name : name.substring(0, dot);
     }
 
-    private static boolean isSupported(String extension) {
-        return "docx".equals(extension) || "txt".equals(extension) || "md".equals(extension);
+    /** pdf 也进自建库：正文由 PdfFile 的文字流读回来，扫描版在 addDocument 里就被挡掉。 */
+    static boolean isSupported(String extension) {
+        return "docx".equals(extension) || "txt".equals(extension) || "md".equals(extension)
+                || "pdf".equals(extension);
     }
 
     // ---- index.json 持久化 ----
@@ -295,6 +392,8 @@ public final class LocalLibrary {
                         entry.bytes = number(map.get("bytes"));
                         entry.addedAt = number(map.get("addedAt"));
                         entry.sentences = (int) number(map.get("sentences"));
+                        Object hash = map.get("hash");
+                        entry.hash = hash instanceof String ? (String) hash : "";
                         if (place(entry.name) == null || !isSupported(extensionOf(entry.name))) continue;
                         entries.add(entry);
                     }
@@ -319,7 +418,8 @@ public final class LocalLibrary {
         for (int i = 0; i < files.length; i++) {
             File file = files[i];
             if (file == null || !file.isFile()) continue;
-            if (INDEX_NAME.equalsIgnoreCase(file.getName())) continue;
+            // 临时文件与索引本身都不是文档；.tmp 的扩展名本来也进不来，写明白一点省得以后误删。
+            if (INDEX_NAME.equalsIgnoreCase(file.getName()) || INDEX_TMP_NAME.equalsIgnoreCase(file.getName())) continue;
             if (!isSupported(extensionOf(file.getName()))) continue;
             Entry entry = new Entry();
             entry.name = file.getName();
@@ -342,18 +442,94 @@ public final class LocalLibrary {
                     .append(",\"bytes\":").append(entry.bytes)
                     .append(",\"addedAt\":").append(entry.addedAt)
                     .append(",\"sentences\":").append(entry.sentences)
+                    .append(",\"hash\":").append(ApiJson.quote(entry.hash == null ? "" : entry.hash))
                     .append('}');
         }
         out.append("]}");
+        writeIndex(out.toString());
+    }
+
+    /**
+     * 原子换索引：先写 index.json.tmp，再改名盖掉 index.json。
+     * 批量导入中途被杀时，磁盘上要么是整个旧索引、要么是整个新索引，
+     * 不会出现半截 JSON 触发"按目录重建"把哈希与句子数全丢掉。
+     * Android/Linux 的 rename 盖已存在文件是原子的；主机回归跑在 Windows 上才需要退一步先删。
+     */
+    private void writeIndex(String payload) {
+        File target = new File(directory, INDEX_NAME);
+        File temporary = new File(directory, INDEX_TMP_NAME);
         FileOutputStream stream = null;
         try {
-            stream = new FileOutputStream(new File(directory, INDEX_NAME));
-            stream.write(out.toString().getBytes("UTF-8"));
+            stream = new FileOutputStream(temporary);
+            stream.write(payload.getBytes("UTF-8"));
+            stream.flush();
+            close(stream);
+            stream = null;
+            if (temporary.renameTo(target)) return;
+            if (target.isFile() && !target.delete()) return;
+            temporary.renameTo(target);
         } catch (IOException error) {
             // 写不进磁盘时保留内存状态，下一次操作再试；读取端有目录重建兜底。
         } finally {
             close(stream);
+            if (temporary.isFile()) temporary.delete();
         }
+    }
+
+    /** 这篇正文是否已在库里？返回撞上的那个文件名，没有返回 null。 */
+    public String nameForHash(String hash) {
+        load();
+        if (hash == null || hash.length() == 0) return null;
+        ensureHashes();
+        for (int i = 0; i < entries.size(); i++) {
+            Entry entry = entries.get(i);
+            if (hash.equals(entry.hash)) return entry.name;
+        }
+        return null;
+    }
+
+    public boolean containsHash(String hash) {
+        return nameForHash(hash) != null;
+    }
+
+    /**
+     * 正文哈希 = 归一化正文的 SHA-256。
+     * 为什么用 TextCorpus.compactOf 而不是原始字节：去重判的是"正文是否同一篇"，
+     * 文件名、打包差异、全半角与繁简折叠、行尾空白都不该让它变成两篇——
+     * 这些差异在比对引擎眼里本来就是同一段文字。原始字节哈希会把同一篇 docx
+     * 换个文件名再存一遍算成两篇，那正是 0.6.2 要治的病。
+     */
+    public static String bodyHash(String text) {
+        String compact = TextCorpus.compactOf(text == null ? "" : text);
+        if (compact.length() == 0) return "";
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = digest.digest(compact.getBytes("UTF-8"));
+            StringBuilder out = new StringBuilder(bytes.length * 2);
+            for (int i = 0; i < bytes.length; i++) out.append(String.format(java.util.Locale.US, "%02x", bytes[i] & 255));
+            return out.toString();
+        } catch (Exception error) {
+            return "";   // SHA-256 是 JVM 必备算法，真拿不到就当没算出来，让调用方按"没重复"处理
+        }
+    }
+
+    /** 版本 1 的索引没有 hash：按文件补算一次并回写，之后靠 add/remove/index 维护。 */
+    private void ensureHashes() {
+        boolean changed = false;
+        for (int i = 0; i < entries.size(); i++) {
+            Entry entry = entries.get(i);
+            if (entry.hash != null && entry.hash.length() > 0) continue;
+            File file = place(entry.name);
+            if (file == null || !file.isFile()) continue;
+            try {
+                // 读不出正文就留空串：宁可漏判一次重复，也不拿空串的哈希去误杀新文件。
+                entry.hash = bodyHash(extract(entry.name, readBytes(file)).text);
+                changed = true;
+            } catch (Exception error) {
+                entry.hash = "";
+            }
+        }
+        if (changed) persist();
     }
 
     File directoryFile() {

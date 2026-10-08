@@ -78,10 +78,24 @@ public final class TextCorpus {
 
     public static final class Report {
         public final ArrayList<Hit> hits = new ArrayList<Hit>();
-        public int comparedChars, duplicateChars, citedDuplicateChars;
-        /** 参考文献表、致谢这类结构性文本的字数，它们既不算重复也不计分母。 */
+        /**
+         * 分母：排除区之外的一切有效字符，与 CharLedger.totalChars 是同一个算式。0.7.2 之前这里数的是
+         * "切得出比对片段的句子"，短到切不出片段的句子既不进分子也不进分母，真文档
+         * tests/samples/input-liu.docx 实测比账本分母少 946 个字（14962 对 15908）。
+         */
+        public int comparedChars;
+        /** 分子：hits 里那些区间取并集之后的有效字符，一个字符只认一次（重叠的那段先占者得）。 */
+        public int duplicateChars;
+        /** 分子里落在引用区间内的部分，同样是并集口径，所以总相似度比 = 去除引用比 + 引用重复比。 */
+        public int citedDuplicateChars;
+        /** 参考文献表、致谢这类结构性文本占的有效字符：与 comparedChars 是同一次划分的两边，加起来等于全文。 */
         public int excludedChars;
         public double overallRate, excludingCitationsRate;
+        /**
+         * 每个检索源的重复字符占比。一个字符至多挂在一个检索源名下（hits 两两不重叠，见 attributeHits），
+         * 所以把这里的百分比乘回分母再相加 == duplicateChars == CharLedger.duplicateChars，
+         * 与来源榜那张表共用同一把尺；被别篇抢走多少由 disputedChars 那条注记说，不在这里重复扣。
+         */
         public final LinkedHashMap<String, Double> byEngine = new LinkedHashMap<String, Double>();
     }
 
@@ -122,8 +136,10 @@ public final class TextCorpus {
     private final HashMap<String, Integer> exact = new HashMap<String, Integer>();
     private int skippedSentences;
     /**
-     * 上一次 match() 里同一段字符被两篇以上文献命中的字符数（有效字符口径，同一个字符只数一次）。
-     * 只供 DuplicateEngine 写一条注记，让用户能正确读出来源榜里那个 0：不参与判据、不进任何比率。
+     * 上一次 match() 里同一段字符被两篇以上文献命中的字符数（有效字符口径：把所有"被别篇先占走"的区间
+     * 先取并集再数字，同一段字符被三篇抢也只算一次）。指纹带之间的抢段与句级命中之间被滑窗切出来的重叠
+     * 都记在这里；只供 DuplicateEngine 写一条注记，让用户能正确读出来源榜里那个 0，
+     * 不参与判据、不进任何比率、也不进分子。
      */
     private int disputedOverlap;
 
@@ -349,89 +365,73 @@ public final class TextCorpus {
         long[] scratch = new long[Math.max(64, Math.min(entries.size() + 1, POSTING_SCAN_CAP))];
         Match best = new Match();
         HashMap<String, Integer> engineChars = new HashMap<String, Integer>();
-        int compared = 0, duplicate = 0, cited = 0, skipped = 0;
-        int runStart = -1, runEnd = -1, runWeight = 0, runValid = 0;
+        int runStart = -1, runEnd = -1, runWeight = 0;
         double runScore = 0d;
         Source runSource = null;
-        HashMap<String, Integer> runTally = null;
         for (int i = 0; i < spans.size(); i++) {
             int[] span = spans.get(i);
-            if (insideSpan(excluded, span[0])) {
-                skipped += validCount(norm, span[0], span[1]);
-                continue;
-            }
+            // 整体落在排除区里的句子连匹配都不做，省的是开销；它占多少字由下面按区间一次算清，
+            // 不再在这里按"整句"累加，否则一句跨在排除区边上就会多算或少算。
+            if (insideSpan(excluded, span[0])) continue;
             ArrayList<Frag> frags = fragments(norm, span[0], span[1]);
             if (frags.isEmpty()) continue;
-            // 有效字符按句子计一次：超长句的滑动窗口重叠，不能把同一个字符算两遍。
-            compared += validCount(norm, span[0], span[1]);
             for (int f = 0; f < frags.size(); f++) {
                 Frag frag = frags.get(f);
                 if (!bestMatch(frag, counter, postings, scratch, best)) continue;
                 Entry entry = entries.get(best.entryId);
                 Source source = sources.get(entry.sourceIndex);
-                String engine = source.engine == null ? "" : source.engine;
                 if (runStart >= 0 && frag.start - runEnd <= MERGE_GAP && runSource == source
                         && sameCitationContext(citations, runEnd, frag.start)) {
                     if (frag.end > runEnd) runEnd = frag.end;
                     runScore += (double) best.score * frag.chars;
                     runWeight += frag.chars;
                 } else {
-                    if (runStart >= 0) {
-                        int[] flushed = flush(runStart, runEnd, runWeight, runScore, runSource, runTally, report,
-                                norm, citations, engineChars);
-                        duplicate += flushed[0];
-                        cited += flushed[1];
-                    }
+                    if (runStart >= 0) flush(report, runStart, runEnd, runWeight, runScore, runSource);
                     runStart = frag.start;
                     runEnd = frag.end;
                     runWeight = frag.chars;
                     runScore = (double) best.score * frag.chars;
                     runSource = source;
-                    runTally = new HashMap<String, Integer>();
                 }
-                if (runTally != null) tally(runTally, engine, frag.chars);
             }
         }
-        if (runStart >= 0) {
-            int[] flushed = flush(runStart, runEnd, runWeight, runScore, runSource, runTally, report,
-                    norm, citations, engineChars);
-            duplicate += flushed[0];
-            cited += flushed[1];
-        }
-        int[] extra = addBandHits(report.hits, fingerprintHits(norm, excluded), norm, citations, engineChars);
-        duplicate += extra[0];
-        cited += extra[1];
-        disputedOverlap = extra[2];
+        if (runStart >= 0) flush(report, runStart, runEnd, runWeight, runScore, runSource);
+        // 指纹带仍然先按句级命中裁一次——那一步决定哪条带子值得进 hits（补不出 MIN_MATCH 个字符就整条丢）。
+        // 它顺手记下的"这段被别篇先占走"会和句级命中之间的重叠并成一份，不再各自数一遍。
+        ArrayList<int[]> lost = addBandHits(report.hits, fingerprintHits(norm, excluded), norm);
+        // 分子、引用分子、来源分布全部从同一次"取并集"里数：见 attributeHits。
+        int[] counted = attributeHits(report.hits, norm, citations, excluded, lost, engineChars);
+        disputedOverlap = countValid(norm, mergeRanges(lost));
         java.util.Collections.sort(report.hits, new Comparator<Hit>() {
             public int compare(Hit a, Hit b) { return a.start != b.start ? a.start - b.start : a.end - b.end; }
         });
-        report.comparedChars = compared;
-        report.excludedChars = skipped;
-        report.duplicateChars = duplicate;
-        report.citedDuplicateChars = Math.min(cited, duplicate);
-        if (compared > 0) {
-            report.overallRate = duplicate * 100d / compared;
-            double uncited = duplicate - Math.min(cited, duplicate);
+        // 分母与排除字数是同一次划分的两边：整篇有效字符 = comparedChars + excludedChars，
+        // 与 CharLedger 的 totalChars / excludedChars 用的是同一个算式，两张表不再各拿一把尺。
+        report.excludedChars = countValid(norm, spanList(excluded));
+        report.comparedChars = countValid(norm, subtract(spanList(excluded), 0, text.length()));
+        report.duplicateChars = counted[0];
+        report.citedDuplicateChars = Math.min(counted[1], counted[0]);
+        if (report.comparedChars > 0) {
+            double compared = report.comparedChars;
+            report.overallRate = report.duplicateChars * 100d / compared;
+            double uncited = report.duplicateChars - report.citedDuplicateChars;
             report.excludingCitationsRate = uncited < 0 ? 0d : uncited * 100d / compared;
-            for (Map.Entry<String, Integer> item : engineChars.entrySet()) {
-                report.byEngine.put(item.getKey().length() == 0 ? "local" : item.getKey(),
-                        item.getValue().doubleValue() * 100d / compared);
-            }
+            for (Map.Entry<String, Integer> item : engineChars.entrySet())
+                report.byEngine.put(item.getKey(), item.getValue().doubleValue() * 100d / compared);
         }
         return report;
     }
 
     /**
-     * 指纹带只补句级比对没盖住的字符，来源记到带上的引擎，分子不会因为两套算法而翻倍。
-     * 返回 {多出来的重复字符, 其中落在引用段内的字符, 被另一篇文献先占走的字符}：第三项不参与任何
-     * 判据、不进任何比率，只让 DuplicateEngine 能写一条"这段被两篇以上文献抢过"的注记。
-     * 注意：这里 push 进 hits 的区间与记进分子的 valid 必须是同一个区间，来源榜靠这一点从 hits 反推每篇的账。
+     * 指纹带只补句级比对没盖住的字符：一条带子先减掉已覆盖的区间，补不出 MIN_MATCH 个有效字符就整条丢掉。
+     * 返回"这段字符被另一篇文献先占走"的那几段区间（拿带子的原始区间去问 claims），由 attributeHits 与
+     * 句级命中之间的重叠并成一份，只喂给 disputedChars 那条注记，不参与判据、不进任何比率。
+     * 注意：这里 push 进 hits 的区间与后面记进分子的 valid 必须是同一个区间，来源榜靠这一点从 hits 反推每篇的账。
      */
-    private int[] addBandHits(ArrayList<Hit> hits, ArrayList<Hit> bands, String norm, int[] citations,
-                              HashMap<String, Integer> engineChars) {
-        int[] extra = new int[]{0, 0, 0};
-        if (bands.isEmpty()) return extra;
-        // covered 决定分子（一个字符只认一次）。subtract 内部的 mergeRanges 会就地改写它拿到的区间数组，
+    private ArrayList<int[]> addBandHits(ArrayList<Hit> hits, ArrayList<Hit> bands, String norm) {
+        ArrayList<int[]> lost = new ArrayList<int[]>();
+        if (bands.isEmpty()) return lost;
+        // covered 决定"这条带子还能拿走哪些字符"。subtract 里的 mergeRanges 会就地改写它拿到的区间数组，
         // 所以归属另记一份 claims：那份数组永远不会交给 subtract，"这段被谁占走"才不会被合并动作改写。
         ArrayList<int[]> covered = new ArrayList<int[]>();
         ArrayList<Claim> claims = new ArrayList<Claim>();
@@ -439,19 +439,14 @@ public final class TextCorpus {
             covered.add(new int[]{hits.get(i).start, hits.get(i).end});
             claims.add(new Claim(hits.get(i).start, hits.get(i).end, hits.get(i).source));
         }
-        ArrayList<int[]> lost = new ArrayList<int[]>();
         for (int b = 0; b < bands.size(); b++) {
             Hit band = bands.get(b);
-            String engine = band.source == null || band.source.engine == null ? "" : band.source.engine;
             ArrayList<int[]> rest = subtract(covered, band.start, band.end);
             claimFromOthers(lost, claims, band);
             for (int r = 0; r < rest.size(); r++) {
                 int[] range = rest.get(r);
-                int valid = validCount(norm, range[0], range[1]);
-                if (valid < Fingerprints.MIN_MATCH) continue;   // 已被句级命中盖住，不值得再报一条
-                extra[0] += valid;
-                extra[1] += overlapValid(norm, range[0], range[1], citations);
-                tally(engineChars, engine.length() == 0 ? "local" : engine, valid);
+                // 已被句级命中盖住，补不出最短可报告长度就不值得再报一条。
+                if (validCount(norm, range[0], range[1]) < Fingerprints.MIN_MATCH) continue;
                 Hit trimmed = new Hit();
                 trimmed.start = range[0];
                 trimmed.end = range[1];
@@ -462,11 +457,7 @@ public final class TextCorpus {
                 claims.add(new Claim(range[0], range[1], band.source));
             }
         }
-        // 同一个字符被三篇抢也只算一次，所以先并区间再数字符。subtract 每次都自己合并一遍 covered，
-        // 去掉原来的 covered = mergeRanges(covered) 不改变 rest 的结果，只是不再改写归属那份账。
-        ArrayList<int[]> merged = mergeRanges(lost);
-        for (int i = 0; i < merged.size(); i++) extra[2] += validCount(norm, merged.get(i)[0], merged.get(i)[1]);
-        return extra;
+        return lost;
     }
 
     /** 已占住的一段字符与抢到它的文献。只给归属注记用，不参与分子。 */
@@ -529,30 +520,91 @@ public final class TextCorpus {
     }
 
     /**
-     * 结束一段命中：写 Hit、算有效字符与引用重叠、把重复字符记到主导来源名下。
-     * 注意：这里 push 的这条 Hit 与下面记进分子的 valid 必须是同一个区间，来源榜靠这一点从 hits 反推每篇的账。
+     * 结束一段命中：只把区间与加权分值写成一条 Hit。字符数、引用重叠、来源归属一律不在这里记——
+     * 那三笔账由 attributeHits 从取好并集的 hits 里数，于是"报告说的重复字数"与"来源榜从 hits
+     * 反推的每篇字数"数的是同一批字符，不可能一个双算一个不双算。
      */
-    private int[] flush(int start, int end, int weight, double scoreSum, Source source,
-                        HashMap<String, Integer> tally, Report report, String norm, int[] citations,
-                        HashMap<String, Integer> engineChars) {
+    private static void flush(Report report, int start, int end, int weight, double scoreSum, Source source) {
         Hit hit = new Hit();
         hit.start = start;
         hit.end = end;
         hit.score = weight <= 0 ? 0f : (float) (scoreSum / weight);
         hit.source = source;
         report.hits.add(hit);
-        int valid = validCount(norm, start, end);
-        int cited = overlapValid(norm, start, end, citations);
-        if (tally != null && !tally.isEmpty()) {
-            String dominant = null;
-            int dominantChars = -1;
-            for (Map.Entry<String, Integer> item : tally.entrySet()) {
-                int chars = item.getValue().intValue();
-                if (chars > dominantChars) { dominantChars = chars; dominant = item.getKey(); }
+    }
+
+    /**
+     * 收口：命中区间取并集，一个字符只认一次；分子、引用分子、来源分布这三笔账全从这一次并集里数。
+     *
+     * 为什么要单独走这一遍：0.7.2 的分子是"每条命中各自加一遍有效字符"，可命中区间并不互斥。
+     * 超过 WINDOW_CHARS 的长句按 512 个有效字符切窗、相邻两窗重叠 64 个字（step = 512 - 64 = 448），
+     * 两篇各赢一窗时那 64 个字在两条命中里都出现，同一批语料实测分子 896 对分母 832；来源榜是按 hits
+     * 反推每篇的账，也就跟着一起虚高。账本从同一批命中出发先并区间再数字，报告却按条累加，两张表必然打架。
+     *
+     * 归属只有一条规矩：先写进 hits 的那一条得这段字符。句级命中按正文先后入列，指纹带按长度降序补在后面
+     * 并在 addBandHits 里已经减过一次，所以"同一段字符只记给命中更长的那一篇"在带子之间照旧成立，句级与
+     * 带子之间也照旧是句级先占。一个字符至多挂在一个检索源名下，于是 Σ byEngine 的字符数 ==
+     * duplicateChars == CharLedger.duplicateChars，来源榜与「按检索源分布」共用同一把尺；被别篇先占走的那些
+     * 区间由 claimFromOthers 记进 lost，只喂给 disputedChars 那条注记，不进任何比率、不进任何分子。
+     *
+     * 排除区在这里当作"没有主人的已覆盖区间"先扣掉：账本的分子是 minus(并集, 排除区)，这边也这么扣，
+     * 两边的 duplicateChars 才是结构上相等，而不是碰巧对上。
+     *
+     * 一条命中被裁成两段以上就拆成多条 Hit（宁可多出出处数，也不让并集里的字符在 hits 里没有归宿）；
+     * 有效字符为 0 的碎片丢掉，它进不了任何账。hits 就地换成裁剪后的结果，返回 {分子, 引用分子}。
+     */
+    private int[] attributeHits(ArrayList<Hit> hits, String norm, int[] citations, int[] excluded,
+                                ArrayList<int[]> lost, HashMap<String, Integer> engineChars) {
+        ArrayList<int[]> covered = spanList(excluded);
+        ArrayList<Claim> claims = new ArrayList<Claim>();
+        ArrayList<Hit> kept = new ArrayList<Hit>(hits.size());
+        int duplicate = 0, cited = 0;
+        for (int i = 0; i < hits.size(); i++) {
+            Hit hit = hits.get(i);
+            claimFromOthers(lost, claims, hit);
+            ArrayList<int[]> rest = subtract(covered, hit.start, hit.end);
+            for (int r = 0; r < rest.size(); r++) {
+                int[] range = rest.get(r);
+                int valid = validCount(norm, range[0], range[1]);
+                if (valid <= 0) continue;
+                Hit piece = r == 0 ? hit : new Hit();
+                if (piece != hit) {
+                    piece.score = hit.score;
+                    piece.source = hit.source;
+                }
+                piece.start = range[0];
+                piece.end = range[1];
+                kept.add(piece);
+                duplicate += valid;
+                cited += overlapValid(norm, range[0], range[1], citations);
+                tally(engineChars, engineKey(hit.source), valid);
+                covered.add(range);
+                claims.add(new Claim(range[0], range[1], hit.source));
             }
-            if (dominant != null) tally(engineChars, dominant, valid);
         }
-        return new int[]{valid, cited};
+        hits.clear();
+        hits.addAll(kept);
+        return new int[]{duplicate, cited};
+    }
+
+    /** 扁平的 {start,end} 成对数组 -> subtract/mergeRanges 用的区间列表。 */
+    private static ArrayList<int[]> spanList(int[] flat) {
+        ArrayList<int[]> out = new ArrayList<int[]>();
+        for (int i = 0; i + 1 < flat.length; i += 2) out.add(new int[]{flat[i], flat[i + 1]});
+        return out;
+    }
+
+    /** 一组互不重叠区间里的有效字符总数：区间不重叠，直接相加就不会把一个字符数两遍。 */
+    private static int countValid(String norm, ArrayList<int[]> ranges) {
+        int total = 0;
+        for (int i = 0; i < ranges.size(); i++) total += validCount(norm, ranges.get(i)[0], ranges.get(i)[1]);
+        return total;
+    }
+
+    /** 检索源键：空引擎记成 local，与 SourceLedger 那一侧同一个写法，两张表才对得上。 */
+    private static String engineKey(Source source) {
+        String engine = source == null || source.engine == null ? "" : source.engine;
+        return engine.length() == 0 ? "local" : engine;
     }
 
     /** 引用段内外的命中不并段：否则一段引文会被并进正文重复，去除引用比就失去意义。 */

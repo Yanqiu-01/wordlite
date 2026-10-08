@@ -19,6 +19,18 @@ public final class TextCorpusRegression {
         System.out.println("PASS " + message);
     }
 
+    /**
+     * 相交的命中对数。0.7.3 之后 match() 把命中区间取了并集（重叠段划给先占的那一篇），这个数必须恒为 0：
+     * 它是"一个字符只算一次"最直接的结构性证据，比任何总数相等都难蒙混。
+     */
+    private static int overlapPairs(ArrayList<TextCorpus.Hit> hits) {
+        int pairs = 0;
+        for (int i = 0; i < hits.size(); i++)
+            for (int j = i + 1; j < hits.size(); j++)
+                if (hits.get(i).start < hits.get(j).end && hits.get(j).start < hits.get(i).end) pairs++;
+        return pairs;
+    }
+
     public static void main(String[] args) throws Exception {
         normalization();
         splitting();
@@ -197,6 +209,8 @@ public final class TextCorpusRegression {
                 + "把特征工程交给领域专家手工完成，是早期系统的常见做法。", null);
         check(two.hits.size() == 2, "two adjacent hits from different sources stay as two separate segments");
         check(two.byEngine.size() == 2, "byEngine lists both engines");
+        check(overlapPairs(report.hits) == 0 && overlapPairs(two.hits) == 0,
+                "命中区间两两不重叠：来源榜与「按检索源分布」那两张表都建立在这一点上");
     }
 
     /** 指纹带：与断句无关的连续重复，短于最短匹配长度的巧合不算重复。 */
@@ -299,6 +313,8 @@ public final class TextCorpusRegression {
         String farQuery = "第一句是关于数据采集的描述内容。" + "中间插入了完全不同的一句话，讲的是实验室的空调坏了三天。"
                 + "第二句是关于模型评估的描述内容。";
         check(far.match(farQuery, null).hits.size() == 2, "hits separated by an unrelated sentence stay separate");
+        check(overlapPairs(report.hits) == 0 && overlapPairs(same.hits) == 0,
+                "并段之后的命中两两不重叠：并段靠的是区间合并，不是把两条命中叠在同一批字上");
     }
 
     private static void rates() {
@@ -313,8 +329,28 @@ public final class TextCorpusRegression {
         int compared = TextCorpus.validCount(head, 0, head.length()) + TextCorpus.validCount(dupA, 0, dupA.length())
                 + TextCorpus.validCount(tail, 0, tail.length()) + TextCorpus.validCount(dupB, 0, dupB.length());
         int duplicated = TextCorpus.validCount(dupA, 0, dupA.length()) + TextCorpus.validCount(dupB, 0, dupB.length());
-        check(report.comparedChars == compared, "comparedChars equals the valid characters of every counted sentence");
+        check(report.comparedChars == compared,
+                "comparedChars = 排除区之外的一切有效字符（这句里就是那 4 句正文的 " + compared + " 个字）");
         check(report.duplicateChars == duplicated, "duplicateChars equals the valid characters inside the merged hits");
+        // 0.7.3 换分母的正面回归：再塞一句只有 5 个有效字符的短句。它短到切不出比对片段
+        // （fragment 在 codePoints < MIN_SENTENCE_CHARS 时返回 null），0.7.2 因此把整句从分母里抹掉——
+        // 真文档 tests/samples/input-liu.docx 实测就这样比账本分母少 946 个字（14962 对 15908）。
+        // 现在按"整篇减排除区"数，短句照进分母，与 CharLedger.totalChars 是同一个算式。
+        String shortOne = "本节小结。";
+        String withShort = head + dupA + shortOne + tail + dupB;
+        TextCorpus.Report shorted = corpus.match(withShort, null);
+        check(TextCorpus.validCount(TextCorpus.normalize(shortOne), 0, shortOne.length()) == 5,
+                "夹具自证：这句小结 5 个有效字符，短到切不出比对片段");
+        check(shorted.comparedChars == compared + 5,
+                "分母 " + compared + " + 5 = " + shorted.comparedChars + "：切不出片段的短句不再两边都不算");
+        check(shorted.duplicateChars == duplicated, "短句只进分母，分子一个字符都不多");
+        check(overlapPairs(shorted.hits) == 0, "带短句这一版的命中也两两不重叠");
+        CharLedger.Balance plainBalance = CharLedger.close(withShort, null, null, shorted.hits, null);
+        check(plainBalance.totalChars == shorted.comparedChars
+                        && plainBalance.duplicateChars == shorted.duplicateChars
+                        && plainBalance.citedDuplicateChars == shorted.citedDuplicateChars,
+                "与 CharLedger 同一把尺：分母 " + shorted.comparedChars + " / 分子 " + shorted.duplicateChars
+                        + " / 引用内 " + shorted.citedDuplicateChars + " 三个数与账本一字不差");
         check(Math.abs(report.overallRate - duplicated * 100d / compared) < 1e-9, "overallRate = duplicateChars / comparedChars * 100");
         check(report.citedDuplicateChars == 0 && Math.abs(report.excludingCitationsRate - report.overallRate) < 1e-9,
                 "without citation spans nothing is excluded and the two rates coincide");
@@ -406,6 +442,25 @@ public final class TextCorpusRegression {
         long millis = (System.nanoTime() - start) / 1000000L;
         check(!longReport.hits.isEmpty() && longReport.overallRate > 90d,
                 "the run-on text still matches itself in " + millis + " ms");
+        // 900 段七字连排 = 6300 个有效字符，按 step = 512 - 64 = 448 切 14 窗（语料侧 sentenceCount 也是 14）。
+        // 同一来源会并成一条命中，所以这一条在 0.7.2 也算对了；留着它是钉住"分子不会越过自己的分母"。
+        check(longReport.comparedChars == 6300 && longReport.duplicateChars == 6300,
+                "连排长串自比：分子 == 分母 == 6300，切 14 窗取并集不会让一个字符多算一次");
+        // 真正会双算的是「两篇各拿一窗」：按 step = 512 - 64 = 448 切窗，相邻两窗重叠 64 个字。
+        // 0.7.2 把甲篇那一窗的 512 与乙篇那一窗的 384 各加一遍，分子 896 越过分母 832（来源榜跟着虚高）。
+        StringBuilder winA = new StringBuilder();
+        for (int i = 0; i < 512; i++) winA.append((char) (0x4E00 + (i * 37) % 400));
+        StringBuilder winB = new StringBuilder();
+        for (int i = 0; i < 320; i++) winB.append((char) (0x4E00 + 400 + (i * 53) % 400));
+        TextCorpus sliding = new TextCorpus();
+        sliding.add(source("sl1", "滑窗甲", "openalex"), winA.toString());
+        sliding.add(source("sl2", "滑窗乙", "crossref"), winB.toString());
+        TextCorpus.Report slid = sliding.match(winA.toString() + winB.toString(), null);
+        check(slid.comparedChars == 832 && slid.duplicateChars == 832,
+                "两篇各拿一窗时分子取并集：512 + 320 = 832 == 分母（旧口径 512 + 384 = 896 双算了重叠的 64）");
+        check(overlapPairs(slid.hits) == 0 && slid.hits.size() == 2
+                        && slid.hits.get(1).start == 512,
+                "第二条命中被裁到 512 起：重叠的 64 个字划归先占的甲篇，两条命中不再相交");
     }
 
     private static void performance() {
@@ -660,6 +715,20 @@ public final class TextCorpusRegression {
         check(strict.excludedChars > 0 && strict.duplicateChars < loose.duplicateChars,
                 "排除的字数进了报告，重复字数随之下降");
 
+        // 0.7.3：分母与排除字数是同一次划分的两边，加起来必须正好是整篇；再与 CharLedger 对一遍三个数。
+        int wholeValid = TextCorpus.validCount(TextCorpus.normalize(text), 0, text.length());
+        check(strict.comparedChars + strict.excludedChars == wholeValid,
+                "分母 " + strict.comparedChars + " + 排除 " + strict.excludedChars + " == 整篇 " + wholeValid
+                        + " 个有效字符：同一次划分的两边，加起来不多也不少");
+        CharLedger.Balance structureBalance = CharLedger.close(text, excluded, null, strict.hits, null);
+        check(structureBalance.totalChars == strict.comparedChars
+                        && structureBalance.duplicateChars == strict.duplicateChars
+                        && structureBalance.excludedChars == strict.excludedChars,
+                "带排除区也同一把尺：报告 分母/分子/排除 = " + strict.comparedChars + "/" + strict.duplicateChars
+                        + "/" + strict.excludedChars + " 对账本 " + structureBalance.totalChars + "/"
+                        + structureBalance.duplicateChars + "/" + structureBalance.excludedChars);
+        check(overlapPairs(loose.hits) == 0 && overlapPairs(strict.hits) == 0,
+                "结构性排除前后的命中都两两不重叠");
         String lone = "参考文献\n[1] 张三. 面向长文本的查重方法[J]. 计算机学报, 2020, 43(3): 512-524.\n"
                 + "这一节之后的内容明显是正文，它讲的是实验设置与随机种子的取法，跟文献无关。";
         check(TextCorpus.structure(lone).isEmpty(), "只有一条条目时不敢把整节当成文献表");

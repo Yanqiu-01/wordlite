@@ -207,8 +207,10 @@ public final class CharLedgerRegression {
     }
 
     /**
-     * 与 TextCorpus 的已知缺陷对账：长句滑窗重叠的 64 个字在 match() 的分子里算了两遍（896 > 832），
-     * 账本从同一批命中出发必须先并区间再数字——那 64 个字在报告里只能算一次。
+     * 与 TextCorpus 对账。0.7.3 之前这里是这份报告唯一一处分子大于分母：长句按 512 个有效字符切窗、
+     * 相邻窗重叠 64 个字，两篇各赢一窗时那 64 个字被算了两遍（分子 896 对分母 832）。现在
+     * {@code match()} 自己先把命中区间取并集再数，账本与它同一个数——两边都是 832。这条断言从此钉的是
+     * "不许再退回去双算"，不再是"缺陷照旧"。
      */
     private static void versusTextCorpus() {
         StringBuilder longA = new StringBuilder();
@@ -226,14 +228,14 @@ public final class CharLedgerRegression {
         corpus.add(second, longB.toString());
         String query = longA.toString() + longB.toString();
         TextCorpus.Report matched = corpus.match(query, null);
-        check(matched.comparedChars == 832 && matched.duplicateChars == 896,
-                "TextCorpus 那侧的已知缺陷照旧：分母 832，分子 896（滑窗重叠的 64 个字算了两遍）");
+        check(matched.comparedChars == 832 && matched.duplicateChars == 832,
+                "长句滑窗的 64 个字不再双算：并集之后分子 == 分母 == 832（0.7.3 之前实测分子 896）");
         check(matched.hits.size() == 2, "两条命中：0..512 与 448..832");
         CharLedger.Balance ledger = CharLedger.close(query, null, null, matched.hits, null);
         closed(ledger, "长句滑窗");
         check(ledger.totalChars == 832, "账本分母与 match 的分母同一个数：832 个有效字符");
         check(ledger.duplicateChars == 832 && ledger.selfWrittenChars == 0,
-                "账本把 896 收敛成 832：重叠的 64 个字只认一次，分子不再越过分母");
+                "账本与报告同一个 832：重叠的 64 个字只认一次，分子不越过分母");
         check(ledger.overallRate == 100d && Math.abs(ledger.headlineResidual()) < 1e-9,
                 "收敛之后总相似度比 100 加自编率 0 仍然闭合；旧口径这里会算出 107.69%");
         ArrayList<TextCorpus.Hit> hits = new ArrayList<TextCorpus.Hit>();

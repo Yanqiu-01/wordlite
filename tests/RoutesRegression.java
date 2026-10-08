@@ -1,0 +1,191 @@
+package com.rikkahub.wordlite;
+
+import java.net.InetSocketAddress;
+import java.net.Proxy;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 路由表（{@link Routes}）回归。0.7.3 之前这条链路一条断言都没有，而它决定"问知网的第一跳落在
+ * 国内还是海外出口"——手机挂着代理时，这个决定直接改变三个中文库能拿回什么样的结果。
+ * 漏一个子域（{@code search.cnki.com.cn} 不在 {@code cnki.net} 下）没有任何测试会响。
+ *
+ * 钉死四类事：① 生产在用的每个主机都按预期归类，仿冒域名不算国内库；② 排队次序——用户填的代理永远
+ * 第一，国内源直连优先，海外源代理优先、直连兜底，回环上的桩服务不掺自动发现；③ 探测超时只压自动
+ * 发现的那几条，用户填的代理和直连照他设的超时等；④ 走过哪条路的记录：写进去、读得回、上限 32 条、
+ * reset 之后回到"未走过"。
+ *
+ * 全程不联网：Proxy 只是值对象，测试只用 IP 字面量，免得 InetSocketAddress 去查 DNS。
+ */
+public final class RoutesRegression {
+    private static int count;
+
+    private static void check(boolean ok, String message) {
+        if (!ok) throw new AssertionError(message);
+        count++;
+        System.out.println("PASS " + message);
+    }
+
+    public static void main(String[] argv) {
+        String savedHost = System.getProperty("http.proxyHost", "");
+        String savedPort = System.getProperty("http.proxyPort", "");
+        System.clearProperty("http.proxyHost");
+        System.clearProperty("http.proxyPort");
+        try {
+            classification();
+            ordering();
+            parsingAndLabels();
+            timeouts();
+            routeLedger();
+        } finally {
+            Routes.reset();
+            restore("http.proxyHost", savedHost);
+            restore("http.proxyPort", savedPort);
+        }
+        System.out.println("SUMMARY " + count + " assertions passed");
+    }
+
+    private static void restore(String key, String value) {
+        if (value == null || value.isEmpty()) System.clearProperty(key);
+        else System.setProperty(key, value);
+    }
+
+    private static void classification() {
+        String[] chinese = {"search.cnki.com.cn", "kns.cnki.net", "wap.cnki.net", "www.cqvip.com",
+                "s.wanfangdata.com.cn", "d.wanfangdata.com.cn", "www.ncpssd.org"};
+        for (String host : chinese)
+            check(Routes.domestic(host), host + " 是国内库，必须先直连");
+        String[] overseas = {"api.openalex.org", "api.crossref.org", "api.semanticscholar.org",
+                "www.ebi.ac.uk", "export.arxiv.org", "api.core.ac.uk"};
+        for (String host : overseas)
+            check(!Routes.domestic(host), host + " 是海外源，代理优先");
+        /* 归类按后缀必须带点：否则 cnki.com.cn.evil.net 也冒充得上国内库，白拿一次直连优先。 */
+        check(!Routes.domestic("cnki.com.cn.evil.net"), "后缀相同的仿冒域名不算国内库");
+        check(!Routes.domestic("notcnki.com.cn"), "只在结尾沾了 cnki.com.cn 的域名不算国内库");
+        check(Routes.domestic("cnki.com.cn"), "裸域本身也算国内库");
+    }
+
+    private static void ordering() {
+        Routes.reset();
+        Proxy explicit = Routes.parse("192.168.1.20:7890");
+        List<Proxy> cnki = Routes.order("search.cnki.com.cn", explicit);
+        check(cnki.get(0) == explicit, "用户填的代理在国内源之前——那是他自己的意思");
+        check(cnki.get(1) == null, "补上 cnki.com.cn 之后，知网在没有用户代理时第一跳是直连");
+        List<Proxy> openalex = Routes.order("api.openalex.org", null);
+        check(openalex.get(openalex.size() - 1) == null, "海外源把直连留在最后，代理不通才轮到它");
+        check(openalex.indexOf(null) == openalex.size() - 1, "海外源的直连只出现一次，且在末尾");
+        check(containsLoopback(openalex, 7897) && containsLoopback(openalex, 7890),
+                "自动发现覆盖 Clash 系常见的 7897 与 7890 两个本地端口");
+        check(!openalex.contains(explicit), "没填的代理不会凭空出现在候选里");
+        List<Proxy> loopback = Routes.order("127.0.0.1", null);
+        check(loopback.size() == 1 && loopback.get(0) == null, "回环上的桩服务不掺自动发现的端口");
+        List<Proxy> loopbackWithExplicit = Routes.order("127.0.0.1", explicit);
+        check(loopbackWithExplicit.size() == 2 && loopbackWithExplicit.get(0) == explicit,
+                "回环只例外接受用户显式填的代理（回归就是拿回环代理跑的）");
+        check(distinct(cnki) && distinct(openalex), "同一条路不在候选里出现两次");
+
+        /* 走通过一次就记住，下一扇窗口不必再撞死路；但国内源的直连仍然排第一。 */
+        Proxy remembered = Routes.parse("127.0.0.1:7897");
+        Routes.succeeded(remembered);
+        List<Proxy> next = Routes.order("search.cnki.com.cn", null);
+        check(next.get(0) == null, "记住过代理也不改变国内源的直连优先");
+        check(next.indexOf(remembered) == 1, "上次走通的那条路排在第二位，先于其余自动发现");
+        Routes.reset();
+        check(!Routes.order("search.cnki.com.cn", null).contains(remembered)
+                || Routes.order("search.cnki.com.cn", null).indexOf(remembered) > 0,
+                "reset 之后不再凭旧记忆插队（自动发现本身会发现同一个端口）");
+    }
+
+    private static void parsingAndLabels() {
+        Proxy proxy = Routes.parse("127.0.0.1:7897");
+        check(proxy != null && proxy.type() == Proxy.Type.HTTP, "host:port 解析成 HTTP 代理");
+        check(Routes.parse("[::1]:8080") != null, "带方括号的 IPv6 字面量能解析");
+        check(Routes.parse(" 10.0.0.5:1 ") != null, "首尾空白不算写坏");
+        check(Routes.parse("") == null, "空串等于没填");
+        check(Routes.parse(null) == null, "null 等于没填");
+        check(Routes.parse("127.0.0.1") == null, "没写端口等于没填");
+        check(Routes.parse("127.0.0.1:") == null, "端口空着等于没填");
+        check(Routes.parse(":7890") == null, "主机空着等于没填");
+        check(Routes.parse("127.0.0.1:0") == null, "0 端口不是可用代理");
+        check(Routes.parse("127.0.0.1:65536") == null, "越过 65535 不是可用代理");
+        check(Routes.parse("127.0.0.1:78a7") == null, "端口不是数字就当没填，直接拨出去");
+        check(Routes.parse("http://127.0.0.1:7890") == null, "把整条 URL 填进来不当代理用");
+        check(Routes.label(null).equals(Routes.DIRECT), "没有代理就写「直连」");
+        check(Routes.label(proxy).equals("代理 127.0.0.1:7897"), "有代理就写出地址与端口");
+        check(Routes.host("https://SEARCH.CNKI.com.cn/Search?a=1").equals("search.cnki.com.cn"),
+                "取主机名时丢掉大小写、路径与查询串");
+        check(Routes.host("not a url").isEmpty(), "认不出的串给空主机名，不记进路由表");
+    }
+
+    private static void timeouts() {
+        Proxy explicit = Routes.parse("192.168.1.20:7890");
+        Proxy auto = Routes.parse("127.0.0.1:7897");
+        check(Routes.PROBE_CONNECT_SECONDS == 6, "自动探路的超时定在 6 秒");
+        check(Routes.connectSeconds(explicit, null, 45) == 45, "直连按用户设的超时等");
+        check(Routes.connectSeconds(explicit, explicit, 45) == 45, "用户填的代理也按他设的超时等");
+        check(Routes.connectSeconds(explicit, auto, 45) == 6, "只有自动发现的死路压到 6 秒");
+        check(Routes.connectSeconds(null, auto, 0) == 6, "没设超时也给默认值，探路仍是 6 秒");
+        check(Routes.connectSeconds(null, null, 600) == 120, "用户填的超时封顶两分钟");
+    }
+
+    private static void routeLedger() {
+        Routes.reset();
+        check(Routes.routeFor("search.cnki.com.cn").equals("未走过"), "没走过的源如实写未走过");
+        Routes.note("https://search.cnki.com.cn/search/listresult", null);
+        check(Routes.routeFor("search.cnki.com.cn").equals(Routes.DIRECT), "走通直连就记下直连");
+        Proxy proxy = Routes.parse("127.0.0.1:7897");
+        Routes.note("https://api.openalex.org/works?q=x", proxy);
+        check(Routes.routeFor("api.openalex.org").equals("代理 127.0.0.1:7897"), "走通代理就记下那条代理");
+        check(Routes.summary().contains("search.cnki.com.cn 直连")
+                && Routes.summary().contains("api.openalex.org 代理 127.0.0.1:7897"),
+                "自检摘要把每个源最后走的路都摊开");
+        for (int i = 0; i < 40; i++) Routes.note("https://host" + i + ".example.org/x", null);
+        check(Routes.summary().split("  ").length <= 32, "路由记录封顶 32 条，不把报告撑爆");
+        Routes.reset();
+        check(Routes.routeFor("search.cnki.com.cn").equals("未走过") && Routes.summary().isEmpty(),
+                "reset 之后一切归零");
+        String list = Routes.candidateList("192.168.1.20:7890");
+        check(list.startsWith("直连") && list.contains("代理 192.168.1.20:7890"),
+                "连不上时先告诉用户试过哪几条路");
+        String listed = Routes.candidateList("127.0.0.1:7897");
+        check(occurrences(listed, "代理 127.0.0.1:7897") == 1,
+                "用户填的代理与自动发现的端口重合时只列一次（实测列出：" + listed + "）");
+        check(occurrences(listed, "代理 127.0.0.1:7890") == 1, "另一个自动端口仍照列，路是路、端口是端口");
+        List<Proxy> sameAgain = Routes.order("api.openalex.org", Routes.parse("127.0.0.1:7897"));
+        check(countMatches(sameAgain, "127.0.0.1:7897") == 1 && distinct(sameAgain),
+                "同一个端口在候选队列里只出现一次——死路每扇窗口只撞一次（实得 " + countMatches(sameAgain, "127.0.0.1:7897") + " 次）");
+    }
+
+    private static int occurrences(String haystack, String needle) {
+        int at = 0, total = 0;
+        while ((at = haystack.indexOf(needle, at)) >= 0) { total++; at += needle.length(); }
+        return total;
+    }
+
+    /** 这条地址在候选队列里排了几遍。理想答案永远是 1。 */
+    private static int countMatches(List<Proxy> order, String address) {
+        int total = 0;
+        for (Proxy proxy : order) if (Routes.label(proxy).contains(address)) total++;
+        return total;
+    }
+
+    private static boolean containsLoopback(List<Proxy> order, int port) {
+        for (Proxy proxy : order) {
+            if (proxy == null) continue;
+            InetSocketAddress address = (InetSocketAddress) proxy.address();
+            if (address.getPort() == port && address.getHostString().equals("127.0.0.1")) return true;
+        }
+        return false;
+    }
+
+    private static boolean distinct(List<Proxy> order) {
+        ArrayList<Proxy> seen = new ArrayList<Proxy>();
+        for (Proxy proxy : order) {
+            boolean duplicate = false;
+            for (Proxy known : seen) if (known == proxy || (known != null && known.equals(proxy))) duplicate = true;
+            if (duplicate) return false;
+            seen.add(proxy);
+        }
+        return true;
+    }
+}

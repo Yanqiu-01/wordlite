@@ -40,6 +40,7 @@
 | 0.6.2 | 自建库批量导入：一次选多个 TXT/DOCX，逐文件进度、按正文哈希去重 | `TextCorpusRegression` 断言去重 |
 | 0.6.3 | PDF 抽取进自建库（复用 `PdfFile` 的文字流），扫描版如实报「无文字层」 | `PdfRegression` 加断言 |
 | 0.6.1 对账 | 本行内容已交付，但**发版号是 0.7.2**（版本号只能单增，0.6.x 已发完）。已交付：`CnkiSearch.narrow` 四步整形（去标点 / 停用词下刀 / 术语块与数字串整块保住 / 分族给长度），两端剥语法残渣，`[11]` 这类引文序号不再当查询词。实测新增 `tools/cnki-live-probe.ps1`，11 个真实窗口对题重合度 旧 10.2% → 新 11.5%，据此否掉"改查询词能救回对题率"这个假设——瓶颈是"只有题名+摘要可比"与知网匿名检索本身（见 0.6.3 与本表 0.7.2 条目）。仍未解决：无词典故无真分词，句首无刀口时仍发 `高集成度和小 型化方向发展`；英文档 `FAMILY_LATIN` 没有生产调用方，"对不同源给不同长度"未真正生效 | `CnkiSearchRegression` 108 → 226 条 |
+| 0.6.2 / 0.6.3 对账 | 已交付，但发版号是 **0.7.3**（版本号只能单增）。已交付：`CorpusImport.run` 逐文件回执 + 归一化正文 SHA-256 去重 + 坏文件不拖垮整批 + 索引原子写；PDF 正文抽取进 `PdfFile.extractText`（对象表线性扫、`ToUnicode`/`/Encoding`、FlateDecode 含裸 deflate 与 PNG 滤波），扫描版按 `textOps == 0` 如实报"无文字层"。未交付：界面那条导入链路仍走 `ApiWorkflow.libraryImport` 的逐文件 `addDocument`，界面上看不到 DUPLICATE 这一档回执；PDF 只解 FlateDecode，LZW / ASCII85 / `/Differences` 重映射不做，靠内嵌字体 cmap 才能还原文字的 PDF 没测到；**中文三库的正文与图表仍然进不了语料**，报告里的相似率依旧是下限。 | 新增 `CorpusImportRegression` 131 条 + 五份 PDF 夹具 |
 | 0.6.0 对账 | 已交付：`PaperSources.Limits` 新增 `windows/fullTexts` 并真由设置下发（新装机默认窗口 12→6），`perEngine` 只当每页条数；120 次请求与 180 秒挂钟两道闸门撞顶必写注记，每源两次提问之间隔 400ms；新增 `retrievalPartial` 第三态与 HTML「检索覆盖率」小节；入库改由 `CandidateRanker.dedup` + `plan` 按 BM25 名次决定，与检索词零共同词的候选不进语料。仍未解决：中文三库只有摘要可比，正文与图表进不了语料（见 0.6.1/0.6.3），`MAX_SEARCH_MILLIS` 等三个参数还没在真机量过 | 新增 `RetrievalCoverageRegression`，111 条断言 |
 
 ## 0.7.x AIGC 内核（大版本 + 2）

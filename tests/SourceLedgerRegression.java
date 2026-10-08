@@ -68,6 +68,36 @@ public final class SourceLedgerRegression {
         check(perEngineTotal(ledger, report) == ledger.duplicateChars
                         && perEngineTotal(ledger, report) == report.duplicateChars,
                 name + "：按检索源拆开再合回去仍然是同一个总重复字符数");
+        check(overlapPairs(report.hits) == 0,
+                name + "：命中区间两两不重叠（" + overlapPairs(report.hits) + " 对相交），一个字符不会被记两次");
+        sameRuler(name, report, ledger, query, null, null);
+    }
+
+    /** 相交的命中对数：区间取并集之后必须恒为 0，这是"一个字符只算一次"最直接的结构性证据。 */
+    private static int overlapPairs(ArrayList<TextCorpus.Hit> hits) {
+        int pairs = 0;
+        for (int i = 0; i < hits.size(); i++)
+            for (int j = i + 1; j < hits.size(); j++)
+                if (hits.get(i).start < hits.get(j).end && hits.get(j).start < hits.get(i).end) pairs++;
+        return pairs;
+    }
+
+    /**
+     * 一把尺的等式：同一批命中喂给 CharLedger，账本的分子/分母/排除必须与 TextCorpus.Report 的
+     * duplicateChars/comparedChars/excludedChars 一字不差。0.7.2 两侧各数各的（真文档实测分母差 946 字、
+     * 长句分子差 64 字），这条断言就是不让它再分家。
+     */
+    private static void sameRuler(String name, TextCorpus.Report report, SourceLedger ledger, String query,
+                                  int[] excluded, int[] cited) {
+        CharLedger.Balance bal = CharLedger.close(query, excluded, cited, report.hits, null);
+        check(sum(ledger) == report.duplicateChars && report.duplicateChars == bal.duplicateChars,
+                name + "：Σ 各篇 " + sum(ledger) + " == Report.duplicateChars " + report.duplicateChars
+                        + " == CharLedger.duplicateChars " + bal.duplicateChars);
+        check(report.comparedChars == bal.totalChars && report.excludedChars == bal.excludedChars
+                        && report.citedDuplicateChars == bal.citedDuplicateChars,
+                name + "：分母 " + report.comparedChars + " == 账本分母 " + bal.totalChars + "，排除 "
+                        + report.excludedChars + " == 账本排除 " + bal.excludedChars + "，引用内重复 "
+                        + report.citedDuplicateChars + " == 账本引用内重复 " + bal.citedDuplicateChars);
     }
 
     // ---- 夹具 ----
@@ -147,12 +177,52 @@ public final class SourceLedgerRegression {
     private static final String OVERLAP_QUERY = DOC_P + "随后界面金属间化合物沿晶界碎裂，断口形貌随之改变，"
             + OVERLAP_TAIL;
 
+    /* 两篇句级命中互相重叠用的夹具：二十句正文一句到底（没有句末标点），再接一个逗号与一句 44 字的尾巴，
+       整段 537 个有效字符 > WINDOW_CHARS 512，才会被切成 0..512 与 448..537 两个滑窗。 */
+    private static final String[] LONG_CLAUSES = {
+            "保温时间一过四十分钟反应层就明显增厚接头强度跟着掉",
+            "取样位置固定在接头中心两侧每次试验都记下峰值载荷",
+            "断裂位置总是落在热影响区边缘断口形貌呈沿晶特征",
+            "晶界处的元素偏聚让局部电位差升高腐蚀抗力随之下降",
+            "同一批样品在三种温度下各重复五次结果彼此吻合良好",
+            "数据采集频率取每毫秒一次滤波窗口宽度保持十六点",
+            "标定用标准试块由第三方实验室提供并附检定证书编号",
+            "数据处理阶段剔除明显离群的三次记录其余全部保留",
+            "离群判据取两倍标准差这一条在预实验阶段就定了下来",
+            "拟合优度低于零点九五次的数据集不进入最终结论部分",
+            "误差棒取正负一个标准差图上的每个点都是十次平均",
+            "对比试样采用同炉同批材料以排除批次差异带来的干扰",
+            "显微组织观察用扫描电镜配合能谱分析双管齐下做定位",
+            "衍射峰位偏移说明晶格常数发生了变化固溶程度不同",
+            "硬度沿截面呈梯度分布峰值恰好落在金属间化合物一侧",
+            "疲劳裂纹起裂源在表面缺陷处扩展速率随载荷幅上升",
+            "断口上的辉线间距与加载频率吻合证明是疲劳主导失效",
+            "所有试验都在同一台设备同一间实验室完成以减少漂移",
+            "原始记录以纯文本归档并保留设备自带的写入时间戳",
+            "复现实验由另一位同事独立完成他事先没有看过结论",
+    };
+    private static final String LONG_TAIL =
+            "随后我们更换了同一台设备的夹具并重新标定了一次载荷传感器，把上面这些步骤又完整重复了两遍";
+    private static final String LONG_HEAD = joined(LONG_CLAUSES);
+    /** 乙篇原文 = 第二个窗口 448..537 那 89 个字：甲篇尾巴 44 字 + 逗号 + 44 字尾句。 */
+    private static final String LONG_B_TEXT = LONG_HEAD.substring(448) + "，" + LONG_TAIL;
+
+    private static String joined(String[] clauses) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < clauses.length; i++) {
+            if (i > 0) out.append('，');
+            out.append(clauses[i]);
+        }
+        return out.toString();
+    }
+
     public static void main(String[] args) {
         conservation();
         merging();
         folding();
         ordering();
         bandVersusSentence();
+        overlappingHits();
         longSentence();
         reportHtml();
         System.out.println("SUMMARY " + count + " assertions passed"
@@ -340,7 +410,84 @@ public final class SourceLedgerRegression {
         check(explained, "报告用一条注记说清那个 0 处命中是怎么来的，不把假阴性留给用户猜");
     }
 
-    /** 已知缺陷的钉桩（不修只钉）：超 512 有效字符的长句滑窗重叠 64 个字，分子里算了两遍。 */
+    /**
+     * 两篇文献的句级命中互相重叠：0.7.2 只有"句级 vs 指纹带"那一组重叠夹具，两篇各拿一个滑窗这种重叠
+     * 没有夹具，于是"来源榜 Σ 各篇 > 账本重复字数"这个雷一直没被踩响。这里一次钉四颗钉子：重叠段只归
+     * 先占的那一篇、Σ 各篇 == Report.duplicateChars == CharLedger.duplicateChars、排除区能把一条命中
+     * 切成两段而字符不丢、被整段盖住的那一篇从榜上消失但一个字符都不多。
+     *
+     * 夹具全部手算：LONG_CLAUSES 二十句共 473 个字（25+24+23+24+24+23+24+23+24+24+23+24+24+23+24+23
+     * +24+24+23+23），加十九个逗号 = 492 个有效字符，整段没有句末标点所以是一句话；再接一个逗号与
+     * 44 个字的 LONG_TAIL，全文 492 + 1 + 44 = 537 > WINDOW_CHARS 512，于是切成 0..512 与 448..537
+     * 两窗，重叠 512 - 448 = 64 个字。甲篇原文 = 前 492 个字（正好一窗装得下），
+     * 乙篇原文 = 448..537 那 89 个字（448 之后是 448..492 的 44 个字 + 1 个逗号 + 44 个字的尾句）。
+     */
+    private static void overlappingHits() {
+        String query = LONG_HEAD + "，" + LONG_TAIL;
+        check(LONG_CLAUSES.length == 20 && valid(LONG_HEAD) == 492,
+                "夹具自证：二十句正文 473 个字加十九个逗号 = 492 个有效字符");
+        check(valid(query) == 537 && TextCorpus.sentences(query).size() == 1,
+                "夹具自证：492 + 1 个逗号 + 44 = 537 个有效字符，且整段算一句话（超过 512 才会被切窗）");
+        check(LONG_B_TEXT.length() == 89 && valid(LONG_B_TEXT) == 89,
+                "乙篇原文就是第二个窗口那 89 个字：492 - 448 = 44 个字的甲篇尾巴 + 逗号 + 44 个字的尾句");
+
+        TextCorpus overlap = new TextCorpus();
+        overlap.add(source("OV1", "甲篇", "openalex", "https://doi.org/10.1/ov.a"), LONG_HEAD);
+        overlap.add(source("OV2", "乙篇", "crossref", "https://doi.org/10.1/ov.b"), LONG_B_TEXT);
+        TextCorpus.Report report = overlap.match(query, null);
+        SourceLedger ledger = SourceLedger.aggregate(report.hits, TextCorpus.normalize(query), report.comparedChars);
+        check(report.hits.size() == 2 && report.hits.get(0).start == 0 && report.hits.get(0).end == 512
+                        && report.hits.get(1).start == 512 && report.hits.get(1).end == 537,
+                "两篇各拿一窗，重叠的 64 个字裁给先占的甲篇：0..512 与 512..537");
+        check(overlapPairs(report.hits) == 0, "两篇互相重叠的命中裁完之后两两不重叠");
+        check(report.duplicateChars == 537 && report.comparedChars == 537,
+                "分子 == 分母 == 537：512 + 25 就是整段，重叠那 64 个字不再有第二次");
+        check(ledger.rows.size() == 2 && ledger.rows.get(0).duplicateChars == 512
+                        && ledger.rows.get(1).duplicateChars == 25,
+                "来源榜两行各 512 与 25 个字：乙篇被抢走的正是滑窗重叠的那 64 个");
+        check(sum(ledger) == report.duplicateChars && sum(ledger) == 537,
+                "Σ 各篇 == 分子 == 537：0.7.2 在这里是 512 + 89 = 601 > 537，来源榜会比总重复还多");
+        check(overlap.disputedChars() == 64, "被两篇同时命中的字符数手算就是滑窗重叠的 64 个");
+        // crossCheck 自带 sameRuler，这条等式不在这里再数第二遍。
+        crossCheck("两篇句级命中互相重叠", overlap, query);
+
+        int[] cut = new int[]{200, 260};
+        TextCorpus.Report sliced = overlap.match(query, null, cut);
+        SourceLedger slicedLedger = SourceLedger.aggregate(sliced.hits, TextCorpus.normalize(query),
+                sliced.comparedChars);
+        check(sliced.hits.size() == 3 && sliced.hits.get(0).start == 0 && sliced.hits.get(0).end == 200
+                        && sliced.hits.get(1).start == 260 && sliced.hits.get(1).end == 512,
+                "排除区压在命中中间就把它切成两段：0..200 与 260..512，另加乙篇那段 512..537");
+        check(overlapPairs(sliced.hits) == 0, "切成两段的命中照样两两不重叠");
+        check(sliced.comparedChars == 477 && sliced.duplicateChars == 477 && sliced.excludedChars == 60,
+                "537 - 60 = 477：排除区那 60 个字既不进分母也不进分子，两处都扣得干净");
+        check(sliced.comparedChars + sliced.excludedChars == 537,
+                "分母 + 排除 == 整篇 537 个有效字符：同一次划分的两边，加起来不多不少");
+        check(slicedLedger.rows.get(0).duplicateChars == 452 && slicedLedger.rows.get(0).hitCount == 2,
+                "甲篇被切成两处仍记在同一行：200 + 252 = 452");
+        check(sum(slicedLedger) == sliced.duplicateChars && sum(slicedLedger) == 477,
+                "命中被切开之后 Σ 各篇仍然等于分子：452 + 25 = 477，拆段不丢字符");
+        sameRuler("排除区把命中切成两段", sliced, slicedLedger, query, cut, null);
+
+        TextCorpus buried = new TextCorpus();
+        buried.add(source("OV1", "甲篇", "openalex", "https://doi.org/10.1/ov.a"), LONG_HEAD);
+        buried.add(source("OV2", "乙篇", "crossref", "https://doi.org/10.1/ov.b"), LONG_B_TEXT);
+        buried.add(source("OV3", "丙篇", "cqvip", "https://doi.org/10.1/ov.c"), LONG_HEAD.substring(100, 200));
+        TextCorpus.Report buriedReport = buried.match(query, null);
+        SourceLedger buriedLedger = SourceLedger.aggregate(buriedReport.hits, TextCorpus.normalize(query),
+                buriedReport.comparedChars);
+        check(buriedLedger.paperCount == 2 && buriedLedger.rows.size() == 2,
+                "丙篇那 100 个字整个被甲篇盖住：它在来源榜里连一行都排不上，那段字符归甲篇");
+        check(buriedReport.duplicateChars == 537 && sum(buriedLedger) == 537,
+                "整段被盖住既不增多也不减少：Σ 各篇 == 分子 == 537");
+        check(buried.disputedChars() == 164, "注记报的是真数：64 个滑窗重叠 + 100 个被甲篇整个盖住 = 164");
+        sameRuler("第三篇整个被甲篇盖住", buriedReport, buriedLedger, query, null, null);
+    }
+    /**
+     * 0.7.3 修好的那条已知缺陷：超 512 有效字符的长句按 448 的步长滑窗（WINDOW_CHARS 512 减 WINDOW_OVERLAP
+     * 64），两篇各赢一窗时重叠的那 64 个字在 0.7.2 的分子里算了两遍（896 = 512 + 384 > 分母 832）。
+     * 现在命中区间先取并集再数字，重叠只认一次，这条断言也从"照抄缺陷"改成等式。
+     */
     private static void longSentence() {
         StringBuilder a = new StringBuilder();
         for (int i = 0; i < 512; i++) a.append((char) (0x4E00 + (i * 37) % 400));
@@ -353,16 +500,20 @@ public final class SourceLedgerRegression {
         TextCorpus.Report report = corpus.match(query, null);
         SourceLedger ledger = SourceLedger.aggregate(report.hits, TextCorpus.normalize(query), report.comparedChars);
         check(report.comparedChars == 832, "分母按整句只数一次：512 + 320 = 832 个有效字符");
-        check(report.hits.size() == 2 && report.hits.get(0).end - report.hits.get(0).start == 512
-                        && report.hits.get(1).end - report.hits.get(1).start == 384,
-                "两条命中是 0..512 与 448..832，窗口之间重叠 64 个字符");
-        check(report.duplicateChars == 896,
-                "已知缺陷：长句滑窗重叠的 64 个字符在分子里算了两遍（512 + 384 = 896，比分母多出的正是那 64）");
-        check(sum(ledger) == ledger.duplicateChars && sum(ledger) == report.duplicateChars,
-                "账本与分子同口径：缺陷被如实照抄，来源榜不会比总数多也不会比总数少");
-        check(ledger.rows.get(0).duplicateChars == 512 && ledger.rows.get(1).duplicateChars == 384,
-                "两篇各记自己那一段：512 与 384");
+        check(report.hits.size() == 2 && report.hits.get(0).start == 0 && report.hits.get(0).end == 512
+                        && report.hits.get(1).start == 512 && report.hits.get(1).end == 832,
+                "两条命中裁成 0..512 与 512..832：乙篇原来那条从 448 起（窗口步长 512 - 64 = 448），"
+                        + "重叠的 64 个字划归先占的甲篇");
+        check(report.duplicateChars == 832,
+                "原来钉缺陷的那条改成等式：分子 832 == 分母 832（旧口径 512 + 384 = 896，双算了滑窗重叠的 64）");
+        check(overlapPairs(report.hits) == 0, "命中区间两两不重叠：并集这一步在长句滑窗上没有漏网");
+        check(sum(ledger) == ledger.duplicateChars && sum(ledger) == report.duplicateChars && sum(ledger) == 832,
+                "来源榜 Σ 各篇 == 分子 == 832：交叉验证照旧成立，只是不再两边一起虚高");
+        check(ledger.rows.get(0).duplicateChars == 512 && ledger.rows.get(1).duplicateChars == 320,
+                "两篇各记自己那份：512 与 320（旧口径记成 512 与 384，多出的 64 个字正是被双算的那批）");
         check(corpus.disputedChars() == 64, "两篇真正抢同一组字符的只有滑窗重叠的那 64 个字符");
+        // crossCheck 自带 sameRuler，这条等式不在这里再数第二遍。
+        crossCheck("长句滑窗重叠", corpus, query);
     }
 
     /** 报告的三种写法：有命中排表、没比对成整段不排、比对过但没命中要说清未命中不等于没重复。 */

@@ -49,7 +49,7 @@ Android 上的 `.docx` 论文工作台：本地解析与回写 OOXML，按 Word 
 - **查重**：`本地查重`（离线，只用自建库）与`全网查重`（自建库 + 内置检索源）两种模式，输出总相似度比、去除引用重复比、自编率、按来源分布与可点击定位的相似片段。
 - **AIGC 检测**：逐句给出机器生成倾向分与整篇 AI 生成比例，附判定依据，独立于查重结果高亮。
 - **降重**：选区 / 当前段落 / 全文逐段改写，原文与改写并排 diff，逐条接受、拒绝、重新生成、多建议切换；支持离线规则改写与自定义大模型接口两种后端。
-- **自建库**：把参考文献、学院论文合集、往届论文导入本机索引，作为离线查重与 AIGC 语料基线。
+- **自建库**：把参考文献、学院论文合集、往届论文导入本机索引，作为离线查重与 AIGC 语料基线。一次可选多个文件（TXT / MD / DOCX / PDF），逐文件回执：成功、正文重复、类型不支持、没有文字层、读取失败。PDF 自己解（对象表线性扫、`ToUnicode` / `/Encoding`、FlateDecode 含 PNG 滤波），扫描版如实报"无文字层"，不冒充一次成功的空导入。
 
 ## 查重与 AIGC 检测怎么工作
 
@@ -71,7 +71,8 @@ Android 上的 `.docx` 论文工作台：本地解析与回写 OOXML，按 Word 
 
 | 来源 | 端点 | 取用内容 |
 | --- | --- | --- |
-| 维普 | `www.cqvip.com/search` | 中文期刊与学位论文的摘要、作者、刊名、年期、文献页地址 |
+| 知网 | `search.cnki.com.cn`（POST 表单） | 中文期刊、学位论文与会论文的题录加摘要；匿名口是部分索引，见下 |
+| 维普 | `www.cqvip.com/search` | 中文期刊与学位论文的摘要、作者、刊名、年期、文献页地址 |
 | 万方数据 | `s.wanfangdata.com.cn`（gRPC-web） | 期刊与学位论文的题名、作者、刊名或学校、年份、完整摘要、DOI |
 | 国家哲学社会科学文献中心 | `www.ncpssd.org/searchHandler/search` | 社科期刊题录与摘要 |
 | OpenAlex | `api.openalex.org/works` | 标题、摘要、开放获取全文链接 |
@@ -81,9 +82,9 @@ Android 上的 `.docx` 论文工作台：本地解析与回写 OOXML，按 Word 
 | arXiv | `export.arxiv.org` | 预印本标题与摘要 |
 | CORE | `core.ac.uk` | 聚合开放获取全文（可选配置 API Key） |
 
-开放获取全文按候选题录按需拉取，只在手机上比对；命中结果带来源、题名、作者、年份与标识符写进报告。中文三库里万方开着检索服务：POST 一帧 protobuf 到 `SearchService.SearchService/search`，回来的同样是 protobuf，一次检索连完整摘要一起给回，编解码在 `WanfangProtocol` 与 `ProtoWire` 里手写，不额外引一个 protobuf 运行时。知网的公开检索入口都在滑块验证与会话校验之后，匿名可用的是按文献号或链接取条目、按刊期看目录（`wap.cnki.net/touch/web/Journal/…`）；知网这一路走`自建库`：把手上的题录、PDF 或 Word 导进来就参与比对，机构或代理商的检测 API 接在`接口设置`（`审阅 → 接口设置`，支持文档上传或选区提交、字段映射、超时重试）。
+开放获取全文按候选题录按需拉取，只在手机上比对；命中结果带来源、题名、作者、年份与标识符写进报告。中文三库里万方开着检索服务：POST 一帧 protobuf 到 `SearchService.SearchService/search`，回来的同样是 protobuf，一次检索连完整摘要一起给回，编解码在 `WanfangProtocol` 与 `ProtoWire` 里手写，不额外引一个 protobuf 运行时。知网另外两个匿名可读的公开页用来按文献号或链接取条目、按刊期看目录（`wap.cnki.net/touch/web/Journal/…`）。检索口 `search.cnki.com.cn` 实测是个**部分索引**：它自己几分钟前刚返回过的文献，按题名精确查只有 3/5 回得来；它也不做短语检索，喂整句或连续 16 个字一律回 0 条，`Order=2`（相关度）是四种排序里唯一能用的。所以中文库给回的是题录加摘要，报告里的相似率是**下限**，"检索覆盖率"与这句说明必须同段出现；手上的题录、PDF 或 Word 走`自建库`导进来就参与比对，机构或代理商的检测 API 接在`接口设置`（`审阅 → 接口设置`，支持文档上传或选区提交、字段映射、超时重试）。
 
-部分移动网络会重置海外源的 TLS 连接：`检索设置 → HTTP 代理`填一个 `host:port` 就能让检索从那里出网。手机上最省事的接法是把电脑上的代理端口用数据线映射进来：`adb reverse tcp:18899 tcp:7897`（7897 是电脑上 Clash 的 mixed 端口），然后填 `127.0.0.1:18899`。代理只隧道 HTTPS，看不到正文；留空即直连，写法不合法也按直连处理。代理那头没人应答（拔了线、忘了 `adb reverse`）时退回直连重试一次，一次查重不会因为代理没接上而整轮失败。
+部分移动网络会重置海外源的 TLS 连接：`检索设置 → HTTP 代理`填一个 `host:port` 就能让检索从那里出网。手机上最省事的接法是把电脑上的代理端口用数据线映射进来：`adb reverse tcp:18899 tcp:7897`（7897 是电脑上 Clash 的 mixed 端口），然后填 `127.0.0.1:18899`。代理只隧道 HTTPS，看不到正文；留空即直连，写法不合法也按直连处理。代理那头没人应答（拔了线、忘了 `adb reverse`）时退回直连重试一次，一次查重不会因为代理没接上而整轮失败。知网、万方、维普、哲社中心按域名认成国内源，一律先直连（知网的检索口在 `cnki.com.cn` 下，不在 `cnki.net` 下）；实测同一个知网口走直连与走海外出口召回没有差别，所以这条只省下每扇窗口一次六秒的死路等待。用户在设置里填的代理与自动发现的端口重合时也只试一次。
 
 ### AIGC 倾向
 
@@ -186,13 +187,22 @@ Robolectric 排版与 UI 回归在 `tests/ui`：
 cd tests/ui && gradle --no-daemon test --console=plain
 ```
 
-`tools/test-host.ps1` 一次跑完 12 个 JVM 套件，1033 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 168、`AigcRegression` 逐句倾向 70、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 167、`ApiRegression` 接口配置与加密 30、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
+`tools/test-host.ps1` 一次跑完 20 个 JVM 套件，2046 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 168、`AigcRegression` 逐句倾向 70、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 167、`ApiRegression` 接口配置与加密 30、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
 
 联网检索源的解析全部走本地回环服务，避免测试依赖外网；要确认这九个内置源此刻真的能返回题录，跑：
 
 ```powershell
-java -cp <classes> com.rikkahub.wordlite.LiveEngineProbe engines"论文关键词"
+java -cp <classes> com.rikkahub.wordlite.LiveEngineProbe engines "论文关键词"
 java -cp <classes> com.rikkahub.wordlite.LiveEngineProbe scan tests/samples/input-liu.docx
+```
+
+查重的真召回不靠回环桩回答，另有三台联网实测台（同样故意不在闸门里）：
+
+```powershell
+pwsh tools/recall-probe.ps1                          # 种一句真论文原文，量召回/检出/归属
+pwsh tools/recall-probe.ps1 -Probe CnkiFormProbe     # 十种写法问知网，比哪种问得回那一篇
+pwsh tools/recall-probe.ps1 -Probe CqvipAlignProbe   # 维普的文献号与摘要有没有对行
+pwsh tools/recall-probe.ps1 -Proxy 127.0.0.1:7897    # 挂代理再量一遍，与直连做 A/B
 ```
 
 Robolectric 排版与 UI 回归在 `tests/ui`，覆盖行距、断行、目录分页边界、表格列宽与行高、ribbon 与 PDF 导出、页面缩放与 section 页眉页脚坐标，共 62 例（60 例执行，2 例待真机参考取样），Windows 下全绿。

@@ -276,6 +276,35 @@ public final class CandidateRankerRegression {
                 candidate("cqvip", "X2", "图像分割", "乙的摘要内容也完全不同。", "", "")));
         check(untitled.kept.size() == 2, "标题短到只剩通用词时不凭它合并，够不到 MIN_TITLE_KEY 就不算键");
 
+        /* 维普这一路是这条守卫的全部理由：服务端渲染里题名整个缺席，两条不同的论文共用一个
+           "刊名 + 年 + 期"字符串。先证明它们的题名键真的相同（拦住它们的不是键不同），再看并桶被挡住。 */
+        PaperSources.Candidate venueA = candidate("cqvip", "journal/7104431361", "《矿冶工程》 2022年第2期",
+                "甲篇：以铜箔为中间层连接 Super-Ni 叠层复合材料与钛合金。");
+        PaperSources.Candidate venueB = candidate("cqvip", "journal/9900000001", "《矿冶工程》 2022年第2期",
+                "乙篇：矿渣粉掺量对混凝土收缩的影响，做了三组对照。");
+        check(CandidateRanker.titleKey(venueA.source.title).equals(CandidateRanker.titleKey(venueB.source.title))
+                        && CandidateRanker.titleKey(venueA.source.title).length() >= CandidateRanker.MIN_TITLE_KEY,
+                "同刊同期的两条维普记录题名键相同且够长——题名这条键在这里必然误伤，守卫得靠文献号");
+        check(CandidateRanker.distinctRecords(venueA, venueB),
+                "同一个检索源给出两个不同文献号：判成两篇");
+        check(!CandidateRanker.distinctRecords(venueA, venueA), "同一个文献号不构成冲突，同源同号照旧是一条");
+        CandidateRanker.Dedup venue = CandidateRanker.dedup(poolOf(venueA, venueB));
+        check(venue.kept.size() == 2 && venue.merges.isEmpty(),
+                "同刊同期的两篇维普不被并成一条：并了就白丢一次可比对的摘要，来源榜还会指错文献号");
+
+        /* 反向对照：跨源的两个号不在这条守卫的射程里，号不同说明不了任何事。 */
+        PaperSources.Candidate crossEngineA = candidate("cnki", "CNKI-9527", "碳化硅与陶瓷的连接研究综述", "综述甲。");
+        PaperSources.Candidate crossEngineB = candidate("wanfang", "WF-0001", "碳化硅与陶瓷的连接研究综述",
+                "综述乙，同一篇在万方的记录，摘要更长一些，写得也更详细。");
+        check(!CandidateRanker.distinctRecords(crossEngineA, crossEngineB),
+                "两个检索源各给一个号：不判成冲突，跨源照旧只认 DOI 与题名");
+        CandidateRanker.Dedup crossEngine = CandidateRanker.dedup(poolOf(crossEngineA, crossEngineB));
+        check(crossEngine.kept.size() == 1 && crossEngine.merges.size() == 1,
+                "同一篇在知网与万方各回来一次仍并成一条，入库名额只占一个（这条能力没被新守卫削掉）");
+        CandidateRanker.Dedup halfKeyed = CandidateRanker.dedup(poolOf(venueA,
+                candidate("cqvip", "", "《矿冶工程》 2022年第2期", "没有文献号的第三条记录。")));
+        check(halfKeyed.kept.size() == 1, "有一边拿不到文献号时仍按题名并桶，缺号不但不并反而更糟");
+
         PaperSources.Candidate keepUrl = candidate("openalex", "A1", "同一个 DOI 的两种记录甲", "甲的摘要。",
                 "10.2000/same.1", "https://example.org/keep.pdf");
         PaperSources.Candidate longerAbstract = candidate("crossref", "A2", "同一个 DOI 的两种记录乙",

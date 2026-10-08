@@ -42,8 +42,8 @@ final class Routes {
         boolean domestic = domestic(host);
         if (domestic) out.add(null);
         Proxy remembered = lastGood;
-        if (remembered != null && remembered != explicit) out.add(remembered);
-        for (Proxy auto : autodiscovered()) if (auto != explicit) out.add(auto);
+        if (remembered != null && !same(remembered, explicit)) out.add(remembered);
+        for (Proxy auto : autodiscovered()) if (!same(auto, explicit)) out.add(auto);
         if (!domestic) out.add(null);
         return out;
     }
@@ -83,7 +83,25 @@ final class Routes {
     }
 
     private static void add(List<Proxy> out, Proxy value) {
-        if (value != null && !out.contains(value)) out.add(value);
+        if (value == null || contains(out, value)) return;
+        out.add(value);
+    }
+
+    private static boolean contains(List<Proxy> out, Proxy value) {
+        for (Proxy known : out) if (same(known, value)) return true;
+        return false;
+    }
+
+    /**
+     * 两条路是不是同一条。{@code java.net.Proxy} 不重写 equals，两次 parse 出来的同一个
+     * host:port 在 {@code ==} 与 {@code List.contains} 眼里是两个对象——0.7.3 之前用户在设置里填的
+     * 代理只要和自动发现的端口撞上（填 127.0.0.1:7897 是最常见的写法，USB 反代就指这儿），
+     * 同一条死路每扇窗口要被撞两遍，自检里那条路也被列两次。地址按值比，不靠对象身份。
+     */
+    static boolean same(Proxy left, Proxy right) {
+        if (left == right) return true;
+        if (left == null || right == null || left.type() != right.type()) return false;
+        return String.valueOf(left.address()).equals(String.valueOf(right.address()));
     }
 
     static String label(Proxy via) {
@@ -110,7 +128,7 @@ final class Routes {
         Proxy explicit = parse(explicitProxy);
         if (explicit != null) out.append("、").append(label(explicit));
         for (Proxy auto : autodiscovered())
-            if (auto != explicit) out.append("、").append(label(auto));
+            if (!same(auto, explicit)) out.append("、").append(label(auto));
         return out.toString();
     }
     /** 哪个源最后走了哪条路，自检和查重说明都用它。主机名不是文档内容，写出来不算泄露。 */
@@ -161,12 +179,13 @@ final class Routes {
         return host.startsWith("127.") || host.equals("localhost") || host.startsWith("[::1]");
     }
 
-    /** 国内库。海外出口经常拿不到它们的正常响应，所以这些一律先直连。 */
+    /**     * 国内库。海外出口经常拿不到它们的正常响应，所以这些一律先直连。     *     * <p>{@code cnki.com.cn} 是 0.7.3 补上的，漏掉它的代价是实测出来的：知网的检索口挂在     * {@code search.cnki.com.cn}，不在 {@code cnki.net} 下，于是它被当成海外源——手机挂着代理时，     * 问知网的第一跳绕到了海外出口。同一个匿名检索口，绕出去的相关度更低，直连时同一篇论文更容易被问回来     * （知网自召回实测见 docs/retrieval-recall.md）。国内库的身份该按域名认，不该漏一个子域。     */
     static boolean domestic(String host) {
-        String[] suffixes = {"cnki.net", "wanfangdata.com.cn", "cqvip.com", "cqvip.com.cn",
+        String[] suffixes = {"cnki.net", "cnki.com.cn", "wanfangdata.com.cn", "cqvip.com", "cqvip.com.cn",
                 "ncpssd.org", "wanfangdata.com", "doc88.com", "baidu.com"};
         for (String suffix : suffixes)
             if (host.equals(suffix) || host.endsWith("." + suffix)) return true;
         return false;
     }
 }
+

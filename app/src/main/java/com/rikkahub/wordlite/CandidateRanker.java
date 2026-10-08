@@ -350,7 +350,8 @@ public final class CandidateRanker {
                 Bucket hit = byTitle.get(title);
                 /* 两边都有 DOI 时 DOI 必须相同才算同一篇。同题不同 DOI 是常态——"基于深度学习的
                    图像分割研究"这种标题一个库里能排出几十篇——只按标题合并会误伤。 */
-                if (hit != null && (hit.doi.isEmpty() || doi.isEmpty() || hit.doi.equals(doi))) {
+                if (hit != null && (hit.doi.isEmpty() || doi.isEmpty() || hit.doi.equals(doi))
+                        && !distinctRecords(hit.kept, candidate)) {
                     bucket = hit;
                     kind = "title";
                     key = title;
@@ -380,6 +381,29 @@ public final class CandidateRanker {
             result.merges.add(new Merged(winner, loser, kind, key, account(kind, key, winner, loser)));
         }
         return result;
+    }
+
+    /**
+     * 同一个检索源给出的两个不同文献号就是两篇，题名一样也不并桶。
+     *
+     * <p>这条是给维普兜底的：它的检索结果是服务端渲染的，题名整个缺席（实测题名那个
+     * {@code <a class="title">} 是空标签，真题名要登录后由脚本再填），所以候选只能署成
+     * "《矿冶工程》 2022年第2期"这种"刊名+年+期"。同一期里的两篇共用这一个串，按题名并桶会把
+     * 两篇并成一篇——白丢一次可比对的摘要，来源榜还把重复记到错的文献号上（实测：种一句维普真原文，
+     * 维普每次都在第一批里给回一篇同刊同期但不同号的文章，见 docs/retrieval-recall.md）。
+     *
+     * <p>只管同源。跨源不在这条的射程里：知网与万方给同一篇论文两个号是常态，号不同说明不了任何事，
+     * 那一侧仍然只能靠 DOI 相同或题名指纹相同。两边任一没有号时也照旧并桶，别把 0.6.0 的合并能力削掉。
+     */
+    static boolean distinctRecords(PaperSources.Candidate left, PaperSources.Candidate right) {
+        if (left == null || right == null || left.source == null || right.source == null) return false;
+        String leftId = left.source.id == null ? "" : left.source.id.trim();
+        String rightId = right.source.id == null ? "" : right.source.id.trim();
+        if (leftId.isEmpty() || rightId.isEmpty()) return false;
+        String leftEngine = left.source.engine == null ? "" : left.source.engine.trim();
+        String rightEngine = right.source.engine == null ? "" : right.source.engine.trim();
+        if (!leftEngine.equals(rightEngine)) return false;
+        return !leftId.equals(rightId);
     }
 
     /** 两个键都登记：后来者不管带着 DOI 还是只带着标题，都能找回同一个桶。 */
