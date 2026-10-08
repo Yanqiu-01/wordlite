@@ -2,19 +2,28 @@ Bundled CJK faces: where they come from
 =======================================
 
 The faces in assets/fonts whose names start with st-, plus lisu.ttf, youyuan.ttf,
-dengxian.ttf, msgothic.ttf, courier-new.ttf and consolas.ttf, are the same faces
-desktop Word uses on Windows. They were taken from this machine's own Windows font
-folder and subset (glyphs removed only; advance widths, ascent/descent and hinting
-are copied unchanged) by:
+dengxian.ttf, msyh.ttf, msgothic.ttf, courier-new.ttf and consolas.ttf, are the same
+faces desktop Word uses on Windows. They were taken from this machine's own Windows
+font folder. Each one ships with every codepoint its Windows original has, so a rare
+character in a name or a technical term cannot fall back to a different face: 华文新魏,
+华文隶书 and 华文行楷 stop at the 7,819 characters their originals cover (Word cannot
+draw more either), the rest carry 16k-30k. Advance widths, ascent/descent and hinting
+are copied unchanged; build-fonts.py compares every codepoint's width before and after
+and fails the build if one of them moved. Built by:
 
     py tools/build-fonts.py
 
 Which is also how you rebuild them on your own machine if you do not want to carry
 these files: the script reads C:\Windows\Fonts and writes assets/fonts, and it prints
-a width-by-width comparison so a subset that changed any metric fails loudly.
+a width-by-width comparison so a build that changed any metric fails loudly.
+
+Coverage costs bytes: these faces are 183 MB unpacked, which is why the APK deflates
+them (tools/build.sh, tools/build-host.ps1) instead of storing them as they come.
 
 Those faces are Microsoft / Founder fontware, not free-licensed software. They are
 here so a document that declares 华文新魏 or 等线 renders in the face it asked for.
+msyh.ttf is Microsoft YaHei (微软雅黑), kept because documents declare it constantly and
+the only alternative was drawing it in 宋体.
 Before you ship a build of this app to other people, check that licence against what
 you are doing, or run build-fonts.py yourself and keep the fonts out of the repository.
 

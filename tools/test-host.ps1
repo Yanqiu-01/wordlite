@@ -79,6 +79,8 @@ Add-Suite "ReportStoreRegression"  @()
 Add-Suite "ZeroRateAudit"          @("tests/samples/input-liu.docx", "tests/corpus/real-prose.txt", "tests/corpus/aigc-cartoon.txt")
 # 判据没有死的证据（与 ZeroRateAudit 互补）：语料里确实有可比材料时，抄进去的那一段不许印成 0.00%。缺语料一律 throw，不静默跳过。
 Add-Suite "DetectionFloor"       @("tests/corpus", "$out/detection-floor-library")
+# 摘要层（近似）的量台与闸门：阈值两堆分布 + 负对照 + 不与正文级同账 + 每次请求留档（A4）。全程离线。
+Add-Suite "AbstractLayerRegression" @("tests/corpus")
 # 字体替代表的账：标题写着华文新魏的稿子不许再悄悄变宋体，替代是谁、缺了哪些字，都要说得出。
 Add-Suite "FontSubstitution"      @("tests/samples/input-liu.docx")
 if (-not $SkipRealDoc) {
@@ -103,3 +105,4 @@ foreach ($suite in $suites) {
 Write-Host "note: FontAssetsRegression needs the built APK; use sh tools/build.sh then sh tools/test.sh"
 if ($failed -gt 0) { throw "$failed suite(s) failed" }
 Write-Host "all host JVM suites passed"
+

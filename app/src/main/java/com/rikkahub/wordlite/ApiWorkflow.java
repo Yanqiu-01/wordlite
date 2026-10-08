@@ -320,6 +320,10 @@ public final class ApiWorkflow {
                 box.addView(label(line.toString().trim(), 12));
             }
             if (result.retrievalPartial) box.addView(label(result.retrievalPartialReason, 11));
+            // 摘要层另起一行，名字里自带"近似"与"只到摘要"：它不是第四个比率，也不与上面三个相加。
+            String abstractLine = DuplicateEngine.abstractLayerLine(result);
+            if (!abstractLine.isEmpty())
+                box.addView(label(DuplicateEngine.ABSTRACT_LAYER_LABEL + " " + abstractLine, 12));
         } else if (result.retrievalIncomplete) {
             // A run that consulted nothing must not read as a clean document: 0.00% here would be
             // the most expensive number in the app to get wrong.
@@ -327,6 +331,13 @@ public final class ApiWorkflow {
             box.addView(label(result.retrievalReason == null
                     ? "检索没有取回可比对的文献，相似度类指标无法成立" : result.retrievalReason, 13));
             box.addView(label("相似度类指标不成立，只有 AIGC 倾向是本机计算的结果。", 11));
+            /* 这一屏不许停在"量不到"就完事：上面那句讲的是真的（没有可比正文），
+               但同一屏必须跟着给出摘要层那个数，以及现在就能走的下一步。 */
+            String abstractLine = DuplicateEngine.abstractLayerLine(result);
+            if (!abstractLine.isEmpty()) {
+                box.addView(label(DuplicateEngine.ABSTRACT_LAYER_LABEL + " " + abstractLine, 13));
+                box.addView(label(DuplicateEngine.abstractLayerNextSteps(), 11));
+            }
         }
         /* 这一格与 HTML 报告同一份文案、同一把尺子（0.7.1）：档位 + 可疑字数 + 全文字数，没有百分号。
            0.7.0 这里印的 "AIGC 倾向 17.50%" 是字符加权句分冒充比例，与上一行的总相似度比不是一把尺。 */

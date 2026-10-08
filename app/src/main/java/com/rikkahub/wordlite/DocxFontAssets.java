@@ -6,7 +6,7 @@ import java.util.Locale;
  * The font table. Every family listed here maps to a file that really ships in
  * app/src/main/assets/fonts, and tools/build-fonts.py is what puts those files there: the CJK faces are
  * the same faces desktop Word uses on Windows (华文新魏 is STXINWEI.TTF, 隶书 is SIMLI.TTF, and so on),
- * subset down to the character set a Chinese document can hold. Advance widths and line metrics are copied
+ * each face ships with the coverage its Windows original has, so a rare character cannot drop out.
  * unchanged, so a face can be added without moving a single line of text.
  *
  * A name we genuinely have no face for still says so out loud: substitution() returns the sentence the
@@ -38,6 +38,7 @@ public final class DocxFontAssets {
     public static final String LI_SU = "fonts/lisu.ttf";                // 隶书
     public static final String YOU_YUAN = "fonts/youyuan.ttf";          // 幼圆
     public static final String DENG_XIAN = "fonts/dengxian.ttf";        // 等线
+    public static final String MS_YAHEI = "fonts/msyh.ttf";              // 微软雅黑
     public static final String MS_GOTHIC = "fonts/msgothic.ttf";        // ＭＳ ゴシック
     public static final String ST_SONG = "fonts/stsong.ttf";            // 华文宋体
     public static final String ST_ZHONGSONG = "fonts/stzhongsong.ttf";  // 华文中宋
@@ -52,12 +53,12 @@ public final class DocxFontAssets {
         SONG, HEI, KAI, FANG, FZ_SMALL_SONG, MATH, COURIER_NEW, CONSOLAS,
         ARIAL, ARIAL_BOLD, CALIBRI, CAMBRIA,
         ST_XINWEI, ST_LITI, ST_XINGKAI, LI_SU, YOU_YUAN, DENG_XIAN, MS_GOTHIC,
-        ST_SONG, ST_ZHONGSONG, ST_KAITI, ST_FANGSONG, ST_XIHEI
+        ST_SONG, ST_ZHONGSONG, ST_KAITI, ST_FANGSONG, ST_XIHEI, MS_YAHEI
     };
 
     /** What the 字体 dialog lists. Word's names, not our file names: the user reads the docx names. */
     public static final String[] PICKER = {
-        "宋体", "黑体", "楷体", "仿宋", "等线", "幼圆", "隶书",
+        "宋体", "黑体", "楷体", "仿宋", "等线", "微软雅黑", "幼圆", "隶书",
         "方正小标宋", "华文新魏", "华文隶书", "华文行楷", "华文楷体", "华文仿宋", "华文细黑", "华文中宋",
         "Times New Roman", "Arial", "Calibri", "Cambria", "Courier New", "Consolas",
         "MS Gothic", "MS Mincho"
@@ -80,6 +81,7 @@ public final class DocxFontAssets {
         if (key.contains("隶") || key.contains("lishu")) return LI_SU;
         if (key.contains("幼圆") || key.contains("youyuan")) return YOU_YUAN;
         if (key.contains("等线") || key.contains("dengxian")) return DENG_XIAN;
+        if (key.contains("雅黑") || key.contains("yahei") || key.contains("msyh")) return MS_YAHEI;
         if (key.contains("中宋") || key.contains("zhongsong")) return ST_ZHONGSONG;
         if (key.contains("song") || key.contains("sun") || key.contains("明") || key.contains("书")) return SONG;
         if (key.contains("kai") || key.contains("楷")) return KAI;
@@ -123,6 +125,7 @@ public final class DocxFontAssets {
         if (LI_SU.equals(path)) return "隶书";
         if (YOU_YUAN.equals(path)) return "幼圆";
         if (DENG_XIAN.equals(path)) return "等线";
+        if (MS_YAHEI.equals(path)) return "微软雅黑";
         if (MS_GOTHIC.equals(path)) return "ＭＳ ゴシック";
         if (ST_SONG.equals(path)) return "华文宋体";
         if (ST_ZHONGSONG.equals(path)) return "华文中宋";
@@ -155,6 +158,7 @@ public final class DocxFontAssets {
         if (LI_SU.equals(path)) return oneOf(wanted, "隶书", "lisu", "lishu");
         if (YOU_YUAN.equals(path)) return oneOf(wanted, "幼圆", "youyuan", "幼圆gb2312");
         if (DENG_XIAN.equals(path)) return oneOf(wanted, "等线", "dengxian");
+        if (MS_YAHEI.equals(path)) return oneOf(wanted, "微软雅黑", "msyh", "microsoftyahei", "雅黑");
         if (MS_GOTHIC.equals(path)) return oneOf(wanted, "msgothic", "mspgothic", "msゴシック", "msｐゴシック");
         if (ST_SONG.equals(path)) return oneOf(wanted, "华文宋体", "stsong");
         if (ST_ZHONGSONG.equals(path)) return oneOf(wanted, "华文中宋", "stzhongsong");
@@ -218,8 +222,9 @@ public final class DocxFontAssets {
         if (key.equals("simsun") || key.equals("nsimsun") || key.equals("songti")
                 || key.equals("song") || key.equals("宋体") || key.equals("原版宋体")
                 || key.equals("simsunb") || key.equals("新宋体")) return SONG;
-        if (key.equals("simhei") || key.equals("heiti") || key.equals("黑体") || key.equals("黑体gb2312")
-                || key.equals("微软雅黑") || key.equals("microsoftyahei")) return HEI;
+        if (key.equals("simhei") || key.equals("heiti") || key.equals("黑体") || key.equals("黑体gb2312")) return HEI;
+        if (key.equals("微软雅黑") || key.equals("microsoftyahei") || key.equals("msyh")
+                || key.equals("雅黑")) return MS_YAHEI;
         if (key.equals("kaiti") || key.equals("simkai") || key.equals("楷体") || key.equals("楷体gb2312")
                 || key.equals("楷")) return KAI;
         if (key.equals("fangsong") || key.equals("simfang") || key.equals("仿宋")

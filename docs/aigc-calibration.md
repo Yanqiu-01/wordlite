@@ -281,3 +281,32 @@ SUMMARY 157 assertions passed (scores are a relative tendency, not an authoritat
 
 口径互扣（`CharLedger`：自编率要减掉已判重复的字符、一份报告只有一个 AIGC 数字）本轮没做，
 要改的行号与建议改法写在 [artifacts/research/aigc-handoff.md](/E:/download/claude/Wordlite/artifacts/research/aigc-handoff.md)。
+
+## 第五台：2026-10-08 扩池重拟合（`tools/aigc-fit.ps1`，产物 `artifacts/agent-aigc/fit-*.txt`）
+
+拿着外部依据（`docs/oss-aigc-detection.md` 第二节：humanizer-zh-academic 的 16 条中文学术 AI 模式 +
+AIGC-Detector-Rewriter-Skill 的风险模式清单）把判据从 11 条扩到 33 条，再重拟合一次。划分是干净的：
+拟合只用 M-RAW + H1/H2/H3，M-EVADE、M-DOMAIN、X1、钉子户一律留出。新特征的逐条定义、出处与单独 AUC
+写在 `artifacts/agent-aigc/CALIBRATION.md`，这里只留换号那一步的账。
+
+- 33 条里方向经标注语料验证为正（AUC ≥ 0.55 且两侧都有触发）的只有 4 条：`BURST` 0.590、
+  `SHAPE_REPEAT` 0.763、`SENT_LEN_SYMMETRY` 0.588、`OPENING_ECHO` 0.577。9 条两侧都不触发，其余分不到方向或方向为反。
+- 拟合台选出的保守表（`OPENING_ECHO 0.15 + SHAPE_REPEAT 0.15`）：拟合侧句级 AUC 0.901，**留出侧句级 0.750000、段级 0.700**，
+  0.30~0.60 七个门槛下真人误报都是 0/498；但在 0.450 门槛下它留出档机器侧 0/104 一句都没打中，
+  领域配对档还是反的（M-DOMAIN vs H2 = 0.212、M-EVADE vs H2 = 0.285）。
+- 真正能打中句子的天花板表（`BURST/OPENING_ECHO/SHAPE_REPEAT` 各 0.40 等五条）：拟合侧 29/158 机器句过线、
+  真人 0/440 过线，**留出侧 0/104 过线，留出句级 AUC 只有 0.657**。
+- 构造差检查：两侧都限定在 ≥5 个计分句的段落里，`SHAPE_REPEAT` 的拟合侧 AUC 从 0.874 掉到 **0.722**。
+- 产品表 `v1-order-only` 在同一批语料上：全池 AUC 0.312（拟合 0.329 / 留出 0.271）、真人最高 0.506（越线，2.03 句/千句）、
+  机器最高 0.217。
+
+**结论：不换号。** `VERSION` 仍是 `v1-order-only`，`calibrated()` 仍是 false，报告与界面继续"量不到"；
+22 条新特征以 0 系数入库，依据进报告的证据清单但不进句分、不进档位。老 11 条系数与门槛常量一条没动。
+换号条件从 4 条加到 5 条（新增：段级留出 AUC 也要 ≥ 0.750、选定门槛下留出机器侧至少打中一句、逐档配对不许反向），
+理由与实测写在 `AigcScorer.calibrated()` 的注释里。
+
+这台机器带来的两条口径变化（回归已跟上）：
+1. 0 系数特征让"列了证据"不再等价于"句分 > 0"。留住的两条真规则是：分数 > 0 必列证据；
+   分数 = 0 的句子绝不可能带着有非零系数的证据（`tests/AigcRegression.templates()`）。
+2. `UNCALIBRATED_NOTE` 结尾不许再写"不给生成比例"——那句话由 `AigcDetector.verdict()` 统一追加，
+   整份报告里"比例"只许出现一次（`tests/DetectRegression.unreachable()`）。

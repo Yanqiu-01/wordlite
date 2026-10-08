@@ -230,6 +230,52 @@ public final class TextCorpus {
     static void restoreBagFloor() {
         bagDiceFloor = SIMILAR_BAG_DICE;
     }
+    /**
+     * 摘要层比较用的两个预算量之一：一条句子在袋口径下的三样东西（折叠袋、三元组、拉丁占比）。
+     * 摘要层是"本文每句 x 每条摘要句"的两两比较，同一条材料句会被问到几百次，所以算一次存着。
+     */
+    static final class BagUnit {
+        final char[] bag;
+        final long[] grams;
+        /** 存比值不存判定，理由与 Frag/Entry 那两处一样：地板是活值，判定结果会过期。 */
+        final double latinRatio;
+        final int chars;
+        final String text;
+        BagUnit(String value) {
+            this.text = value == null ? "" : value;
+            String key = compactOf(this.text);
+            this.bag = bagOfKey(key);
+            this.grams = gramsOf(key);
+            this.latinRatio = AigcFamily.latinRatio(key);
+            this.chars = validCount(normalize(this.text), 0, this.text.length());
+        }
+    }
+
+    static BagUnit bagUnit(String text) {
+        return new BagUnit(text);
+    }
+
+    /** 袋口径当前那一档地板（标定台的活值）。摘要层的判定与文案都读这里，不许另存一份常数。 */
+    static float bagFloor() {
+        return bagDiceFloor;
+    }
+
+    /**
+     * 摘要层用的那一条判据，就是正文级袋口径这一条，四道门一道不落、一档不改：
+     * 字族门（两边都得低于 BAG_LATIN_CEILING）、长度门（bagReach 够得着地板）、
+     * 三元组底数（MIN_SHARED_GRAMS）、地板（SIMILAR_BAG_DICE）。任何一道不过交 0f。
+     *
+     * <p>存在的理由：摘要层比较的是"本文一句"与"某篇候选摘要里的一句"，可比层级比正文级低一档，
+     * 但判据必须是同一条，否则同一个改写在一台机器上会得出两个数。这四道门只在这里有一份出处，
+     * DuplicateEngine 不许在外面再拼一遍。实测分界见 docs 与 artifacts/agent-solver/ABSTRACT-LAYER.md。
+     */
+    static float bagJudge(BagUnit query, BagUnit other) {
+        if (query == null || other == null) return 0f;
+        if (query.latinRatio >= bagLatinCeiling || other.latinRatio >= bagLatinCeiling) return 0f;
+        if (bagReach(query.bag, other.bag) < bagDiceFloor) return 0f;
+        if (intersectCount(query.grams, other.grams) < MIN_SHARED_GRAMS) return 0f;
+        return bagDiceOf(query.bag, other.bag);
+    }
 
     /**
      * 包含率命中的落点要裁到两边实际共享的那一段。一段共享块最短要长到这个长度（折叠串的单位数）：

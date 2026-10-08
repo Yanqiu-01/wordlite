@@ -27,7 +27,14 @@ public final class AigcDetector {
      * 孤立的高分句在真人论文里是常态，成片的同腔成段几乎不存在——区间聚合买的就是这个差别。
      */
     public static final float SEGMENT_SCORE_FLOOR = 0.35f;
-    /** 区间分过这条线才算可疑区间，{@code flaggedChars} 由它来。取值见 docs/aigc-calibration.md 的 TIER 行。 */
+    /**
+     * 区间分过这条线才算可疑区间，{@code flaggedChars} 由它来。取值见 docs/aigc-calibration.md 的 TIER 行。
+     *
+     * 2026-10-08 重新标定那一轮把它当成候选一起看过，结论是不动：在 AigcScorer.check 那两条静态纪律之内
+     * （单条系数 < 本门槛、组系数加和 ≤ 1.0）能配出来的最好那张表，机器侧句分最高只有 0.400（留出档），
+     * 本门槛 0.450 在留出档上永远是 0 过线。也就是说"量不到"不是因为门槛定高了，是分数根本上不去——
+     * 把门槛降到 0.35/0.30 只会把真人侧那 0.506 那句放进来，不会多出机器侧的命中。
+     */
     public static final float SEGMENT_FLAG_GATE = 0.45f;
     /** 一个区间最多并几句、最多多少有效字符：WCopyfind"按绝对量而不是只看比例"的同一条纪律。 */
     public static final int MAX_SEGMENT_SENTENCES = 6;

@@ -21,7 +21,7 @@ echo "== resources =="
 "$AAPT2" compile --dir "$SRC/res" -o "$OUT/res.zip"
 "$AAPT2" link -o "$OUT/wordlite.unsigned.apk" --manifest "$SRC/AndroidManifest.xml" \
   -I "$ANDROID_JAR" --java "$OUT/gen" "$OUT/res.zip" \
-  -A "$SRC/assets" -0 ttc -0 ttf -0 otf
+  -A "$SRC/assets"   # fonts deflate; stored faces would add ~70 MB to the APK
 
 echo "== javac =="
 find "$SRC/java" "$OUT/gen" -name '*.java' > "$OUT/sources.list"

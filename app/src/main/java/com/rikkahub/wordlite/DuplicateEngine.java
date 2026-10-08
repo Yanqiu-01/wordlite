@@ -45,6 +45,19 @@ public final class DuplicateEngine {
        摘要里没有被抄的那段正文，判据一句也认不出，报告却照印 0.00%、状态还是"完整检索"。
        这一条把那一档降级成未完成查重：判据与阈值一个字没改，改的是"没得比"不许冒充"没重复"。 */
     static final String GAP_NO_COMPARABLE = "没有任何可比正文，相似度量不到";
+    /* ---- 摘要层（近似）：可比正文 0 篇的那一轮，报告也要能给出一个能核对的数（2.2.x）----
+       知网/万方/维普这个公开检索口给的是题名 + 摘要，正文段落与摘要在字符级判据上不是一个层级，
+       所以正文级那三个比率在这一轮天然量不到（实测见 artifacts/agent-solver/ABSTRACT-LAYER.md）。
+       摘要层给的是另一个数：分子分母都是句子数，名字里写死"近似"与"只到摘要"，
+       它不并入总相似度比，也不与它相加，更不许顶替它。 */
+    /** 这一层在报告里的名字。口径必须长在标题上，不能只写在脚注里。 */
+    public static final String ABSTRACT_LAYER_LABEL = "摘要层（近似，知网/万方/维普公开检索只到摘要）";
+    /** 逐句证据的条数上限：超出的按分数从高到低裁，最高那一句一定在表里。 */
+    static final int MAX_ABSTRACT_EVIDENCE = 24;
+    /** 摘要侧句子数的上限（大约 120 篇候选的摘要），把这一层的开销钉成常数倍。 */
+    static final int MAX_ABSTRACT_UNITS = 4000;
+    /** 每次检索请求的响应留档行数上限（A4）：MAX_REQUESTS 120 次加上万方换页的补帧，150 行装得下。 */
+    static final int MAX_SHAPE_ROWS = 150;
     /** 「机器腔均分」那一栏的名字：它是一条 0-100 的分而不是占比，所以不许挂"比例"两个字。 */
     public static final String AIGC_SCORE_LABEL = "机器腔均分";
     private static final String AIGC_TIER_INSUFFICIENT = "样本不足";
@@ -123,9 +136,100 @@ public final class DuplicateEngine {
         public boolean hasComparableEvidence() {
             return !hits.isEmpty() || comparableCandidates > 0 || localDocuments > 0;
         }
+        /* ---- 摘要层（近似）：只有"摘要"可比的候选给得出这一层，正文级那三个比率与它不同尺 ---- */
+        /** 分母：本文里够格参与摘要层比对的句子数（切得出句、不在引用与结构性文本里、够 MIN_SENTENCE_CHARS）。 */
+        public int abstractSentencesCompared;
+        /** 分子：这些句子里"逐句 max 袋 Dice"过线的句数。一句只数一次，与字数无关。 */
+        public int abstractSentencesMatched;
+        /** 分子/分母 x 100。分母为 0 时这一层算没量到，abstractLayerMeasured() 会把它挡在报告外。 */
+        public double abstractLayerRate;
+        /** 参与这一层的候选篇数（comparableMaterial == 摘要 的那些；抓到全文的那批走正文级，不进这里）。 */
+        public int abstractCandidates;
+        /** 摘要侧被切成多少个比较单元（句），以及是否撞到了 MAX_ABSTRACT_UNITS。 */
+        public int abstractUnits;
+        public boolean abstractLayerTruncated;
+        /** 逐句证据：本文那一句、撞上的摘要那一句、来源题名，按正文顺序列。 */
+        public final ArrayList<AbstractHit> abstractHits = new ArrayList<AbstractHit>();
+        /** 每次检索请求的响应留档（A4）：逐源逐次，成功也留，一行一次请求（万方换页每页一行）。 */
+        public final ArrayList<PaperSources.ShapeRow> shapes = new ArrayList<PaperSources.ShapeRow>();
+        /** 留档被 MAX_SHAPE_ROWS 裁过的行数：档里没这一行才说明真的问了几次就是几行。 */
+        public int shapesDropped;
     }
 
     private DuplicateEngine() { }
+    /**
+     * 摘要层的一条证据：本文的哪一句，撞上了哪篇候选摘要里的哪一句。
+     * 它不进 hits——hits 是正文级命中的账，混进同一张表就等于让摘要层的数冒充正文级的数。
+     */
+    public static final class AbstractHit {
+        public int start, end;
+        /** 这一句在所有摘要单元里拿到的最大袋 Dice。 */
+        public double score;
+        public String title = "", engine = "", abstractSentence = "";
+    }
+
+    /** 这一轮摘要层量没量到：一篇摘要候选都没有、或本文一句都不够长，就没有这一层，报告里也不许出现那个数。 */
+    public static boolean abstractLayerMeasured(Report report) {
+        return report != null && report.abstractSentencesCompared > 0;
+    }
+
+    /**
+     * 摘要层那一行的唯一写法。名字里写死"近似"与"只到摘要"，数字带上分子分母与阈值，
+     * 面板、HTML 报告、报告中心三处读这一句，不许各写一遍。
+     */
+    public static String abstractLayerLine(Report report) {
+        if (!abstractLayerMeasured(report)) return "";
+        return abstractLayerLine(report.abstractLayerRate, report.abstractSentencesMatched,
+                report.abstractSentencesCompared, report.abstractCandidates);
+    }
+
+    /**
+     * 同一串字的数字入口：报告中心拿的是存档记录（Record），不是刚跑完的 Report，
+     * 但那一行必须长得一模一样，所以格式化只有这一份。
+     */
+    public static String abstractLayerLine(double rate, int matched, int compared, int candidates) {
+        if (compared <= 0) return "";
+        return percent(rate) + "（" + matched + "/" + compared + " 句，袋 Dice ≥ "
+                + String.format(Locale.US, "%.2f", Double.valueOf(TextCorpus.bagFloor()))
+                + "，摘要候选 " + candidates + " 篇）";
+    }
+
+    /** 这一层的口径声明：它不是什么，必须和它是什么写在同一屏。 */
+    public static String abstractLayerCaveat(Report report) {
+        if (!abstractLayerMeasured(report)) return "";
+        return abstractLayerCaveat(report.abstractSentencesMatched, report.abstractSentencesCompared,
+                report.abstractCandidates, report.abstractLayerTruncated);
+    }
+
+    /** 同上：数字入口，存档记录那一侧读的是同一份措辞。 */
+    public static String abstractLayerCaveat(int matched, int compared, int candidates, boolean truncated) {
+        if (compared <= 0) return "";
+        StringBuilder out = new StringBuilder();
+        out.append("口径：按句算，分母是本文参与比对的 ").append(compared)
+                .append(" 句（引用段落与参考文献表已排除），分子是其中撞上摘要句的 ")
+                .append(matched)
+                .append(" 句。它不是正文级重复率：公开检索口只到摘要，这一层看不见正文，")
+                .append("也不计入总相似度比，不与它相加。");
+        if (truncated)
+            out.append("摘要单元已达上限 ").append(MAX_ABSTRACT_UNITS).append(" 句，其余摘要未参与这一层。");
+        return out.toString();
+    }
+
+    /**
+     * "没有任何可比正文"那一屏必须跟着给出的下一步。写两句实话：全文要授权（软件解决不了），
+     * 以及现在就能做的那一件（导入自建库，那是唯一能做出正文级比对的入口）。
+     */
+    public static String abstractLayerNextSteps() {
+        return "下一步：正文级重复率需要全文，知网/万方/维普的公开检索口只到摘要、全文要授权；"
+                + "手头有原文的疑似来源可以导进自建库再查一次，那一条路给得出正文级数字。";
+    }
+
+    /** 摘要层的注记：报告中心与面板的注记列表都要能查到这一层做了、做了什么口径。 */
+    static String abstractLayerNote(Report report) {
+        return ABSTRACT_LAYER_LABEL + "：" + report.abstractSentencesMatched + "/"
+                + report.abstractSentencesCompared + " 句 = " + percent(report.abstractLayerRate)
+                + "（摘要候选 " + report.abstractCandidates + " 篇）";
+    }
 
     public static Report scan(TextSelection selection, TextCorpus corpus, boolean useWeb, ArrayList<String> engines,
                               PaperSources.Limits limits, ApiClient.Cancellation cancellation, Progress progress) {
@@ -174,6 +278,11 @@ public final class DuplicateEngine {
                     note(report, "AIGC 分析跳过引用与结构性文本 " + report.aigc.excludedChars + " 字");
             }
             rates(report, matched, spans, structure.spanArray());
+            /* 摘要层（近似）排在正文级比对之后：它说的是"摘要这一档能比到什么"，
+               只有正文级那一轮真的比过（或确定比不成）才轮到它开口。被取消的那一轮不补这一层。 */
+            if (!cancelled(cancellation))
+                abstractLayer(report, text,
+                        TextCorpus.mergeSpans(concat(spans, structure.spanArray()), text.length()));
             step(progress, "汇总报告", 4, 4);
         } catch (RuntimeException error) {
             note(report, "检测中断：" + message(error));
@@ -424,7 +533,12 @@ public final class DuplicateEngine {
         int poolCap = Math.max(60, 8 * perSourceCap * engines.size());
         /* 检索式在起线程之前全部算好：泳道之间只共用这一排算完的检索式与候选池，
            谁都不把自己的检索现场摊给别的线程看。 */
-        Sweep sweep = new Sweep(limits, cancellation, progress, planned, poolCap,
+        /* 响应留档（A4）先建账本再起泳道：每一次请求都要落一行，成功也要落。
+           Limits 是调用方递进来的，本轮的出口不往它身上挂——先复制一份再挂（PaperSources.Limits#copy）。 */
+        ShapeLedger shapes = new ShapeLedger(report);
+        PaperSources.Limits pass = limits.copy();
+        pass.shapes = shapes;
+        Sweep sweep = new Sweep(pass, shapes, cancellation, progress, planned, poolCap,
                 Math.max(0L, engineGapMillis), System.currentTimeMillis() + Math.max(1L, searchMillis),
                 planned * engines.size());
         for (int w = 0; w < planned; w++)
@@ -470,8 +584,58 @@ public final class DuplicateEngine {
      * 泳道之间只经由这个类的同步方法碰彼此；每个源自己的会话状态（维普的 sessionid、知网的检索页
      * token）留在自己那条泳道的线程里，一次请求从头到尾在同一个线程内完成，不跨线程交接。
      */
+    /**
+     * 响应留档这本账（A4）。泳道是并行的，所以记账在锁里；它还要能回答"这一次调用里检索侧
+     * 自己落了几行"——落过就不再补一行 error，没落过（连接压根没建成那一类）才补，
+     * 一档一次请求一行，不多不少。
+     */
+    private static final class ShapeLedger implements PaperSources.ShapeSink {
+        private final Report report; private final Object lock = new Object();
+        private final LinkedHashMap<Long, Integer> byThread = new LinkedHashMap<Long, Integer>();
+        private int dropped;
+        ShapeLedger(Report report) { this.report = report; }
+        public void record(PaperSources.ShapeRow row) {
+            if (row == null) return;
+            synchronized (lock) { add(row); bump(); }
+        }
+        /** 本线程到现在落了几行：Lane 拿它当"这一次调用留没留下响应账"的凭据。 */
+        int mark() { synchronized (lock) { return count(); } }
+        /** 异常而账上没多出行：补一行 no-response，别让"连接都没建成"在档里是空白。 */
+        void miss(String engine, String phrase, String error, int before) {
+            synchronized (lock) {
+                if (count() != before) return;
+                PaperSources.ShapeRow row = new PaperSources.ShapeRow();
+                row.engine = engine == null ? "" : engine;
+                row.probe = phrase == null ? "" : (phrase.length() <= 60 ? phrase : phrase.substring(0, 60) + "…");
+                row.shape = "no-response";
+                row.failed = true;
+                row.error = error == null ? "" : error;
+                add(row); bump();
+            }
+        }
+        private int count() {
+            Integer value = byThread.get(Long.valueOf(Thread.currentThread().getId()));
+            return value == null ? 0 : value.intValue();
+        }
+        private void bump() {
+            Long key = Long.valueOf(Thread.currentThread().getId());
+            Integer value = byThread.get(key);
+            byThread.put(key, Integer.valueOf(value == null ? 1 : value.intValue() + 1));
+        }
+        private void add(PaperSources.ShapeRow row) {
+            if (report.shapes.size() >= MAX_SHAPE_ROWS) {
+                dropped++;
+                report.shapesDropped = dropped;
+                return;
+            }
+            report.shapes.add(row);
+        }
+    }
+
     private static final class Sweep {
         final PaperSources.Limits limits; final ApiClient.Cancellation cancellation;
+        /** 本轮的响应留档账本，随 limits.shapes 递给检索侧，泳道只经由它记账。 */
+        final ShapeLedger shapes;
         final Progress progress; final int planned; final int poolCap; final long gap; final long deadline;
         final int total;
         final ArrayList<ArrayList<String>> probes = new ArrayList<ArrayList<String>>();
@@ -485,9 +649,10 @@ public final class DuplicateEngine {
         private boolean[] askedWindow;
         private int dropped;
         private final AtomicInteger done = new AtomicInteger();
-        Sweep(PaperSources.Limits limits, ApiClient.Cancellation cancellation, Progress progress, int planned,
-              int poolCap, long gap, long deadline, int total) {
-            this.limits = limits; this.cancellation = cancellation; this.progress = progress;
+        Sweep(PaperSources.Limits limits, ShapeLedger shapes, ApiClient.Cancellation cancellation,
+              Progress progress, int planned, int poolCap, long gap, long deadline, int total) {
+            this.limits = limits; this.shapes = shapes;
+            this.cancellation = cancellation; this.progress = progress;
             this.planned = planned; this.poolCap = poolCap; this.gap = gap; this.deadline = deadline;
             this.total = total; this.askedWindow = new boolean[planned];
         }
@@ -617,15 +782,20 @@ public final class DuplicateEngine {
                         asks++;
                         sweep.sent(w, p);
                         sweep.step("检索 " + PaperSources.label(engine));
+                        int shapesBefore = sweep.shapes.mark();
                         try {
                             ArrayList<PaperSources.Candidate> found =
                                     PaperSources.search(engine, phrase, sweep.limits, sweep.cancellation);
                             failedLast.remove(engine);
                             poolFull = poolFull | sweep.collect(engine, found, gained);
                         } catch (IllegalArgumentException error) {
+                            sweep.shapes.miss(engine, phrase, message(error), shapesBefore);
                             skipped.put(engine, Boolean.TRUE); failedLast.put(engine, Boolean.TRUE);
                             notes.add("已跳过 " + PaperSources.label(engine) + "：" + message(error));
                         } catch (IOException error) {
+                            /* 留档：响应侧没机会落行的失败（连不上、超时、429 被包成 IOException）
+                               在这里补一行，档里从此没有"问了但什么都没留下"这一格。 */
+                            sweep.shapes.miss(engine, phrase, message(error), shapesBefore);
                             /* 429 与"这个源挂了"不是一回事：匿名共享配额是暂时的，一次失败就整轮放弃太狠。
                                判据用注记前缀而不是状态码，因为 PaperSources.search() 只往上抛 IOException。 */
                             failedLast.put(engine, Boolean.TRUE);
@@ -1137,6 +1307,106 @@ public final class DuplicateEngine {
     private static void step(Progress progress, String label, int done, int total) {
         if (progress != null) progress.step(label, done, total);
     }
+    /** 摘要侧的一个比较单元：一句摘要，加它属于哪篇候选。 */
+    private static final class AbstractUnit {
+        final TextCorpus.BagUnit unit;
+        final String title, engine;
+        AbstractUnit(TextCorpus.BagUnit unit, String title, String engine) {
+            this.unit = unit;
+            this.title = title == null ? "" : title;
+            this.engine = engine == null ? "" : engine;
+        }
+    }
+
+    /**
+     * 摘要层（近似）。可比正文 0 篇的那一轮，检索并没有空手：真机实测知网回 20 条、维普回 20 条、
+     * 万方回 2 条，给的全是题名 + 摘要。这一层不再假装在做正文级比对，而是改问一个答得出的问题：
+     * **本文每一句，与这些摘要里的每一句，最像能像到什么程度**。
+     *
+     * <p>判据沿用正文级那一条袋判据（{@link TextCorpus#bagJudge}：字族门、长度门、三元组底数、
+     * 袋 Dice 地板，一档不落），不另起一套；每句取 max，过线句数除以参与句数就是这一层的数——
+     * 分子分母都是句子数，与正文级那三个"字符数"口径的比率不是一把尺，所以既不并入也不相加。
+     *
+     * <p>阈值不是拍的，是量出来的（artifacts/agent-solver/abstract-layer-gates.txt）：真稿 374 句
+     * 对 82 篇同领域活摘要的实测天花板 0.585，无关领域真摘要 37 句对同一批摘要是 0.396，
+     * 而"逐字相同"是 1.000、"逐字替换 25%"那一档最低 0.720。0.72 落在两条实测分界之间，
+     * 也正是 SIMILAR_BAG_DICE 一直挂着的那一档；按句+0.14 的老规矩（0.585+0.14≈0.72）也是同一个数。
+     *
+     * <p>只吃 comparableMaterial == 摘要 的候选：抓到开放获取全文的那批已经在正文级语料里比过了，
+     * 再算进这一层就是把同一个数报两遍。
+     */
+    /* 包内可见而不是 private：AbstractLayerRegression 直接拿这两堆量分界，不绕过产品那条判据。 */
+    static void abstractLayer(Report report, String text, int[] excluded) {
+        if (report.candidates.isEmpty() || text == null || text.isEmpty()) return;
+        ArrayList<AbstractUnit> units = new ArrayList<AbstractUnit>();
+        for (int i = 0; i < report.candidates.size(); i++) {
+            PaperSources.Candidate candidate = report.candidates.get(i);
+            if (candidate == null || !MATERIAL_ABSTRACT.equals(candidate.comparableMaterial)) continue;
+            report.abstractCandidates++;
+            TextCorpus.Source source = candidate.source == null ? new TextCorpus.Source() : candidate.source;
+            String title = source.title == null ? "" : source.title.trim();
+            /* 题名也是可比材料的一部分：学位论文的条目常把正文章节一起截进摘要里，题名本身照样能撞。 */
+            String material = (title + (title.isEmpty() || title.endsWith("。") ? "" : "。")
+                    + (candidate.abstractText == null ? "" : candidate.abstractText)).trim();
+            for (int[] span : TextCorpus.sentences(material)) {
+                String one = material.substring(span[0], span[1]).trim();
+                if (one.length() < TextCorpus.MIN_SENTENCE_CHARS) continue;
+                TextCorpus.BagUnit unit = TextCorpus.bagUnit(one);
+                if (unit.chars < TextCorpus.MIN_SENTENCE_CHARS) continue;
+                units.add(new AbstractUnit(unit, title, source.engine));
+                if (units.size() >= MAX_ABSTRACT_UNITS) break;
+            }
+            if (units.size() >= MAX_ABSTRACT_UNITS) { report.abstractLayerTruncated = true; break; }
+        }
+        report.abstractUnits = units.size();
+        if (units.isEmpty()) return;
+        float floor = TextCorpus.bagFloor();
+        ArrayList<AbstractHit> fired = new ArrayList<AbstractHit>();
+        for (int[] span : TextCorpus.sentences(text)) {
+            if (overlaps(excluded, span[0], span[1])) continue;
+            String one = text.substring(span[0], span[1]).trim();
+            if (one.length() < TextCorpus.MIN_SENTENCE_CHARS) continue;
+            TextCorpus.BagUnit query = TextCorpus.bagUnit(one);
+            if (query.chars < TextCorpus.MIN_SENTENCE_CHARS) continue;
+            report.abstractSentencesCompared++;
+            double best = 0d;
+            AbstractUnit who = null;
+            for (int u = 0; u < units.size(); u++) {
+                AbstractUnit unit = units.get(u);
+                float value = TextCorpus.bagJudge(query, unit.unit);
+                if (value > best) { best = value; who = unit; }
+            }
+            if (who == null || best < floor) continue;
+            AbstractHit hit = new AbstractHit();
+            hit.start = span[0];
+            hit.end = span[1];
+            hit.score = best;
+            hit.title = who.title;
+            hit.engine = who.engine;
+            hit.abstractSentence = who.unit.text;
+            fired.add(hit);
+        }
+        report.abstractSentencesMatched = fired.size();
+        report.abstractLayerRate = report.abstractSentencesCompared <= 0
+                ? 0d : clamp(fired.size() * 100d / report.abstractSentencesCompared);
+        /* 证据表按正文顺序画，但"最高那一句"必须在表里：先按分数留前 N 条，再按正文顺序重排。 */
+        Collections.sort(fired, new Comparator<AbstractHit>() {
+            public int compare(AbstractHit a, AbstractHit b) { return Double.compare(b.score, a.score); }
+        });
+        for (int i = 0; i < fired.size() && report.abstractHits.size() < MAX_ABSTRACT_EVIDENCE; i++)
+            report.abstractHits.add(fired.get(i));
+        Collections.sort(report.abstractHits, new Comparator<AbstractHit>() {
+            public int compare(AbstractHit a, AbstractHit b) { return a.start - b.start; }
+        });
+        if (abstractLayerMeasured(report)) note(report, abstractLayerNote(report));
+    }
+
+    /** 这一段与排除区（引用段落、参考文献表、致谢、附录、目录）有没有重叠：摘要层的分母也不许吃这些。 */
+    private static boolean overlaps(int[] spans, int start, int end) {
+        for (int i = 0; i + 1 < spans.length; i += 2) if (start < spans[i + 1] && end > spans[i]) return true;
+        return false;
+    }
+
     private static void note(Report report, String value) {
         if (report.notes.size() < MAX_NOTES && !report.notes.contains(value)) report.notes.add(value);
     }
@@ -1153,3 +1423,4 @@ public final class DuplicateEngine {
         return value == null || value.trim().isEmpty() ? error.getClass().getSimpleName() : value.trim();
     }
 }
+

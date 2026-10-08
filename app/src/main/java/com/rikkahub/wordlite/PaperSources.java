@@ -28,8 +28,171 @@ public final class PaperSources {
         public String coreKey = "";
         /** host:port of an HTTP proxy for this retrieval pass, empty to dial out directly. */
         public String proxy = "";
+        /**
+         * 每一次检索请求的响应留档出口（A4）。null = 不留档；写了它，这一轮每一次请求都要落一行
+         * entries / declaredTotal / 响应形状，**成功也要落**。以前只在失败时留档，于是
+         * "HTTP 200 但零条目"与"这一式真的没有货"在代码里长成同一个形状，谁也分不出来。
+         * 回调在发请求的那条泳道线程上原地发生，实现方自己负责同步。
+         */
+        public ShapeSink shapes;
+
+        /**
+         * 复制一份本轮要用的额度与出口。检索这一轮不想往调用方递进来的 Limits 上挂本轮的留档出口
+         * ——那等于让一次扫描之后仍然有个旧报告被这份设置牵着写。
+         * <strong>新增字段必须在这里跟着抄一行</strong>：漏一行就是那一轮拿默认值当用户设置用，
+         * AbstractLayerRegression 拿反射逐字段核对这一条。
+         */
+        public Limits copy() {
+            Limits out = new Limits();
+            out.timeoutSeconds = timeoutSeconds;
+            out.perEngine = perEngine;
+            out.windows = windows;
+            out.fullTexts = fullTexts;
+            out.coreKey = coreKey;
+            out.proxy = proxy;
+            out.shapes = shapes;
+            return out;
+        }
     }
     static final int MAX_TEXT = 64 * 1024, MAX_AUTHORS = 6;
+    /**
+     * 一次检索请求的响应留档（A4）。三个数各说一件事，谁也不许替谁下结论：
+     * <p>entries —— 本机从这一次响应里<b>解出</b>了几条候选；
+     * <p>declaredTotal —— 源自己在响应里<b>声称</b>这一式命中几条。-1 是"这个源没说"，
+     * 0 是"这个源说了没有"，两个数不许混成一个：知网与维普这个检索口实测不在响应里写总数
+     * （2026-10-08 的 raw/step1 档里查不到任何 total 字段），万方写在 protobuf 字段 3。
+     * <p>shape —— 这一份响应是什么形状：entries / declared-zero / blocked / js-shell /
+     * json-empty / empty-body / empty-frame / frame-unparsed / unknown。0% 从此在档里
+     * 一眼分得清是"源说没有"、"被挡"、还是"我们解不出"。
+     */
+    public static final class ShapeRow {
+        public String engine = "", probe = "", shape = "", excerpt = "", error = "";
+        public int status = -1, bodyBytes = -1, entries;
+        public long declaredTotal = -1L;
+        public long millis;
+        /** 这一行是失败请求补的那一行：PaperSources 看得见响应，Lane 只看得见异常。 */
+        public boolean failed;
+    }
+
+    /** 留档出口：一条请求一行，实现方自己负责同步（泳道是并行的）。 */
+    public interface ShapeSink { void record(ShapeRow row); }
+
+    /** 留档摘录的宽度：够认出"这是验证页 / 这是空帧 / 这是 count:0"，又不至于把一条报告撑爆。 */
+    static final int SHAPE_EXCERPT_CHARS = 180;
+    /** 挡人页的形状标记：命中一个就标成 blocked，不许让它伪装成"这一式真的零命中"。 */
+    private static final String[] BLOCK_MARKERS = { "验证码", "安全验证", "滑动验证", "人机验证", "访问受限",
+            "操作过于频繁", "请稍后再试", "Access Denied", "Forbidden", "Precondition Failed",
+            "fault filter abort", "captcha", "cf-browser-verification" };
+    /** 源自己说"没有"的标记：万方那 25 字节空帧解出来就是"检索结果为空"，维普的 SSR 载荷里是 records:[]。 */
+    private static final String[] EMPTY_MARKERS = { "检索结果为空", "没有找到相关", "暂无相关", "records:[]",
+            "\"records\":[]", "\"total\":0", "total\":0", "hitCount\":0", "noresults" };
+
+    /** 文本响应的形状。它回答的是"这一页是来给内容的、来挡人的、还是明说没有"。 */
+    static String shapeOf(String body, int entries, long declaredTotal) {
+        String text = body == null ? "" : body;
+        if (entries > 0) return "entries";
+        if (text.trim().isEmpty()) return "empty-body";
+        String lower = text.toLowerCase(Locale.ROOT);
+        for (String marker : BLOCK_MARKERS)
+            if (text.contains(marker) || lower.contains(marker.toLowerCase(Locale.ROOT))) return "blocked";
+        if (declaredTotal == 0L) return "declared-zero";
+        for (String marker : EMPTY_MARKERS)
+            if (text.contains(marker) || lower.contains(marker.toLowerCase(Locale.ROOT))) return "declared-zero";
+        String head = lower.length() <= 4096 ? lower : lower.substring(0, 4096);
+        if (head.contains("<html") || head.contains("<!doctype") || head.contains("__nuxt__")
+                || head.contains("<script")) return "js-shell";
+        String trim = text.trim();
+        if (trim.startsWith("{") || trim.startsWith("[")) return "json-empty";
+        return "unknown";
+    }
+
+    /**
+     * 二进制响应（万方 gRPC-web）按帧记账，不假装它是文本：帧里有几条著录项、解出几条、源声称几条。
+     * 实测的"检索结果为空"就是 records=0 且 total=0 的 25 字节帧，那一行的形状必须是 declared-zero。
+     */
+    static String frameShape(int records, int entries, long declaredTotal, String excerpt) {
+        if (entries > 0) return "entries";
+        if (declaredTotal == 0L) return "declared-zero";
+        String text = excerpt == null ? "" : excerpt.toLowerCase(Locale.ROOT);
+        for (String marker : EMPTY_MARKERS)
+            if (text.contains(marker.toLowerCase(Locale.ROOT))) return "declared-zero";
+        if (records > 0) return "frame-unparsed";
+        return "frame-empty";
+    }
+
+    /** 响应开头的可读摘录：控制字符一律换成空格，没有文本体就拿 UTF-8 硬解字节，只用于认形状。 */
+    static String excerptOf(byte[] raw, String body) {
+        String text = body == null ? "" : body;
+        if (text.trim().isEmpty() && raw != null && raw.length > 0)
+            text = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
+        StringBuilder out = new StringBuilder(Math.min(SHAPE_EXCERPT_CHARS + 8, text.length()));
+        int taken = 0;
+        for (int i = 0; i < text.length() && taken < SHAPE_EXCERPT_CHARS; i++) {
+            char c = text.charAt(i);
+            if (c == '\r' || c == '\n' || c == '\t' || Character.isISOControl(c)) c = ' ';
+            out.append(c);
+            taken++;
+        }
+        if (text.length() > taken) out.append('…');
+        return out.toString().replaceAll(" {2,}", " ").trim();
+    }
+
+    /** 落一行留档。留档不许把检索带下水：出口自己抛的东西一律咽掉。 */
+    private static void recordShape(Limits limits, String engine, String probe, ApiClient.Response response,
+                                    int entries, long declaredTotal, String shape, String error, boolean failed) {
+        ShapeSink sink = limits == null ? null : limits.shapes;
+        if (sink == null) return;
+        ShapeRow row = new ShapeRow();
+        row.engine = engine == null ? "" : engine;
+        row.probe = clipProbe(probe);
+        row.status = response == null ? -1 : response.status;
+        row.bodyBytes = response == null || response.raw == null ? -1 : response.raw.length;
+        row.entries = Math.max(0, entries);
+        row.declaredTotal = declaredTotal;
+        row.shape = shape == null ? "" : shape;
+        row.excerpt = response == null ? "" : excerptOf(response.raw, response.body);
+        row.millis = response == null ? 0L : response.elapsedMillis;
+        row.error = error == null ? "" : error;
+        row.failed = failed;
+        try { sink.record(row); } catch (RuntimeException ignored) { }
+    }
+
+    /** 检索式在留档里只留一行认得出的短摘要，别把整扇窗口原文塞进报告存档。 */
+    private static String clipProbe(String value) {
+        String text = value == null ? "" : value.trim().replaceAll("\\s+", " ");
+        return text.length() <= 60 ? text : text.substring(0, 60) + "…";
+    }
+
+    /**
+     * 源在响应里自己声明的命中总数；拿不到一律 -1（=没说）。万方不走这里（在 envelope 里），
+     * arXiv 是 XML，其余 JSON 族各认自己那一个计数字段。
+     */
+    private static long declaredTotal(String name, Object root) {
+        try {
+            if (name.equals("arxiv")) return digits(Xml.text(String.valueOf(root), "totalResults"));
+            String[] paths = name.equals("openalex") ? new String[] { "meta.count" }
+                    : name.equals("crossref") ? new String[] { "message.total-results" }
+                    : name.equals("semantic-scholar") ? new String[] { "total" }
+                    : name.equals("europepmc") ? new String[] { "hitCount" }
+                    : name.equals("core") ? new String[] { "resultsSize", "total" }
+                    : new String[0];
+            for (String path : paths) {
+                Object value = ApiJson.path(root, path);
+                if (value instanceof Number) return (long) ((Number) value).doubleValue();
+                if (value instanceof String) { long got = digits((String) value); if (got >= 0L) return got; }
+            }
+        } catch (RuntimeException ignored) {
+            /* 计数字段读不动就当这个源没声明，绝不让留档这一路把一次好检索弄失败。 */
+        }
+        return -1L;
+    }
+
+    private static long digits(String value) {
+        String text = value == null ? "" : value.trim();
+        if (text.isEmpty() || text.length() > 15) return -1L;
+        for (int i = 0; i < text.length(); i++) if (text.charAt(i) < '0' || text.charAt(i) > '9') return -1L;
+        return Long.parseLong(text);
+    }
     /**
      * 万方翻页游标的三条上限，三个数各管一件事，谁也不许替谁下结论（标定依据见
      * docs/retrieval-recall.md 瓶颈三，2026-10-08 经 127.0.0.1:7897 真接口实测）：
@@ -115,8 +278,18 @@ public final class PaperSources {
             ApiClient.Response page = HttpTransport.post(endpoint(name), CnkiSearch.form(phrase, 1),
                     CnkiSearch.headers(), safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation,
                     proxyFor(safe));
-            try { return CnkiSearch.parse(page.body, per); }
-            catch (RuntimeException error) { throw new IOException("知网检索响应无法解析"); }
+            try {
+                ArrayList<Candidate> found = CnkiSearch.parse(page.body, per);
+                /* 知网这个口不在响应里写命中总数，declaredTotal 就留 -1（=源没说），不替它编一个。 */
+                recordShape(safe, name, phrase, page, found.size(), -1L,
+                        shapeOf(page.body, found.size(), -1L), "", false);
+                return found;
+            } catch (RuntimeException error) {
+                /* 解不出条目同样要留档，而且形状必须交给 shapeOf：挡人页就长在这一行里，
+                   以前这里只把"无法解析"四个字抛上去，页面上写着"请输入验证码"也没人看得见。 */
+                recordShape(safe, name, phrase, page, 0, -1L, shapeOf(page.body, 0, -1L), "响应无法解析", true);
+                throw new IOException("知网检索响应无法解析");
+            }
         }
         ApiClient.Response response = name.equals("ncpssd")
                 ? HttpTransport.post(endpoint(name), formFor(phrase, per), headers,
@@ -125,7 +298,13 @@ public final class PaperSources {
                         headers, safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation, proxyFor(safe));
         Object root;
         try { root = name.equals("arxiv") || name.equals("cqvip") ? response.body : ApiJson.parse(response.body); }
-        catch (RuntimeException error) { throw new IOException("检索响应格式无效"); }
+        catch (RuntimeException error) {
+            recordShape(safe, name, phrase, response, 0, -1L, shapeOf(response.body, 0, -1L),
+                    "检索响应格式无效", true);
+            throw new IOException("检索响应格式无效");
+        }
+        /* 源声称的总数要在解析条目之前拿：解不出条目那一路更需要这个数字（0 与"没声明"是两回事）。 */
+        long declared = declaredTotal(name, root);
         ArrayList<Candidate> found;
         try {
             if (name.equals("openalex")) found = parseOpenAlex(root, per);
@@ -136,7 +315,13 @@ public final class PaperSources {
             else if (name.equals("cqvip")) found = parseCqvip(String.valueOf(root), per);
             else if (name.equals("ncpssd")) found = parseNcpssd(root, per);
             else found = parseCore(root, per);
-        } catch (RuntimeException error) { throw new IOException("检索响应格式无效"); }
+        } catch (RuntimeException error) {
+            recordShape(safe, name, phrase, response, 0, declared, shapeOf(response.body, 0, declared),
+                    "检索响应格式无效", true);
+            throw new IOException("检索响应格式无效");
+        }
+        recordShape(safe, name, phrase, response, found.size(), declared,
+                shapeOf(response.body, found.size(), declared), "", false);
         return found;
     }
 
@@ -174,9 +359,14 @@ public final class PaperSources {
                 throw error;
             }
             Envelope envelope = envelopeOf(binary.raw);
+            ArrayList<Candidate> frame = WanfangProtocol.parse(binary.raw, per);
             int added = 0;
-            for (Candidate candidate : WanfangProtocol.parse(binary.raw, per))
+            for (Candidate candidate : frame)
                 if (keep(seen, candidate)) { found.add(candidate); added++; }
+            /* 每一页都留一行：换页回来的空帧与第一页的空帧是两种不同的账，档里必须分得开。 */
+            recordShape(safe, "wanfang", phrase, binary, frame.size(), envelope.total,
+                    frameShape(envelope.records, frame.size(), envelope.total,
+                            excerptOf(binary.raw, binary.body)), "", false);
             quietPages = added > 0 ? 0 : quietPages + 1;
             /* 这一式要下发的条数已经凑够，或服务端声称的命中总数已经取满：游标没必要再推。 */
             if (found.size() >= per) break;

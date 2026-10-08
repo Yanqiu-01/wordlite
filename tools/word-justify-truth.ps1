@@ -76,6 +76,9 @@ function Split-ParaList([string]$s) {
 
 function Invoke-WordSession([scriptblock]$Body) {
     $word = $null; $document = $null
+    # Another agent may hold its own Word open: remember the PIDs that were already running so
+    # the finally block below stops only the instance this session created.
+    $before = @(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
     try {
         $word = New-Object -ComObject Word.Application
         $word.Visible = $false
@@ -87,7 +90,8 @@ function Invoke-WordSession([scriptblock]$Body) {
         if ($document) { $document.Close($false); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($document) }
         if ($word) { $word.Quit(); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($word) }
         Start-Sleep -Milliseconds 800
-        Get-Process WINWORD -ErrorAction SilentlyContinue | Stop-Process -Force
+        Get-Process WINWORD -ErrorAction SilentlyContinue |
+            Where-Object { $before -notcontains $_.Id } | Stop-Process -Force
     }
 }
 function TryProp($obj, [string]$name) {
@@ -545,6 +549,8 @@ if ($Mode -eq 'Xml') {
         $withVal = @($data | Where-Object { $_.$k -ne '' })
         $arr2 = @($k, $withVal.Count, ((($withVal | ForEach-Object { $_.$k } | Group-Object | ForEach-Object { $_.Name + 'x' + $_.Count }) | Select-Object -First 6) -join ' ;; '), '', '', '', '')
         $sum.Add(($arr2 -join "`t"))
+    }   # foreach ($k in @('tabs_direct', 'ind_direct')) -- closed 2026-10-08: the brace was missing,
+        # so every write below ran inside the loop and the script would not parse at all.
     Set-Content -Encoding utf8NoBOM -Path (Join-Path $OutDir 'xml-props-summary.tsv') -Value $sum
     # styles that carry justification-relevant properties
     $srows = [System.Collections.Generic.List[string]]::new()

@@ -60,6 +60,41 @@ public final class OriginalDocxRegression {
         check(sizes.contains(24) && sizes.contains(30) && sizes.contains(36),
                 "real document mixed run sizes are retained");
 
+        // ---- w:ind signedness and per-section w:pgMar (artifacts/agent-layout-fix/spec-notes.md) ----
+        // 15 headings write <w:ind w:left="-458" w:firstLine="406"/>: -22.9pt of left indent plus
+        // 20.3pt of first line, i.e. Word starts the first line 2.6pt LEFT of the text margin.
+        int negativeLeftHeadings = 0;
+        for (DocxDocument.ParagraphBlock paragraph : document.paragraphs) {
+            DocxDocument.ParagraphFormat f = paragraph.format;
+            if (f.leftIndentTwips == -458 && f.firstLineIndentTwips == 406) negativeLeftHeadings++;
+        }
+        check(negativeLeftHeadings == 15,
+                "15 headings keep the negative w:ind/@w:left (-458 twips) through the style merge");
+        DocxDocument.ParagraphFormat merged = new DocxDocument.ParagraphFormat();
+        merged.leftIndentTwips = 0; merged.rightIndentTwips = 0;
+        DocxDocument.ParagraphFormat signed = new DocxDocument.ParagraphFormat();
+        signed.leftIndentTwips = -458; signed.rightIndentTwips = -120;
+        merged.merge(signed);
+        check(merged.leftIndentTwips == -458 && merged.rightIndentTwips == -120,
+                "merge() reads -1 as the only unset marker, so a signed w:ind left/right survives it");
+        DocxDocument.ParagraphFormat unwritten = new DocxDocument.ParagraphFormat();
+        unwritten.leftIndentTwips = -1;
+        DocxDocument.ParagraphFormat inherited = new DocxDocument.ParagraphFormat();
+        inherited.leftIndentTwips = 700;
+        inherited.merge(unwritten);
+        check(inherited.leftIndentTwips == 700, "an unwritten w:ind still leaves the inherited indent alone");
+
+        PageGeometry cover = new PageGeometry(document.sections.get(0));
+        PageGeometry body = new PageGeometry(document.sections.get(2));
+        check(document.sections.get(0).marginLeftTwips == 1800
+                        && document.sections.get(0).marginRightTwips == 1800
+                        && document.sections.get(0).marginTopTwips == 1440,
+                "the cover section carries its own 90pt w:pgMar instead of the body's 85.05pt");
+        check(Math.abs(cover.left - 120f) < 0.01f && Math.abs(body.left - 113.4f) < 0.01f
+                        && Math.abs(cover.contentWidth - 553.7333f) < 0.02f
+                        && Math.abs(body.contentWidth - 566.9333f) < 0.02f,
+                "every section's own pgMar drives its own content box (cover 553.73px, body 566.93px)");
+
         DocxWriter.write(new FileInputStream(input), new FileOutputStream(output), document);
         DocxDocument roundtrip = DocxParser.parse(new FileInputStream(output), output.getName());
         int roundSup = 0, roundSub = 0, roundImages = 0;

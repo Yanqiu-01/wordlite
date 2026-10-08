@@ -247,24 +247,68 @@ public final class AigcRegression {
         check(hasFeature(folded, "it is worth noting") && hasFeature(folded, "moreover/furthermore"),
                 "fullwidth Latin boilerplate is folded before the template scan");
         boolean chineseNames = true;
-        boolean scoreMatchesFeatures = true;
+        // 2026-10-08 起这条不变量换了形状。新特征一律以 0 系数入库（AigcScorer.table()），依据照样进报告的
+        // 依据清单，但不进句分——所以"列了证据"不再等价于"有分"。留下来的两条真规则更硬：
+        //   1) 分数 > 0 的句子一定列了证据，分数不会凭空来；
+        //   2) 分数 = 0 的句子绝不可能带着"有非零系数的特征"的证据（有系数却没分 = 打分漏了）。
+        boolean scoreNeedsEvidence = true;
+        boolean silentWeight = true;
+        int evidenceOnly = 0;
+        int scored = 0;
         ArrayList<AigcDetector.Result> all = new ArrayList<AigcDetector.Result>();
+        ArrayList<String> sources = new ArrayList<String>();
         all.add(ai);
+        sources.add(AI);
         all.add(english);
+        sources.add(AI_EN);
         all.add(AigcDetector.detect(HUMAN));
+        sources.add(HUMAN);
         for (int i = 0; i < all.size(); i++) {
+            java.util.HashSet<String> weighted = weightedEvidence(sources.get(i));
             for (int k = 0; k < all.get(i).sentences.size(); k++) {
                 AigcDetector.Sentence sentence = all.get(i).sentences.get(k);
+                boolean hasWeighted = false;
                 for (int j = 0; j < sentence.features.size(); j++) {
                     if (!hasCJK(sentence.features.get(j))) chineseNames = false;
+                    if (weighted.contains(sentence.features.get(j))) hasWeighted = true;
                 }
-                if (sentence.features.isEmpty() != (sentence.score == 0f)) scoreMatchesFeatures = false;
+                if (sentence.score > 0f) {
+                    scored++;
+                    if (sentence.features.isEmpty()) scoreNeedsEvidence = false;
+                } else if (!sentence.features.isEmpty()) {
+                    evidenceOnly++;
+                    if (hasWeighted) silentWeight = false;
+                }
             }
         }
         check(chineseNames, "every feature name is written in Chinese for the reviewer");
-        check(scoreMatchesFeatures, "a sentence scores above zero exactly when it lists features");
+        check(scoreNeedsEvidence, "分数 > 0 的句子一定列出证据（实测三段里 " + scored + " 个有分句全部列出证据，"
+                + evidenceOnly + " 个 0 分句只列证据不出分）");
+        check(silentWeight, "0 分的句子只可能带 0 系数的新证据：三段里 " + evidenceOnly
+                + " 个 0 分句没有一条来自有非零系数的特征（新特征 0 系数入库，证据能进报告但不参与打分）");
     }
 
+
+    /**
+     * 这一段里"系数非零的特征"能产出的证据文案集合。用来判定一条证据是不是只可能来自 0 系数的新特征。
+     * 中文族与拉丁族的非零系数集合完全一致（AigcScorer.install 按特征名平移），所以取中文族一张就够。
+     */
+    private static java.util.HashSet<String> weightedEvidence(String text) {
+        java.util.HashSet<String> out = new java.util.HashSet<String>();
+        String norm = TextCorpus.normalize(text);
+        ArrayList<int[]> spans = TextCorpus.sentences(text);
+        ArrayList<AigcFeatures.Segment> all = AigcFeatures.segments(norm, spans);
+        AigcFeatures.DocStats stats = statsOf(text);
+        AigcScorer.Coefficients co = AigcScorer.current(AigcFamily.CHINESE);
+        for (int i = 0; i < all.size(); i++) {
+            if (!AigcFeatures.scores(all.get(i))) continue;
+            ArrayList<AigcFeatures.Hit> hits = AigcFeatures.of(all.get(i), stats);
+            for (int k = 0; k < hits.size(); k++) {
+                if (co.get(hits.get(k).id) > 0d) out.addAll(hits.get(k).evidence);
+            }
+        }
+        return out;
+    }
     private static boolean hasCJK(String text) {
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
@@ -489,8 +533,15 @@ public final class AigcRegression {
                         + AigcDetector.SEGMENT_FLAG_GATE + "）");
         String one = "综上所述，我们在四个数据集上把同一组实验重跑了一遍，结论和上次差不多。";
         AigcDetector.Result single = AigcDetector.detect(one);
-        check(single.sentences.size() == 1 && single.sentences.get(0).features.size() == 1,
-                "这句话只触发一条特征，才拿它当系数的量尺");
+        // 量尺句的条件从"只列一条证据"改成"只列一条**有系数**的证据"：0 系数新证据照样会进依据清单，
+        // 但不参与打分，污染不了这把尺子——下一行照样要求句分恰好等于 TEMPLATE 系数 x 0.5。
+        java.util.HashSet<String> ruler = weightedEvidence(one);
+        int rulerHits = 0;
+        for (int i = 0; i < single.sentences.get(0).features.size(); i++)
+            if (ruler.contains(single.sentences.get(0).features.get(i))) rulerHits++;
+        check(single.sentences.size() == 1 && rulerHits == 1,
+                "这句话只触发一条有系数的特征（实测列出 " + single.sentences.get(0).features.size()
+                        + " 条依据，其中有非零系数的 " + rulerHits + " 条），才拿它当系数的量尺");
         double value = single.coefficients.get(AigcFeatureId.TEMPLATE) * 0.5d;
         check(Math.abs(single.sentences.get(0).score - (float) value) < 0.0001f,
                 "句分等于特征值乘系数，没有别的东西掺进来（0.5 × " + value + "）");

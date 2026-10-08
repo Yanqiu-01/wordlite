@@ -29,6 +29,7 @@ public final class CheckReport {
         engines(out, report);
         sourcesLedger(out, report);
         candidates(out, report);
+        shapes(out, report);
         snippets(out, report);
         aigc(out, report);
         out.append("<h2>检测说明</h2>");
@@ -54,6 +55,7 @@ public final class CheckReport {
         out.append("</tbody></table><p>参与比对 ").append(report.comparedChars)
                 .append(" 个有效字符（语料侧可比候选 ").append(report.comparableCandidates).append(" 篇），命中相似 ")
                 .append(report.duplicateChars).append(" 个，其中落在引用区间内 ").append(report.citedDuplicateChars).append(" 个。</p>");
+        abstractLayer(out, report);
     }
     /** A run that consulted nothing gets 未完成查重 as its headline; the AIGC share is local, so it stays. */
     private static void unfinished(StringBuilder out, DuplicateEngine.Report report) {
@@ -65,6 +67,11 @@ public final class CheckReport {
         out.append("<h2>指标</h2><table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>");
         aigcMetric(out, report);
         out.append("</tbody></table>");
+        /* "没有任何可比正文"这句必须留着（它说的是真的），但它下面不许是空白页：
+           摘要层的数与两条能走的下一步，就排在这同一屏上。 */
+        abstractLayer(out, report);
+        if (DuplicateEngine.abstractLayerMeasured(report))
+            out.append("<p><strong>").append(escape(DuplicateEngine.abstractLayerNextSteps())).append("</strong></p>");
     }
     /**
      * 检索覆盖率：这次到底看了论文的多少。部分覆盖必须把「相似率是下限」写在同一节里，
@@ -293,6 +300,71 @@ public final class CheckReport {
         String score = DuplicateEngine.aigcScoreLine(report);
         if (!score.isEmpty()) metricText(out, DuplicateEngine.AIGC_SCORE_LABEL, score);
     }
+    /**
+     * 摘要层（近似）那一屏。口径长在标题上（公开检索只到摘要），数字自带分子分母与阈值，
+     * 表里是逐句证据：本文那句、撞上的摘要那句、来源题名。
+     * 排在指标表后面自成一张卡——正文级的头条在上，这一层在它下面，两个数不同表也不相加。
+     */
+    private static void abstractLayer(StringBuilder out, DuplicateEngine.Report report) {
+        if (!DuplicateEngine.abstractLayerMeasured(report)) return;
+        out.append("<h2>").append(escape(DuplicateEngine.ABSTRACT_LAYER_LABEL)).append("</h2>");
+        out.append("<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>");
+        metricText(out, "摘要层重合率（按句）", DuplicateEngine.abstractLayerLine(report));
+        out.append("</tbody></table>");
+        out.append("<p>").append(escape(DuplicateEngine.abstractLayerCaveat(report))).append("</p>");
+        if (report.abstractHits.isEmpty()) {
+            out.append("<p>没有一句撞上摘要。这只说明这批候选的摘要里没有与本文句子同形的句子，")
+                    .append("不等于正文没有重复——公开检索口给不到正文那一层。</p>");
+            return;
+        }
+        out.append("<table><thead><tr><th>本文句子</th><th>撞上的摘要句</th><th>来源题名</th>")
+                .append("<th>检索源</th><th>袋 Dice</th></tr></thead><tbody>");
+        for (DuplicateEngine.AbstractHit hit : report.abstractHits) {
+            out.append("<tr><td>").append(escape(snippet(report.sourceText, hit.start, hit.end))).append("</td><td>")
+                    .append(escape(clip(hit.abstractSentence, 240))).append("</td><td>")
+                    .append(escape(hit.title)).append("</td><td>")
+                    .append(escape(PaperSources.label(hit.engine))).append("</td><td>")
+                    .append(percent(hit.score * 100d)).append("</td></tr>");
+        }
+        out.append("</tbody></table>");
+        if (report.abstractHits.size() < report.abstractSentencesMatched)
+            out.append("<p>上表只列分数最高的 ").append(report.abstractHits.size()).append(" 句，本轮共命中 ")
+                    .append(report.abstractSentencesMatched).append(" 句。</p>");
+    }
+
+    /**
+     * 逐次检索响应留档（A4）：一问一行，成功也留。三个数分开写——
+     * 本机解出几条、源声称几条、这份响应是什么形状。0% 从此在档里一眼分得清。
+     */
+    private static void shapes(StringBuilder out, DuplicateEngine.Report report) {
+        if (report == null || report.shapes.isEmpty()) return;
+        out.append("<h2>检索响应留档 ").append(report.shapes.size()).append(" 次</h2>");
+        out.append("<table><thead><tr><th>检索源</th><th>检索式</th><th>状态</th><th>字节</th>")
+                .append("<th>本机解出条目</th><th>源声称总数</th><th>响应形状</th><th>响应开头</th></tr></thead><tbody>");
+        for (PaperSources.ShapeRow row : report.shapes) {
+            out.append("<tr><td>").append(escape(PaperSources.label(row.engine))).append("</td><td>")
+                    .append(escape(row.probe)).append("</td><td>")
+                    .append(row.status < 0 ? "无响应" : String.valueOf(row.status)).append("</td><td>")
+                    .append(row.bodyBytes < 0 ? "?" : String.valueOf(row.bodyBytes)).append("</td><td>")
+                    .append(String.valueOf(row.entries)).append("</td><td>")
+                    .append(row.declaredTotal < 0L ? "未声明" : String.valueOf(row.declaredTotal)).append("</td><td>")
+                    .append(escape(row.shape)).append("</td><td>")
+                    .append(escape(row.error.isEmpty() ? row.excerpt : row.error)).append("</td></tr>");
+        }
+        out.append("</tbody></table>");
+        out.append("<p>“本机解出条目”是这一份响应里我们读出了几条；“源声称总数”是响应里源自己写的命中条数，")
+                .append("“未声明”表示这个检索口不写这个数字，不是 0。形状里 declared-zero = 源明说这一式没有货，")
+                .append("blocked = 挡人页（验证/拦截），js-shell = 只有脚本壳没有条目，empty-frame = 空帧，")
+                .append("frame-unparsed = 帧里有著录项但我们解不出，no-response = 请求没走通。</p>");
+        if (report.shapesDropped > 0)
+            out.append("<p>另有 ").append(report.shapesDropped).append(" 行超出留档上限，未写进本报告。</p>");
+    }
+
+    private static String clip(String value, int max) {
+        String text = value == null ? "" : value.trim();
+        return text.length() <= max ? text : text.substring(0, max) + "…";
+    }
+
     private static void metricText(StringBuilder out, String name, String value) {
         out.append("<tr><td>").append(escape(name)).append("</td><td>").append(escape(value)).append("</td></tr>");
     }

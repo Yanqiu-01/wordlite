@@ -42,6 +42,14 @@ public final class ReportStore {
     public static final int MAX_EVIDENCE = 40;
     /** AI 分段的上限：命中地图要的是位置分布，八十段足够画出形状，超出部分只报总数。 */
     public static final int MAX_AI_SEGMENTS = 80;
+    /** 摘要层逐句证据的条数上限：面板只画这些，全貌看 abstractEvidenceTotal。 */
+    public static final int MAX_ABSTRACT_EVIDENCE = 20;
+    /**
+     * 响应留档（A4）的行数上限。检索侧最多 120 次请求（DuplicateEngine.MAX_REQUESTS），
+     * 万方一个检索式还会换页多落几帧，所以这一档必须比 120 大，否则"档里查不到"
+     * 就又是我们自己造成的盲区。裁掉的行数写在 shapesTruncated 旁边那个计数里。
+     */
+    public static final int MAX_SHAPE_ROWS = 150;
     /** 来源榜行数 = SourceLedger.MAX_ROWS + 折叠行，折叠行本身就代表"其余 N 篇"，不能再砍。 */
     public static final int MAX_SOURCE_ROWS = SourceLedger.MAX_ROWS + 1;
     public static final int MAX_ENGINE_ROWS = 16;
@@ -86,6 +94,34 @@ public final class ReportStore {
         public boolean usable(int totalChars) {
             return start >= 0 && end > start && end <= totalChars;
         }
+    }
+
+    /**
+     * 摘要层证据的一行：本文那一句（snippet，按正文偏移能跳回去）+ 撞上的那句摘要（matched）
+     * + 来源题名。它刻意不与 evidence 同表——两张表混起来，摘要层的数就能冒充正文级的数。
+     */
+    public static final class AbstractEvidence {
+        public int start, end;
+        /** 这一句的最大袋 Dice，0..1。 */
+        public double score;
+        public String title = "", engine = "", snippet = "", matched = "";
+        public boolean snippetCut;
+
+        public boolean usable(int sourceChars) {
+            return start >= 0 && end > start && end <= sourceChars;
+        }
+    }
+
+    /**
+     * 一次检索请求的响应留档行（A4）。三个数各说一件事：entries 是我们解出几条，
+     * declaredTotal 是源自己声称几条（-1 = 源没说，0 = 源说了没有），shape 是这份响应的形状。
+     */
+    public static final class ShapeRow {
+        public String engine = "", probe = "", shape = "", excerpt = "", error = "";
+        public int status = -1, bodyBytes = -1, entries;
+        public long declaredTotal = -1L;
+        public long millis;
+        public boolean failed;
     }
 
     public static final class SourceRow {
@@ -181,6 +217,19 @@ public final class ReportStore {
         public final ArrayList<AiSegment> aiSegments = new ArrayList<AiSegment>();
         public int aiSegmentsTotal;
         public boolean aiSegmentsTruncated;
+
+        /* ---- 摘要层（近似）：单独一张卡，永不与上面四个比率相加，也不与 evidence 同表 ---- */
+        public double abstractLayerRate;
+        public int abstractSentencesCompared, abstractSentencesMatched;
+        public int abstractCandidates, abstractUnits;
+        public boolean abstractLayerTruncated;
+        public final ArrayList<AbstractEvidence> abstractEvidence = new ArrayList<AbstractEvidence>();
+        public int abstractEvidenceTotal;
+        public boolean abstractEvidenceTruncated;
+        /** 每次检索请求的响应留档（A4）：这一轮问了几个源、每次解出几条、源声称几条、响应长什么样。 */
+        public final ArrayList<ShapeRow> shapes = new ArrayList<ShapeRow>();
+        public int shapesTotal;
+        public boolean shapesTruncated;
 
         /** 被检正文的长度与指纹：跳转前拿它验一下"现在这篇还是当时那篇吗"。 */
         public int sourceChars;
@@ -301,6 +350,56 @@ public final class ReportStore {
                 }
                 hit.score = fraction(hit.score);
             }
+            // 摘要层：数字收口与正文级同一套（rate 夹 0..100），偏移越界的证据行照丢——点它跳不到地方比少一条坏。
+            abstractLayerRate = rate(abstractLayerRate);
+            abstractSentencesCompared = atLeastZero(abstractSentencesCompared);
+            abstractSentencesMatched = atLeastZero(abstractSentencesMatched);
+            abstractCandidates = atLeastZero(abstractCandidates);
+            abstractUnits = atLeastZero(abstractUnits);
+            abstractEvidenceTotal = Math.max(abstractEvidenceTotal, abstractEvidence.size());
+            for (int i = abstractEvidence.size() - 1; i >= 0; i--) {
+                AbstractEvidence row = abstractEvidence.get(i);
+                if (row != null && row.usable(sourceChars)) continue;
+                abstractEvidence.remove(i);
+                abstractEvidenceTruncated = true;
+            }
+            boolean abstractCutByCap = abstractEvidence.size() > MAX_ABSTRACT_EVIDENCE;
+            while (abstractEvidence.size() > MAX_ABSTRACT_EVIDENCE)
+                abstractEvidence.remove(abstractEvidence.size() - 1);
+            if (abstractCutByCap) abstractEvidenceTruncated = true;
+            for (int i = 0; i < abstractEvidence.size(); i++) {
+                AbstractEvidence row = abstractEvidence.get(i);
+                row.title = cut(row.title, MAX_NAME_CHARS);
+                row.engine = cut(row.engine, 40);
+                row.matched = cut(row.matched, MAX_SNIPPET_CHARS);
+                row.score = fraction(row.score);
+                if (row.snippet.length() > MAX_SNIPPET_CHARS) {
+                    row.snippet = row.snippet.substring(0, MAX_SNIPPET_CHARS) + "…";
+                    row.snippetCut = true;
+                }
+            }
+            java.util.Collections.sort(abstractEvidence, new java.util.Comparator<AbstractEvidence>() {
+                public int compare(AbstractEvidence a, AbstractEvidence b) {
+                    return a.start != b.start ? a.start - b.start : a.end - b.end;
+                }
+            });
+
+            // 留档：条数按 MAX_SHAPE_ROWS 夹，摘录按 snippet 那一档夹；砍掉的行数 shapesTotal 里看得见。
+            shapesTotal = Math.max(shapesTotal, shapes.size());
+            boolean shapeCutByCap = shapes.size() > MAX_SHAPE_ROWS;
+            while (shapes.size() > MAX_SHAPE_ROWS) shapes.remove(shapes.size() - 1);
+            if (shapeCutByCap) shapesTruncated = true;
+            for (int i = 0; i < shapes.size(); i++) {
+                ShapeRow row = shapes.get(i);
+                row.engine = cut(row.engine, 40);
+                row.shape = cut(row.shape, 40);
+                row.probe = cut(row.probe, MAX_SNIPPET_CHARS);
+                row.excerpt = cut(row.excerpt, MAX_SNIPPET_CHARS);
+                row.error = cut(row.error, MAX_NOTE_CHARS);
+                row.entries = atLeastZero(row.entries);
+                row.millis = row.millis < 0L ? 0L : row.millis;
+            }
+
             String kept = cutHtml(html, MAX_HTML_CHARS);
             if (!kept.equals(html)) htmlCut = true;
             html = kept;
@@ -370,6 +469,26 @@ public final class ReportStore {
             }
             out.append("],\"aiTotal\":").append(aiSegmentsTotal)
                     .append(",\"aiTruncated\":").append(aiSegmentsTruncated ? "true" : "false")
+                    .append(",\"abstract\":{\"rate\":").append(num(abstractLayerRate))
+                    .append(",\"compared\":").append(abstractSentencesCompared)
+                    .append(",\"matched\":").append(abstractSentencesMatched)
+                    .append(",\"candidates\":").append(abstractCandidates)
+                    .append(",\"units\":").append(abstractUnits)
+                    .append(",\"truncated\":").append(abstractLayerTruncated ? "true" : "false")
+                    .append(",\"evidence\":[");
+            for (int i = 0; i < abstractEvidence.size(); i++) {
+                if (i > 0) out.append(',');
+                out.append(abstractEvidenceJson(abstractEvidence.get(i)));
+            }
+            out.append("],\"evidenceTotal\":").append(abstractEvidenceTotal)
+                    .append(",\"evidenceTruncated\":").append(abstractEvidenceTruncated ? "true" : "false")
+                    .append("},\"shapes\":[");
+            for (int i = 0; i < shapes.size(); i++) {
+                if (i > 0) out.append(',');
+                out.append(shapeJson(shapes.get(i)));
+            }
+            out.append("],\"shapesTotal\":").append(shapesTotal)
+                    .append(",\"shapesTruncated\":").append(shapesTruncated ? "true" : "false")
                     .append(",\"sourceChars\":").append(sourceChars)
                     .append(",\"textDigest\":").append(textDigest)
                     .append(",\"html\":").append(ApiJson.quote(html))
@@ -450,6 +569,27 @@ public final class ReportStore {
             }
             record.aiSegmentsTotal = (int) whole(map.get("aiTotal"));
             record.aiSegmentsTruncated = truth(map.get("aiTruncated"));
+            Map<?, ?> abstractLayer = asMap(map.get("abstract"));
+            if (abstractLayer != null) {
+                record.abstractLayerRate = real(abstractLayer.get("rate"));
+                record.abstractSentencesCompared = (int) whole(abstractLayer.get("compared"));
+                record.abstractSentencesMatched = (int) whole(abstractLayer.get("matched"));
+                record.abstractCandidates = (int) whole(abstractLayer.get("candidates"));
+                record.abstractUnits = (int) whole(abstractLayer.get("units"));
+                record.abstractLayerTruncated = truth(abstractLayer.get("truncated"));
+                for (Object item : asList(abstractLayer.get("evidence"))) {
+                    AbstractEvidence row = abstractEvidenceFrom(item);
+                    if (row != null) record.abstractEvidence.add(row);
+                }
+                record.abstractEvidenceTotal = (int) whole(abstractLayer.get("evidenceTotal"));
+                record.abstractEvidenceTruncated = truth(abstractLayer.get("evidenceTruncated"));
+            }
+            for (Object item : asList(map.get("shapes"))) {
+                ShapeRow row = shapeFrom(item);
+                if (row != null) record.shapes.add(row);
+            }
+            record.shapesTotal = (int) whole(map.get("shapesTotal"));
+            record.shapesTruncated = truth(map.get("shapesTruncated"));
             record.sourceChars = (int) whole(map.get("sourceChars"));
             record.textDigest = whole(map.get("textDigest"));
             record.html = text(map.get("html"));
@@ -558,6 +698,64 @@ public final class ReportStore {
     }
 
     /* ---- index.json：只有列表页要读的那几列 ---- */
+
+    static String abstractEvidenceJson(AbstractEvidence row) {
+        return "{\"start\":" + row.start
+                + ",\"end\":" + row.end
+                + ",\"score\":" + num(row.score)
+                + ",\"title\":" + ApiJson.quote(row.title)
+                + ",\"engine\":" + ApiJson.quote(row.engine)
+                + ",\"snippet\":" + ApiJson.quote(row.snippet)
+                + ",\"matched\":" + ApiJson.quote(row.matched)
+                + ",\"cut\":" + (row.snippetCut ? "true" : "false") + "}";
+    }
+
+    static AbstractEvidence abstractEvidenceFrom(Object item) {
+        Map<?, ?> map = asMap(item);
+        if (map == null) return null;
+        AbstractEvidence row = new AbstractEvidence();
+        row.start = (int) whole(map.get("start"));
+        row.end = (int) whole(map.get("end"));
+        row.score = real(map.get("score"));
+        row.title = text(map.get("title"));
+        row.engine = text(map.get("engine"));
+        row.snippet = text(map.get("snippet"));
+        row.matched = text(map.get("matched"));
+        row.snippetCut = truth(map.get("cut"));
+        return row;
+    }
+
+    static String shapeJson(ShapeRow row) {
+        return "{\"engine\":" + ApiJson.quote(row.engine)
+                + ",\"probe\":" + ApiJson.quote(row.probe)
+                + ",\"shape\":" + ApiJson.quote(row.shape)
+                + ",\"status\":" + row.status
+                + ",\"bytes\":" + row.bodyBytes
+                + ",\"entries\":" + row.entries
+                + ",\"total\":" + row.declaredTotal
+                + ",\"millis\":" + row.millis
+                + ",\"failed\":" + (row.failed ? "true" : "false")
+                + ",\"excerpt\":" + ApiJson.quote(row.excerpt)
+                + ",\"error\":" + ApiJson.quote(row.error) + "}";
+    }
+
+    static ShapeRow shapeFrom(Object item) {
+        Map<?, ?> map = asMap(item);
+        if (map == null) return null;
+        ShapeRow row = new ShapeRow();
+        row.engine = text(map.get("engine"));
+        row.probe = text(map.get("probe"));
+        row.shape = text(map.get("shape"));
+        row.status = (int) whole(map.get("status"));
+        row.bodyBytes = (int) whole(map.get("bytes"));
+        row.entries = (int) whole(map.get("entries"));
+        row.declaredTotal = whole(map.get("total"));
+        row.millis = whole(map.get("millis"));
+        row.failed = truth(map.get("failed"));
+        row.excerpt = text(map.get("excerpt"));
+        row.error = text(map.get("error"));
+        return row;
+    }
 
     static String summaryJson(Summary summary) {
         return "{\"id\":" + ApiJson.quote(summary.id)
@@ -745,6 +943,52 @@ public final class ReportStore {
             }
         }
         record.aiSegmentsTruncated = record.aiSegmentsTotal > record.aiSegments.size();
+        /* ---- 摘要层（近似）：单独一份账，与上面那四个比率不通气、不相加、不同表 ---- */
+        record.abstractLayerRate = report.abstractLayerRate;
+        record.abstractSentencesCompared = report.abstractSentencesCompared;
+        record.abstractSentencesMatched = report.abstractSentencesMatched;
+        record.abstractCandidates = report.abstractCandidates;
+        record.abstractUnits = report.abstractUnits;
+        record.abstractLayerTruncated = report.abstractLayerTruncated;
+        record.abstractEvidenceTotal = report.abstractHits.size();
+        for (int i = 0; i < report.abstractHits.size()
+                && record.abstractEvidence.size() < MAX_ABSTRACT_EVIDENCE; i++) {
+            DuplicateEngine.AbstractHit hit = report.abstractHits.get(i);
+            if (hit == null) continue;
+            AbstractEvidence row = new AbstractEvidence();
+            row.start = hit.start;
+            row.end = hit.end;
+            row.score = hit.score;
+            row.title = hit.title;
+            row.engine = hit.engine;
+            row.matched = hit.abstractSentence;
+            // 与正文级证据同一个粗切，最后一刀由 normalize 收尾。
+            int stop = Math.min(hit.end, Math.min(source.length(), hit.start + 4 * MAX_SNIPPET_CHARS));
+            row.snippet = hit.start >= 0 && hit.end > hit.start && hit.start <= stop
+                    ? source.substring(hit.start, stop) : "";
+            record.abstractEvidence.add(row);
+        }
+        record.abstractEvidenceTruncated = report.abstractHits.size() > record.abstractEvidence.size();
+        /* ---- 响应留档（A4）：这一轮每一次请求的 entries / declaredTotal / 形状，整本搬进存档 ---- */
+        record.shapesTotal = report.shapes.size();
+        for (int i = 0; i < report.shapes.size() && record.shapes.size() < MAX_SHAPE_ROWS; i++) {
+            PaperSources.ShapeRow found = report.shapes.get(i);
+            if (found == null) continue;
+            ShapeRow row = new ShapeRow();
+            row.engine = found.engine;
+            row.probe = found.probe;
+            row.shape = found.shape;
+            row.status = found.status;
+            row.bodyBytes = found.bodyBytes;
+            row.entries = found.entries;
+            row.declaredTotal = found.declaredTotal;
+            row.millis = found.millis;
+            row.failed = found.failed;
+            row.excerpt = found.excerpt;
+            row.error = found.error;
+            record.shapes.add(row);
+        }
+        record.shapesTruncated = report.shapes.size() > record.shapes.size() || report.shapesDropped > 0;
         record.sourceChars = source.length();
         record.textDigest = digest(source);
         record.html = CheckReport.html(record.fileName, report);
@@ -909,6 +1153,17 @@ public final class ReportStore {
             if (record.evidence.size() > 1) {
                 record.evidence.remove(record.evidence.size() - 1);
                 record.evidenceTruncated = true;
+                continue;
+            }
+            // 摘要层的证据表与响应留档是最后两级：前者跳正文要用，后者是"这一轮为什么量不到"的唯一凭据。
+            if (record.abstractEvidence.size() > 1) {
+                record.abstractEvidence.remove(record.abstractEvidence.size() - 1);
+                record.abstractEvidenceTruncated = true;
+                continue;
+            }
+            if (record.shapes.size() > 1) {
+                record.shapes.remove(record.shapes.size() - 1);
+                record.shapesTruncated = true;
                 continue;
             }
             return false;

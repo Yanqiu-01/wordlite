@@ -120,19 +120,31 @@ public final class DocxTextLayout {
                 : Layout.Alignment.ALIGN_NORMAL;
         boolean allowWordWrap = f.wordWrap && hasLongLatinRun(text);
         StaticLayout layout = build(text, paint, width, alignment, f.alignment == 3, allowWordWrap);
+        // The platform keeps owning the word spaces of a Latin run only while it keeps them inside
+        // the column. Below API 34 it does not: measured on the target phone, a Latin line that had
+        // to pull a long token down gets its whole leftover dumped into the word spaces, so a
+        // reference-list line measures 617.50 px where the same text laid out un-justified measures
+        // 488.00 px and the column is 566.93 px wide (artifacts/agent-layout-fix/captures/base1,
+        // block 355 line 1; the overshoot grows with the number of spaces on the line). Word
+        // stretches word spaces as well, but it stops at the right boundary. Once a line is over
+        // the edge the platform owns nothing in this paragraph: it is re-laid with justification off
+        // and every line gets closed here, under the same floor-the-slack rule CJK seams use.
+        boolean platformJustify = f.alignment != 3 || !overshootsColumn(layout, width);
         // Word's w:overflowPunct lets a trailing fullwidth punctuation mark hang
         // past the line width by its blank half, so punct-ended lines hold one
         // more character. Android's breaker cannot express that in a single
         // pass; a second pass narrows exactly the marks Word would hang.
         if (f.alignment == 3 && f.overflowPunct)
-            layout = hangTrailingPunctuation(text, paint, layout, width, alignment, allowWordWrap);
+            layout = hangTrailingPunctuation(text, paint, layout, width, alignment, allowWordWrap,
+                    platformJustify);
         // No Android release closes a Chinese line on its own, so this pass runs on every version:
         // API 29 (the target phone) leaves a CJK line exactly where JUSTIFICATION_MODE_NONE puts
         // it, and the API 34 framework, the first with INTER_CHARACTER, still leaves 7-23 px of a
         // 567 px column unspread on a Chinese paragraph (JustifyApi34Test). Only the slack the
         // platform pass left over gets spread, so a line Android already filled stays filled.
-        if (f.alignment == 3 && hasEastAsian(text))
-            layout = justifyEastAsian(text, paint, layout, width, alignment, allowWordWrap);
+        if (f.alignment == 3 && (hasEastAsian(text) || !platformJustify))
+            layout = justifyEastAsian(text, paint, layout, width, alignment, allowWordWrap,
+                    platformJustify, !platformJustify);
         Paragraph out = new Paragraph(paragraph, layout, x, display);
         out.lineCarry = spacing == null ? 0f : spacing.lineCarry;
         out.lineHang = spacing == null ? 0f : spacing.lineHang;
@@ -189,7 +201,8 @@ public final class DocxTextLayout {
      */
     private static StaticLayout hangTrailingPunctuation(SpannableStringBuilder text, TextPaint paint,
                                                          StaticLayout layout, int width,
-                                                         Layout.Alignment alignment, boolean wordWrap) {
+                                                         Layout.Alignment alignment, boolean wordWrap,
+                                                         boolean platformJustify) {
         for (int pass = 0; pass < 3; pass++) {
             ArrayList<Integer> marks = new ArrayList<Integer>();
             int lines = layout.getLineCount();
@@ -223,7 +236,7 @@ public final class DocxTextLayout {
             for (int at : marks)
                 text.setSpan(new PunctInkWidth(hangInkFraction(text.charAt(at))),
                         at, at + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            layout = build(text, paint, width, alignment, true, wordWrap);
+            layout = build(text, paint, width, alignment, platformJustify, wordWrap);
         }
         return layout;
     }
@@ -239,40 +252,93 @@ public final class DocxTextLayout {
      */
     private static StaticLayout justifyEastAsian(Spannable text, TextPaint paint,
                                                  StaticLayout laidOut, int width,
-                                                 Layout.Alignment alignment, boolean wordWrap) {
+                                                 Layout.Alignment alignment, boolean wordWrap,
+                                                 boolean platformJustify, boolean wordSpaces) {
+        if (!platformJustify) {
+            // The platform just proved it cannot keep this paragraph inside the column, so its
+            // stretched advances are no basis for a slack figure -- measured against them every line
+            // would look over-full and nothing would be spread. Re-lay the same text with
+            // justification off and close the lines from what that leaves instead.
+            laidOut = build(text, paint, width, alignment, false, wordWrap);
+        }
         final int lines = laidOut.getLineCount();
         if (lines < 2) return laidOut;
         SpannableStringBuilder copy = new SpannableStringBuilder(text);
         int widened = 0;
-        for (int line = 0; line < lines - 1; line++) widened += spreadLine(copy, laidOut, width, line);
+        for (int line = 0; line < lines - 1; line++)
+            widened += spreadLine(copy, laidOut, width, line, wordSpaces);
         if (widened == 0) return laidOut;
         // Widening may never move a line break: pagination and the measured Word parity both rest on
         // the same breaks. Slack is restated from the laid-out geometry, so a break that still moved
         // means the shaping changed underneath us; take that single line's slack back out and lay the
         // paragraph out again, rather than throwing away every line's justification.
         for (int attempt = 0, budget = 2 * lines + 4; attempt < budget; attempt++) {
-            // Justify stays on: the platform still owns the word spaces of Latin runs, while the CJK
-            // gaps here are sized from the slack that pass left over, so nothing is stretched twice.
-            StaticLayout spread = build(copy, paint, width, alignment, true, wordWrap);
+            // platformJustify is what measure() decided: while the platform keeps the column it also
+            // keeps the word spaces of Latin runs, and the CJK gaps here are sized from the slack
+            // that pass left over, so nothing is stretched twice. When it lost the column the pass is
+            // off and the word spaces are spread here instead (wordSpaces says so).
+            StaticLayout spread = build(copy, paint, width, alignment, platformJustify, wordWrap);
             int blocked = lineToClear(laidOut, spread, lines, width);
             if (blocked < 0) return spread;
             // A line that just gained or lost a whole row is not necessarily the one holding the
-            // slack that tipped it over, and neither is a break whose cause sits further up: take the
-            // pixel out of the lowest line that still has one rather than abandoning the paragraph.
-            if (!shrinkLine(copy, laidOut, blocked) && !shrinkLine(copy, laidOut, lastLooseLine(copy, laidOut)))
+            // slack that tipped it over, and neither is a break whose cause sits further up. What is
+            // taken back is the line's own measured excess: shaving one pixel per attempt left a
+            // reference line that only had to give a space back chewing through the whole retry
+            // budget and losing every line's justification in the paragraph.
+            int excess = Math.max(1, (int) Math.ceil(spread.getLineWidth(blocked)
+                    - width + spread.getLineLeft(blocked)) + 1);
+            if (!shrinkLine(copy, laidOut, blocked, excess)
+                    && !shrinkLine(copy, laidOut, lastLooseLine(copy, laidOut), excess))
                 break;
         }
         return laidOut;
     }
 
     /** Opens one line's slack across its own gaps; returns how many gaps were opened. */
-    private static int spreadLine(SpannableStringBuilder copy, StaticLayout laidOut, int width, int line) {
+    private static int spreadLine(SpannableStringBuilder copy, StaticLayout laidOut, int width,
+                                  int line, boolean wordSpaces) {
         int start = laidOut.getLineStart(line);
         int end = laidOut.getLineEnd(line);
         while (end - start > 1 && Character.isWhitespace(copy.charAt(end - 1))) end--;
-        float slack = width - laidOut.getLineLeft(line) - laidOut.getLineWidth(line);
+        // Slack is restated against the line's INK, not its laid-out width. Word bills a line's right
+        // edge as the advance end of its last non-blank character (that is what the truth files call
+        // right_edge_pt minus last_gap_pt) and leaves the blanks a wrap left at the tail outside the
+        // text boundary, unstretched. Billing those blanks, as this did, is why every reference-list
+        // line that ends on a space stopped one space short of the boundary: 52 lines of them sat at
+        // 563.00 px against a column of 566.93 (captures/final1/new, blocks 341-370).
+        float slack = width - laidOut.getLineLeft(line) - inkWidth(copy, laidOut, line);
         if (slack < 1f) return 0;
+        // The blanks a wrap left at the tail get Word's accounting: they sit outside the text
+        // boundary and take no width. Without this the platform bills them inside the line, so the
+        // stretch stops a space short of the boundary, and the moment the ink reaches the boundary
+        // the last blank no longer fits and jumps to the next line as leading whitespace.
+        int hardEnd = laidOut.getLineEnd(line);
+        if (end < hardEnd)
+            copy.setSpan(new BlankTail(), end, hardEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         int[][] gaps = gapOffsets(copy, laidOut, line, start, end);
+        if (wordSpaces) {
+            // Only reachable once the platform has lost the column (see measure()): the word spaces
+            // of this line are ours to stretch, and on a mixed line the CJK seams join them so one
+            // line's slack is spent exactly once. Each gap takes what it may hold -- a seam stops
+            // at MAX_GAP_STRETCH_PX and the rest goes where Word would have put it anyway.
+            int[][] spaces = wordSpaceOffsets(copy, laidOut, line, start, end);
+            if (spaces.length > 0) {
+                int[][] open = new int[gaps.length + spaces.length][];
+                System.arraycopy(gaps, 0, open, 0, gaps.length);
+                System.arraycopy(spaces, 0, open, gaps.length, spaces.length);
+                int[] caps = new int[open.length];
+                int room = 0;
+                for (int i = 0; i < open.length; i++) {
+                    caps[i] = i < gaps.length ? MAX_GAP_STRETCH_PX : MAX_WORD_SPACE_STRETCH_PX;
+                    room += caps[i];
+                }
+                int[] share = spreadAcrossGaps(Math.min((int) Math.floor(slack + 0.001f), room), caps);
+                int widened = 0;
+                for (int i = 0; i < open.length; i++)
+                    if (share[i] > 0) widened += widenGap(copy, open[i][0], open[i][1], share[i]);
+                return widened;
+            }
+        }
         if (gaps.length == 0) return 0;
         // Floor, never round: overshooting the column by a fraction of a pixel would push the last
         // character onto the next line, and a moved break is far worse than an edge that is short by
@@ -293,17 +359,46 @@ public final class DocxTextLayout {
             int slot = (int) (((long) (2 * j + 1) * gaps.length) / (2L * seams));
             int before = (int) ((long) j * total / seams);
             int after = (int) ((long) (j + 1) * total / seams);
-            if (after > before) {
-                // Hand the range over in full. Two ReplacementSpans on one range leaves the platform
-                // free to size it with the other one, and the widening would silently not happen.
-                int at = gaps[slot][0];
-                for (AutoGap gap : copy.getSpans(at, at + 1, AutoGap.class)) copy.removeSpan(gap);
-                copy.setSpan(new WidenGap(gaps[slot][1], after - before), at, at + 1,
-                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                widened++;
-            }
+            if (after > before) widened += widenGap(copy, gaps[slot][0], gaps[slot][1], after - before);
         }
         return widened;
+    }
+
+    /**
+     * Open one gap: the spanned character restates its laid-out advance plus this share of the
+     * slack. The range is handed over in full -- two ReplacementSpans on one range leaves the
+     * platform free to size it with the other one, and the widening would silently not happen.
+     */
+    private static int widenGap(SpannableStringBuilder copy, int at, int basePx, int extraPx) {
+        for (AutoGap gap : copy.getSpans(at, at + 1, AutoGap.class)) copy.removeSpan(gap);
+        copy.setSpan(new WidenGap(basePx, extraPx), at, at + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return 1;
+    }
+
+    /**
+     * Hand a line's slack to its gaps as evenly as whole pixels allow, respecting each gap's own
+     * ceiling: every round spreads what is left over the gaps that still have room, so a capped CJK
+     * seam passes its share on to a word space instead of leaving the line short.
+     */
+    private static int[] spreadAcrossGaps(int total, int[] caps) {
+        int[] share = new int[caps.length];
+        int left = total;
+        while (left > 0) {
+            int open = 0;
+            for (int i = 0; i < caps.length; i++) if (share[i] < caps[i]) open++;
+            if (open == 0) break;
+            int step = Math.max(1, left / open);
+            boolean moved = false;
+            for (int i = 0; i < caps.length && left > 0; i++) {
+                int give = Math.min(Math.min(step, caps[i] - share[i]), left);
+                if (give <= 0) continue;
+                share[i] += give;
+                left -= give;
+                moved = true;
+            }
+            if (!moved) break;
+        }
+        return share;
     }
 
     /** The lowest laid-out line that still holds justification slack, or -1 when none does. */
@@ -322,37 +417,62 @@ public final class DocxTextLayout {
         return false;
     }
 
+    /**
+     * How far a line's ink reaches: the advance up to the END of its last non-blank character, with
+     * the line's own left offset in front of it. A line whose tail is not blank has the same ink as
+     * its laid-out width, and that is the figure the platform broke on, so it is taken as is.
+     */
+    private static float inkWidth(CharSequence text, StaticLayout laidOut, int line) {
+        int start = laidOut.getLineStart(line), end = laidOut.getLineEnd(line);
+        int last = end - 1;
+        while (last > start && Character.isWhitespace(text.charAt(last))) last--;
+        if (last == end - 1) return laidOut.getLineWidth(line);
+        float to = laidOut.getPrimaryHorizontal(last + 1);
+        float from = laidOut.getPrimaryHorizontal(start);
+        if (to <= 0f || to < from) return laidOut.getLineWidth(line);
+        return laidOut.getLineLeft(line) + (to - from);
+    }
+
     /** The line whose slack has to come back out, or -1 when every break and edge survived. */
     private static int lineToClear(StaticLayout laidOut, StaticLayout spread, int lines, int width) {
         if (spread.getLineCount() != lines) return lines - 2;
         for (int line = 0; line < lines; line++) {
             // A break moved: the widening on the line ABOVE it pushed a character over.
             if (spread.getLineStart(line) != laidOut.getLineStart(line)) return Math.max(0, line - 1);
-            if (spread.getLineWidth(line) > width - spread.getLineLeft(line) + 0.5f) return line;
+            // Only INK may not pass the boundary: a line's trailing blanks hang past it on purpose
+            // (see spreadLine) and the platform keeps them whenever they are not a break point, so
+            // billing them here would claw the stretch back out of every reference-list line.
+            if (inkWidth(spread.getText(), spread, line) > width - spread.getLineLeft(line) + 0.5f)
+                return line;
         }
         return -1;
     }
 
     /**
-     * Takes one whole pixel of slack out of one line -- the line whose break just moved is over the
-     * limit by less than a character, so a pixel is enough. False when that line holds no slack
-     * left to give, which means something else moved the break and the paragraph is left alone.
+     * Takes up to {@code px} whole pixels of slack back out of one line, one at a time and always off
+     * the gap that is widest at that moment, so what the line keeps stays evenly dithered. False when
+     * the line holds no slack left to give, which means something else moved the break.
      */
-    private static boolean shrinkLine(SpannableStringBuilder copy, StaticLayout laidOut, int line) {
+    private static boolean shrinkLine(SpannableStringBuilder copy, StaticLayout laidOut, int line,
+                                      int px) {
         if (line < 0 || line >= laidOut.getLineCount()) return false;
         int start = laidOut.getLineStart(line), end = laidOut.getLineEnd(line);
-        WidenGap widest = null;
-        int at = -1, extra = 0;
-        for (WidenGap gap : copy.getSpans(start, end, WidenGap.class)) {
-            int from = copy.getSpanStart(gap);
-            if (from < start || copy.getSpanEnd(gap) > end || gap.extraPx <= extra) continue;
-            widest = gap; at = from; extra = gap.extraPx;
+        int given = 0;
+        while (given < px) {
+            WidenGap widest = null;
+            int at = -1, extra = 0;
+            for (WidenGap gap : copy.getSpans(start, end, WidenGap.class)) {
+                int from = copy.getSpanStart(gap);
+                if (from < start || copy.getSpanEnd(gap) > end || gap.extraPx <= extra) continue;
+                widest = gap; at = from; extra = gap.extraPx;
+            }
+            if (widest == null) break;
+            copy.removeSpan(widest);
+            if (extra > 1) copy.setSpan(new WidenGap(widest.basePx, extra - 1), at, at + 1,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            given++;
         }
-        if (widest == null) return false;
-        copy.removeSpan(widest);
-        if (extra > 1) copy.setSpan(new WidenGap(widest.basePx, extra - 1), at, at + 1,
-                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        return true;
+        return given > 0;
     }
 
     /**
@@ -383,6 +503,45 @@ public final class DocxTextLayout {
             gaps.add(new int[]{i, (int) advance});
         }
         return gaps.toArray(new int[gaps.size()][]);
+    }
+
+    /**
+     * The word spaces a line may open, each with the whole-pixel advance it holds now. Word
+     * justifies Latin text by widening the spaces between words and nothing else (docs/
+     * justification.md), so this is the only seam the fallback pass may use on a Latin line. The
+     * caller already trimmed the line's trailing blanks, which Word leaves outside the boundary
+     * unstretched; a space inside a replaced range or under a decoration stays out for the same
+     * reason a CJK seam does, and U+00A0 / thin spaces are excluded because Word never widens them.
+     */
+    private static int[][] wordSpaceOffsets(Spannable text, StaticLayout laidOut, int line,
+                                            int start, int end) {
+        java.util.ArrayList<int[]> gaps = new java.util.ArrayList<>();
+        for (int i = start; i < end - 1; i++) {
+            char c = text.charAt(i);
+            if (c != ' ' && c != '\u3000') continue;
+            if (ownsReplacedRange(text, i)) continue;
+            if (text.getSpans(i, i + 1, android.text.style.UnderlineSpan.class).length > 0) continue;
+            if (text.getSpans(i, i + 1, android.text.style.StrikethroughSpan.class).length > 0) continue;
+            if (text.getSpans(i, i + 1, android.text.style.BackgroundColorSpan.class).length > 0) continue;
+            if (laidOut.getLineForOffset(i) != line) continue;
+            float from = laidOut.getPrimaryHorizontal(i), next = laidOut.getPrimaryHorizontal(i + 1);
+            float raw = next - from;
+            float advance = (float) Math.round(raw);
+            if (raw <= 0f || Math.abs(raw - advance) > 0.01f) continue;
+            gaps.add(new int[]{i, (int) advance});
+        }
+        return gaps.toArray(new int[gaps.size()][]);
+    }
+
+    /**
+     * True when the platform put a line of this paragraph past the column. The last line is not
+     * justified by Word and is left out: a wide last line is trailing blanks, not justification,
+     * and no amount of stretching here would pull it back.
+     */
+    private static boolean overshootsColumn(StaticLayout laidOut, int width) {
+        for (int line = 0, lines = laidOut.getLineCount(); line + 1 < lines; line++)
+            if (laidOut.getLineLeft(line) + laidOut.getLineWidth(line) > width + 0.5f) return true;
+        return false;
     }
 
     /** Any Han / CJK punctuation / fullwidth form, i.e. text Word justifies between characters. */
@@ -1253,6 +1412,12 @@ public final class DocxTextLayout {
     private static final int MAX_GAP_STRETCH_PX = 6;
     /** How far one seam may go before the line opens another one: two pixels still reads as flush. */
     private static final int MAX_GAP_STRETCH_STEP_PX = 2;
+    /**
+     * A word space has no such ceiling in Word: when a Latin line holds few words, the leftover is
+     * spread over those spaces however big it is. This bound only stops a pathological line (a
+     * single long token on an otherwise empty line) from opening a hole across the page.
+     */
+    private static final int MAX_WORD_SPACE_STRETCH_PX = 24;
 
     private static final class WidenGap extends ReplacementSpan {
         private final int basePx;
@@ -1265,6 +1430,23 @@ public final class DocxTextLayout {
         @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
                                    float x, int top, int y, int bottom, Paint paint) {
             canvas.drawText(text, start, end, x, y, paint);
+        }
+    }
+
+    /**
+     * The run of blanks a wrap left at the end of a justified line, measured as nothing. Word keeps
+     * them past the text boundary and takes no width for them -- its line width stops at the last
+     * character that has ink -- and a blank has no ink either, so nothing on the page changes; only
+     * the numbers the layout reports start to mean what Word's mean.
+     */
+    static final class BlankTail extends ReplacementSpan {   // package-private: the device probe reads it
+        @Override public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
+            if (fm != null) paint.getFontMetricsInt(fm);
+            return 0;
+        }
+        @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
+                                   float x, int top, int y, int bottom, Paint paint) {
+            // Nothing to draw: the range holds blanks and it has no advance to draw them in.
         }
     }
 

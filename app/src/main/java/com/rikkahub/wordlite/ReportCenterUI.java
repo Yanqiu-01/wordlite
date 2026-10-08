@@ -39,6 +39,11 @@ public final class ReportCenterUI extends LinearLayout {
     private final LinearLayout engineBox;
     private final LinearLayout sourceBox;
     private final LinearLayout evidenceBox;
+
+    /** 摘要层那一格与它的逐句证据：与 evidenceBox 分开，两笔账不许画进同一张表。 */
+    private final LinearLayout abstractBox = new LinearLayout(getContext());
+    private final LinearLayout abstractRows = new LinearLayout(getContext());
+    private boolean abstractOpen;
     private final LinearLayout hitMapBox;
     private final HitMapView hitMap;
     private final TextView hitMapLegend;
@@ -143,6 +148,16 @@ public final class ReportCenterUI extends LinearLayout {
         coverage.setTag("coverage-line");
         detailPane.addView(coverage, new LayoutParams(-1, -2));
 
+        // 摘要层那一格排在覆盖率之后、命中地图之前：未完成查重那一屏四个比率全不成立，它是那一屏唯一能核对的数。
+        abstractBox.setOrientation(VERTICAL);
+        abstractBox.setTag("abstract-layer");
+        abstractBox.setVisibility(GONE);
+        detailPane.addView(abstractBox, new LayoutParams(-1, -2));
+        abstractRows.setOrientation(VERTICAL);
+        abstractRows.setTag("abstract-evidence");
+        abstractRows.setVisibility(GONE);
+        abstractBox.addView(abstractRows, new LayoutParams(-1, -2));
+
         // 命中地图排在指标卡与注记之间：它回答"重复在哪几处"，是看完比率之后自然要问的第二件事。
         hitMapBox = new LinearLayout(context);
         hitMapBox.setOrientation(VERTICAL);
@@ -241,6 +256,7 @@ public final class ReportCenterUI extends LinearLayout {
         export.setVisibility(VISIBLE);
         title.setText(record.fileName);
         renderMetrics(record);
+        renderAbstract(record);
         renderHitMap(record);
         renderNotes(record);
         renderSources(record);
@@ -335,6 +351,85 @@ public final class ReportCenterUI extends LinearLayout {
             // 部分完成必须把"相似率是下限"顶到显眼处，否则读者会把 12% 读成上限。
             banner.setVisibility(VISIBLE);
             banner.setText(reason(record));
+        }
+    }
+
+    /**
+     * 摘要层那一格（近似）。只有"摘要可比"的候选给得出它，所以它自成一张卡，不与四个比率同表、
+     * 也不与它们相加；未完成查重那一屏更要露出来——那一屏最缺的就是"还有一个数能核对"。
+     * 点这张卡展开逐句证据：本文那句、撞上的摘要那句、来源题名；点证据行跳回正文那一句。
+     */
+    private void renderAbstract(ReportStore.Record record) {
+        abstractRows.removeAllViews();
+        abstractOpen = false;
+        abstractRows.setVisibility(GONE);
+        if (record.abstractSentencesCompared <= 0) {
+            abstractBox.setVisibility(GONE);
+            return;
+        }
+        abstractBox.setVisibility(VISIBLE);
+        LinearLayout card = new LinearLayout(getContext());
+        card.setOrientation(VERTICAL);
+        card.setPadding(dp(10), dp(8), dp(10), dp(8));
+        card.setMinimumHeight(dp(72));
+        card.setBackground(cardBackground());
+        card.setTag("abstract-card");
+        TextView name = text(DuplicateEngine.ABSTRACT_LAYER_LABEL, 11, muted);
+        name.setTag("abstract-title");
+        card.addView(name, new LayoutParams(-1, -2));
+        TextView number = text(DuplicateEngine.abstractLayerLine(record.abstractLayerRate,
+                record.abstractSentencesMatched, record.abstractSentencesCompared,
+                record.abstractCandidates), 15, ink);
+        number.setTypeface(medium);
+        number.setTag("abstract-value");
+        card.addView(number, new LayoutParams(-1, -2));
+        card.setOnClickListener(view -> {
+            abstractOpen = !abstractOpen;
+            abstractRows.setVisibility(abstractOpen ? VISIBLE : GONE);
+        });
+        abstractBox.addView(card, new LayoutParams(-1, -2));
+        TextView caveat = text(DuplicateEngine.abstractLayerCaveat(record.abstractSentencesMatched,
+                record.abstractSentencesCompared, record.abstractCandidates, record.abstractLayerTruncated),
+                11, muted);
+        caveat.setTag("abstract-caveat");
+        abstractBox.addView(caveat, new LayoutParams(-1, -2));
+        TextView steps = text(DuplicateEngine.abstractLayerNextSteps(), 11, muted);
+        steps.setTag("abstract-next-steps");
+        abstractBox.addView(steps, new LayoutParams(-1, -2));
+        if (record.abstractEvidence.isEmpty()) {
+            TextView none = text("没有一句撞上摘要：这只说明这批候选的摘要里没有与本文句子同形的句子，"
+                    + "不等于正文没有重复。", 12, muted);
+            none.setMinHeight(dp(40));
+            none.setTag("abstract-empty");
+            abstractRows.addView(none, new LayoutParams(-1, -2));
+            return;
+        }
+        for (int i = 0; i < record.abstractEvidence.size(); i++) {
+            ReportStore.AbstractEvidence hit = record.abstractEvidence.get(i);
+            String meta = "袋 Dice " + String.format(java.util.Locale.US, "%.2f", Double.valueOf(hit.score))
+                    + " · " + PaperSources.label(hit.engine)
+                    + (hit.title.length() == 0 ? "" : " 《" + hit.title + "》")
+                    + (hit.matched.length() == 0 ? "" : " ｜摘要：" + hit.matched);
+            LinearLayout row = twoLine(hit.snippet.length() == 0 ? "（这句没有可显示的原文）" : hit.snippet, meta);
+            row.setTag("abstract-row");
+            row.setBackgroundResource(selectable());
+            final ReportStore.Evidence target = new ReportStore.Evidence();
+            target.start = hit.start;
+            target.end = hit.end;
+            target.score = hit.score;
+            target.title = hit.title;
+            target.engine = hit.engine;
+            target.snippet = hit.snippet;
+            row.setOnClickListener(view -> {
+                if (listener != null && opened != null && opened.canJump(target)) listener.jumpTo(opened, target);
+            });
+            abstractRows.addView(row, new LayoutParams(-1, -2));
+        }
+        if (record.abstractEvidenceTruncated) {
+            TextView tail = text("本轮共命中 " + record.abstractEvidenceTotal + " 句，只保留了前 "
+                    + record.abstractEvidence.size() + " 句证据。", 11, muted);
+            tail.setTag("abstract-tail");
+            abstractRows.addView(tail, new LayoutParams(-1, -2));
         }
     }
 

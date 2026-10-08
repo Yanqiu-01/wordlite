@@ -84,7 +84,10 @@ foreach ($f in @($resZip, $unsigned, $aligned, $outDex, $srcList, $d8Args)) { if
 Write-Host "== resources =="
 Invoke-Checked $aapt2Exe @("compile", "--dir", (Join-Path $src "res"), "-o", $resZip)
 Invoke-Checked $aapt2Exe @("link", "-o", $unsigned, "--manifest", (Join-Path $src "AndroidManifest.xml"),
-    "-I", $androidJar, "--java", $gen, $resZip, "-A", (Join-Path $src "assets"), "-0", "ttc", "-0", "ttf", "-0", "otf")
+    "-I", $androidJar, "--java", $gen, $resZip, "-A", (Join-Path $src "assets"))
+# Fonts are deflated, not stored: 183 MB of faces would otherwise ship byte for byte inside the APK
+# (measured 112 MB once deflated). Typeface.createFromAsset reads compressed assets fine, and the
+# installed build is checked on the phone before a release goes out.
 
 Write-Host "== javac =="
 # Slash-separated paths: a javac argfile treats a backslash as an escape character.
@@ -121,7 +124,7 @@ try {
 Write-Host "== normalize asset paths =="
 # aapt2 on Windows joins -A subdirectory paths with "\", so assets land as
 # "assets\fonts\x.ttf". Android's AssetManager only knows "/", so rename those entries
-# in place (keeping STORED for the -0 exclusions) before align and sign.
+# in place, re-deflating anything aapt2 had stored, before align and sign.
 $renamed = 0
 $zip = [System.IO.Compression.ZipFile]::Open($unsigned, [System.IO.Compression.ZipArchiveMode]::Update)
 try {

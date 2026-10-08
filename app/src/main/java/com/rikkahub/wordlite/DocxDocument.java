@@ -335,8 +335,14 @@ public final class DocxDocument {
         public void merge(ParagraphFormat overlay) {
             if (overlay == null) return;
             if (overlay.alignment >= 0) alignment = overlay.alignment;
-            if (overlay.leftIndentTwips >= 0) leftIndentTwips = overlay.leftIndentTwips;
-            if (overlay.rightIndentTwips >= 0) rightIndentTwips = overlay.rightIndentTwips;
+            // -1 is the only "not written" marker here. w:ind/@w:left and @w:right are
+            // ST_SignedTwipsMeasure (ISO/IEC 29500-1 CT_Ind), so a negative indent is a legal
+            // value: 15 headings in tests/samples/input-liu.docx write w:left="-458" and sit
+            // 22.9pt OUTSIDE the text margin in Word. ">= 0" read that as "not written" and the
+            // direct formatting lost to the style chain, which is why those headings started on
+            // the margin. firstLineIndentTwips below already uses the signed convention.
+            if (overlay.leftIndentTwips != -1) leftIndentTwips = overlay.leftIndentTwips;
+            if (overlay.rightIndentTwips != -1) rightIndentTwips = overlay.rightIndentTwips;
             if (overlay.firstLineIndentTwips != -1) firstLineIndentTwips = overlay.firstLineIndentTwips;
             if (overlay.spacingBeforeTwips >= 0) spacingBeforeTwips = overlay.spacingBeforeTwips;
             if (overlay.spacingAfterTwips >= 0) spacingAfterTwips = overlay.spacingAfterTwips;
