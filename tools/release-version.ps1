@@ -12,12 +12,63 @@ param(
     [switch]$NoPush,
     [switch]$AllowEmpty,
     [switch]$AllowDirty,
-    [switch]$AllowNewKey
+    [switch]$AllowNewKey,
+    [switch]$Isolated
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 if ($Version -notmatch "^[0-9]+\.[0-9]+\.[0-9]+$") { throw "version must be x.y.z" }
+
+# --- -Isolated：在 main 的干净副本里发这一版 ---
+# 2.5.0 那一次是手工做的：主工作区里还有别人的改动没提交，只能
+# `git worktree add --detach` 一棵 main 的副本，再把两样被 .gitignore 挡住的东西搬过去——
+# 工具链 artifacts/host-tools（没有它连 javac 都找不到）和 tools/debug.keystore
+# （没有它 build-host 会悄悄新生成一把钥匙，装过旧版的人就只能卸载重装，自建库跟着没）。
+# 每一步都记在 docs 里靠人执行，漏一步就是一次发坏。现在一条命令做完：
+# 造副本 → 接工具链 → 拿钥匙 → 在副本里把整条流程重跑一遍 → 把 APK 与校验和搬回来 → 拆副本。
+if ($Isolated) {
+    $primary = $root
+    $worktree = Join-Path (Split-Path -Parent $root) ("wl-rel-" + $Version)
+    if (Test-Path $worktree) { throw ("发版副本已存在，先确认它不是没收尾的发版：" + $worktree) }
+    $toolsJunction = Join-Path $primary "artifacts/host-tools"
+    $keystore = Join-Path $primary "tools/debug.keystore"
+    if (-not (Test-Path $keystore)) { throw ("找不到签名钥匙，拒绝发版（这一版会换钥匙）：" + $keystore) }
+    Write-Host ("== 发版副本 " + $worktree + "（main 的干净树）==") -ForegroundColor Cyan
+    & git worktree add --detach $worktree main
+    if ($LASTEXITCODE -ne 0) { throw "git worktree add 失败" }
+    try {
+        New-Item -ItemType Directory -Force -Path (Join-Path $worktree "artifacts") | Out-Null
+        if (Test-Path $toolsJunction) {
+            & cmd /c mklink /J (Join-Path $worktree "artifacts/host-tools") $toolsJunction | Out-Null
+        } else { Write-Warning ("没有 " + $toolsJunction + "，副本里会自己去下工具链（慢）") }
+        Copy-Item -Force $keystore (Join-Path $worktree "tools/debug.keystore")
+        $inner = @(("-NoProfile"), ("-File"), (Join-Path $worktree "tools/release-version.ps1"),
+                   ("-Version"), $Version)
+        if ($CommitMessage) { $inner += @("-CommitMessage", $CommitMessage) }
+        if ($Proxy) { $inner += @("-Proxy", $Proxy) }
+        if ($SkipTests) { $inner += "-SkipTests" }
+        if ($SkipBuild) { $inner += "-SkipBuild" }
+        if ($NoPush) { $inner += "-NoPush" }
+        if ($AllowEmpty) { $inner += "-AllowEmpty" }
+        if ($AllowNewKey) { $inner += "-AllowNewKey" }
+        & pwsh @inner
+        $innerExit = $LASTEXITCODE
+    } finally {
+        & cmd /c rmdir (Join-Path $worktree "artifacts/host-tools") 2>&1 | Out-Null
+        & git worktree remove --force $worktree 2>&1 | Out-Null
+        if (Test-Path $worktree) { Write-Warning ("副本没拆掉，手工确认后再删：" + $worktree) }
+    }
+    if ($innerExit -ne 0) { throw ("副本里的发版没走完（退出码 " + $innerExit + "）；上面是它自己的输出") }
+    $built = Join-Path $worktree ("releases/" + $Version)
+    if (Test-Path $built) {
+        $archive = Join-Path $primary ("releases/" + $Version)
+        New-Item -ItemType Directory -Force -Path $archive | Out-Null
+        Copy-Item -Force (Join-Path $built "*") $archive
+        Write-Host ("APK 已归档回主工作区：" + $archive) -ForegroundColor Green
+    }
+    exit 0
+}
 
 # --- the tree must be exactly what is committed ---
 # 这个脚本最后会 git add + git commit 整个 app/tools/tests/docs，再拿 HEAD 去出包发版。
