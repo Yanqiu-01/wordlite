@@ -18,14 +18,16 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 量不出来按没过算。这一节是验收线，谁改排版引擎都拿它复核；复核由常驻的排版对账子代理执行，
 每轮改动重跑一遍，结果贴回本文与 `docs/edge-parity-baseline.md`。
 
-| # | 指标 | 量法（真值来源） | 现在（HEAD，`artifacts/device-round3`） | 验收线 |
+| # | 指标 | 量法（真值来源） | HEAD `f90dd78` 复采（`artifacts/agent-layout-verify/lh-base2`，2026-10-09） | 验收线 |
 | --- | --- | --- | --- | --- |
-| 1 | 段落页归属 | `tools/word-parity.ps1`（Word 28 页真值 `artifacts/word/pages.tsv`） | 7 段错页 / 206（exact 96.6%） | exact >= 99%，错页 <= 2 段 |
-| 2 | 逐行行高误差中位 | `artifacts/agent-typeset/line-height-rows.ps1`（Word 相邻基线距离，COM） | -0.767 px | 绝对值 <= 0.10 px |
-| 3 | 逐行行高误差 p90 | 同上 | 3.267 px | <= 0.50 px |
-| 4 | 每页累计高度误差 | 同上 x 每页行数（Word 每页 27-35 行） | 0.80 行（最差队列 3.4 行） | <= 0.25 行 |
+| 1 | 段落页归属 | `tools/word-parity.ps1`（Word 28 页真值 `artifacts/word/pages.tsv`） | 7 段错页 / 206（exact 96.6%，页差全是 -1，首个 para 121；28/28 页） | exact >= 99%，错页 <= 2 段 |
+| 2 | 逐行行高误差中位 | `artifacts/agent-typeset/line-height-rows.ps1`（Word 相邻基线距离，COM） | -0.767 px（n=91，Word 26.267 px） | 绝对值 <= 0.10 px |
+| 3 | 逐行行高误差 p90 | 同上（取 \|误差\| 的 p90） | 2.533 px（max 3.467） | <= 0.50 px |
+| 4 | 每页累计高度误差 | 同上 x 每页行数（Word 每页 27-35 行） | 0.79 行（最差队列 sz12 line300 snap=false 2.55 行） | <= 0.25 行 |
 | 5 | 逐行换行点一致率 | `tools/line-break-delta.ps1 -Stage report` | 103/165 = 62.4% | >= 90% |
 | 6 | 两端对齐右边界超出 1px 的行数 | `tools/edge-parity.ps1 -Impl new` | 0 / 32 | 0 / 32（守住，不许为了行高牺牲它） |
+
+一条命令复采这六条：`pwsh tools/parity-six.ps1 -Tag <tag>`（真机采样 + 行高探针 + 三条对比，只调已有脚本、不重新定义量法；Word 真值走缓存，不重开 Word 会话；结果写 `<tag>/six.tsv`、`<tag>/six.txt`，带 head_sha 与 `lines-all.tsv` 的 sha）。第 0 节的六个数每一轮都以这条命令的输出为准，第 17 节记下本轮的复采与指纹。
 
 三条规矩：
 
@@ -509,3 +511,48 @@ after 空间"相关，规则没定死之前不改 `pageBreakBefore` 的现有行
 
 
 **所以出厂状态是什么**：第 2 条（页顶分两种）整条退回；第 1 条（撤销节首抑制）留下；第 3 条（beforeLines 单位）实现完、断言钉住，但用 `A4Paginator.MEASURED_LINE_UNIT_APPLIED = false` 关掉——它单独打开是 9 错，比关掉之后应有的 7 错差两段。这不是把规则藏起来：`spacing2` 的三列数字、关掉的理由、以及打开它的前置（先把黑体标题那 ~150px 的过算定住）都写在上面这张表和 `MEASURED_LINE_UNIT_APPLIED` 的注释里，`tests/Regression.java` 有一条断言守着这个开关，翻它必须连同一次新的 `spacingN` 真机 capture 一起进来。
+
+## 17. HEAD `f90dd78` 复采：六条真数，以及"按字库 ascent+descent 算行高"这条路被量死
+
+### 17.1 六条真数（`pwsh tools/parity-six.ps1 -Tag lh-base2`，含真机重采）
+
+| # | 指标 | f90dd78 实测 | 与第 0 节旧抄录的差 |
+| --- | --- | --- | --- |
+| 1 | 段落页归属 | 7 段错页 / 206 对齐段（exact 96.6%，页差直方图 -1=>7 0=>199，首个错页 para 121，页数 28/Word 28） | 持平 |
+| 2 | 逐行行高误差中位 | -0.767 px（n=91 逐行配对，Word 26.267 px） | 持平 |
+| 3 | 逐行行高误差 p90 | 2.533 px（\|误差\|，max 3.467，<=1px 的 68/91） | 比旧抄录的 3.267 好 0.734 px：本轮段-段映射 208/210 全对上，多配到 1 行 |
+| 4 | 每页累计高度误差 | 0.79 行（每行 -0.767 px x Word 正文页 27 行 / 26.267 px；最差队列 sz12 line300 snap=false 2.55 行） | 旧抄录 0.80 行 / 最差 3.4 行，同一口径下的第 3 条同源差 |
+| 5 | 逐行换行点一致率 | 103/165 = 62.4%（27 段 165 行） | 持平 |
+| 6 | 两端对齐右边界超出 1px | 0 / 32（1 px 以内 32/32；我方参差 0.00 px，Word 1.94 px） | 守住 |
+
+指纹：`engine.tsv` head_sha=`f90dd7845731…`（工作树编 dex 在手机上跑 app_process，手机里装的 APK 不参与）、`lines-all.tsv` sha256 前 16 位 `D9822E2C3396D6EC`（84,949B / 601 行）、`pages.tsv` sha `921A8FAB4D3D09F8`。Word 真值三个文件：`artifacts/word/pages.tsv` `6AFED202C7AAB71A`（28 页）、`artifacts/agent-typeset/word-line-pitch.tsv` `80A7344C728E2A18`、`artifacts/parity/word-line-breaks.tsv` `E7C473F6BE7064A9`（Word 16.0）；样稿 `tests/samples/input-liu.docx` sha `2AB84AAEAF2D6BB8`。
+
+换字库不动排版这条是实测不是推断：`f90dd78` 的采样与工作树换上宋体全量副本之前的 `artifacts/agent-layout-verify/lh-base` 三份产物逐字节相同（`lines-all.tsv` / `pages.tsv` / `paragraphs-wordformat.tsv` 三个 sha 一字不差），所以宋体补的那 43 个码位不改换行点、也不改页归属。
+
+### 17.2 "行高取本脸字体的 ascent+descent 乘行距"：量了，走不通
+
+命令：`pwsh artifacts/agent-typeset/font-metrics.ps1 -Dir app/src/main/assets/fonts`，再用同一支脚本量桌面 Word 在本机实际用的那套原字库 `pwsh artifacts/agent-typeset/font-metrics.ps1 -Dir artifacts/agent-typeset/winfonts`。
+
+| 脸 | upm | OS/2 win | hhea | hhea+lineGap | Word 反推的单一行高 |
+| --- | --- | --- | --- | --- | --- |
+| 宋体 `song.ttc`（度量与本机 `simsun.ttc` face0/face1 完全相同：220/36/256） | 256 | 1.000 em | 1.000 em | 1.1406 em | **1.3134 em**（26.267 px ÷ 1.25 ÷ 16 px） |
+| Times New Roman（打包件与本机 `times.ttf` 同一套度量） | 2048 | 1.1074 em | 1.1074 em | 1.1499 em | **1.1767 em**（23.533 px） |
+
+- 字库表里任何一个和——win 和、typo 和、hhea 和、再加 lineGap——都够不到 Word 的数：中文差 +0.173~+0.313 em（每行 2.8~5.0 px），西文差 +0.027~+0.069 em（每行 0.5~0.9 px）。
+- 关键点在"字库同源"这一条已经不成立得彻底：本机 Word 渲染这篇稿子用的就是 `winfonts/simsun.ttc` 那一份，同一张表、同一台机器，仍然推不出 26.267 px。所以"手机字库换成 Windows 原字库以后就能按度量算准"这个前提是错的，`WordLineHeights` 那张实测表不是权宜之计，而是目前唯一能对上 Word 的口径。
+- 因此行高一族的可行口径钉死为：**按脸取 Word 实测 em**（已量到 宋体 1.31335 em、Times 1.17665 em），没量过的脸（黑体、幼圆、隶书、华文各脸……）一律不动，等各自的真值。想扩这张表必须先有 Word 侧逐行基线，不许拿邻近字体的数凑。
+
+### 17.3 23 px 那一族的钱是谁出的、有多少
+
+- **23 px 不是宋体给的，是 Times 给的。** `DocxTextLayout.Spacing` 的两步取整是 `singlePx = round(比值 x 字号pt x 4/3)`、`desired = round(singlePx x w:line/240)`；开关关掉时中文段落无条件取 `max(中, 西)`，Times 的 1.1074 em 大于宋体的 1.000 em，于是 `round(round(1.1074 x 16) x 300/240) = 23`。宋体自己那张表只给 20 px（同一支脚本输出的 `line300` 列）。所以"改比值"改的其实是西文脸，先按字符把脸选对才有意义——这与第 5 节第 2 条同源，本轮把它量成了具体数字。
+- 全篇 601 行按行型普查（`artifacts/agent-layout-verify/lh-base2/repag/out/repag-advances.tsv`，与六条同一次采样）：
+
+| 行型 | 行数 | 现在每行 | Word 每行 | 每行差 | 全篇差 |
+| --- | --- | --- | --- | --- | --- |
+| auto + snap=true + 中文 | 268 | 25.5 | 26.267 | -0.767 | -205.6 px |
+| auto + snap=false + 中文 | 140 | 23.0 | 26.267 | -3.267 | **-457.4 px** |
+| auto + snap=false + 纯西文 | 68 | 23.0 | 23.533 | -0.533 | -36.2 px |
+| auto + snap=false + 目录点线行 | 39 | 24.5 | 24.47 / 25.33 | ~0 | ~0 |
+| 其余（exact / atLeast / 10.5pt / 标题） | 86 | 19~61 | 待逐族量 | — | — |
+
+- 本轮开刀的目标队列就是那 140 行：42 个块，全部 12pt / `w:line=300` / 不吃文档网格，现在合计 3,220.0 px，Word 要 3,677.4 px，**补上去 +457.4 px = 0.53 个版心页**（版心 865.53 px）。下一族 snap=true 的 268 行另算 +205.6 px；两族一起 +663.0 px ≈ 0.77 页——第 13 节 cand-lh1 那次"全篇多算 868.9 px、28 页变 29 页"就是这个钱一次性全下去的结果。
