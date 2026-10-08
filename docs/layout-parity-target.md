@@ -730,3 +730,25 @@ HEAD（`pwsh tools/page-fill-ledger.ps1 -Tag autospace1`，单位 px）：
    158.4 pt，我们 122 / 146.9 / 176 pt；行距本身两边一致，Word 22.5pt vs 我们 22.65pt）。算噪声，本轮不动。
 3. 行高与页归属：等第 1 条把每页行数对齐 Word 之后再一并算，验收仍是这六条。
 
+
+### 20.5 断行的靶子（改一次宽度模型就拿它复量，别猜）
+
+`artifacts/agent-layout-verify/autospace1/parity/line-delta.tsv` 的 51 条分歧行，按档把"Word 多塞几个字 /
+我们这行还剩几像素 / 再塞一字要几像素 / 行尾字号"并排列出来（`Import-Csv ... -Delimiter "`t"` 后按
+`cause` 分组取中位，字段 `extra_chars`、`device_slack_px`、`extra_est_px`、`word_end_font_pt`）：
+
+| 成因 | 分歧行 | Word 多塞（字，中位） | 我方行尾余量 px | 再塞一字要 px | 行尾字号 pt |
+| --- | --- | --- | --- | --- | --- |
+| 西文与数字字符宽度量差（Times New Roman advance） | 21 | 2 | **-0.1** | 32 | 12 |
+| 全角字宽与行尾余量取整 | 13 | 2 | +6.9 | 32 | 12 |
+| 上下标小字号 run 参与行宽计量 | 6 | 4 | -0.1 | 32 | 12 |
+| 中西文混排留白（`autoSpaceDE/DN`，本轮后残余） | 4 | 3 | -0.1 | 48 | 12 |
+| 长西文或数字串不可断（`w:wordWrap`） | 3 | 5 | -0.1 | 40 | 12 |
+| 首行缩进计量（`firstLineChars`） | 2 | 1 | +25.9 | 16 | 12 |
+| 行尾标点悬挂与行首禁则（`overflowPunct` + `kinsoku`） | 2 | 1 | -0.1 | 8 | 12 |
+
+读法：`-0.1 px` 表示我们这行已经塞到贴边，而 Word 在同一行还塞得下中位 2 个字（≈32 px）。
+所以最大那一档不是"我们算漏了什么规则"，就是我们把西文与数字的 advance 算宽了——每行大约宽 32 px。
+第二档 +6.9 px 才是取整余量那一类。宽度模型每改一次，跑
+`pwsh tools/parity-six.ps1 -Tag <tag>` 之后拿这张表对：第 5 条要涨，第 6 条必须还是 0/32。
+
