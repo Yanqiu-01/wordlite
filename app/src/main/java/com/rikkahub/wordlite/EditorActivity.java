@@ -659,7 +659,10 @@ public class EditorActivity extends Activity {
             row.setPadding(dp(20), dp(12), dp(20), dp(12));
             String face = DocxFontAssets.label(DocxFontAssets.pathFor(family));
             boolean currentRow = family.equals(current);
-            row.setText((currentRow ? "✓ " : "") + (face.equals(family) ? family : family + "（字库用" + face + "）"));
+            // 名字写法不同不等于换了脸（MS Gothic 就是ＭＳ ゴシック），只有 substitution 说话才算替代。
+            boolean own = DocxFontAssets.substitution(family).isEmpty();
+            row.setText((currentRow ? "✓ " : "") + (own || face.equals(family)
+                    ? family : family + "（字库没有，用" + face + "）"));
             Typeface loaded = FontManager.load(DocxFontAssets.pathFor(family));
             if (loaded != null) row.setTypeface(loaded);
             row.setBackgroundResource(currentRow ? android.R.drawable.list_selector_background : 0);

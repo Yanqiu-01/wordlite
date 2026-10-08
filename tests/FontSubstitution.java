@@ -99,6 +99,9 @@ public final class FontSubstitution {
         check(DocxFontAssets.substitution("MS Mincho").contains("宋体")
                         && DocxFontAssets.substitution("方正清刻本悦宋").contains("宋体"),
                 "真的没有本尊的必须点名：" + DocxFontAssets.substitution("MS Mincho"));
+        check(DocxFontAssets.substitution("MS Gothic").isEmpty(),
+                "MS Gothic 只是ＭＳ ゴシック的另一种写法，不是替代："
+                        + DocxFontAssets.substitution("MS Gothic"));
         check(DocxFontAssets.substitution("微软雅黑").isEmpty(),
                 "微软雅黑有自己的字库了，不许再报替代：" + DocxFontAssets.substitution("微软雅黑"));
 
