@@ -10,7 +10,8 @@ param(
     [switch]$SkipTests,
     [switch]$SkipBuild,
     [switch]$NoPush,
-    [switch]$AllowEmpty
+    [switch]$AllowEmpty,
+    [switch]$AllowDirty
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -46,6 +47,30 @@ $notesPath = Join-Path $env:TEMP ("wordlite-notes-" + $Version + ".md")
 $apkName = "wordlite-$Version.apk"
 $preamble = "Word Lite $Version (versionCode $newCode). ``$apkName`` installs directly: package com.rikkahub.wordlite, minSdk 23 / targetSdk 35, one APK for arm64 and x86_64, debug-signed with this repository's key. Digest in SHA256SUMS."
 [IO.File]::WriteAllText($notesPath, ($preamble + "`r`n`r`n" + $body + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+
+# --- the tree must be exactly what is committed ---
+# 这个脚本最后会 git add + git commit 整个 app/tools/tests/docs，再拿 HEAD 去出包发版。
+# 工作区里只要还有别人没提交的改动（排版引擎改到一半、真机还没复采），这一版就会把没量过的
+# 东西一起打包、装进手机、发成 release。所以先看工作区，脏就停，除非明确 -AllowDirty。
+if (-not $AllowDirty) {
+    $dirty = & git status --porcelain -- app tools tests docs CHANGELOG.md README.md
+    if ($LASTEXITCODE -ne 0) { throw "git status failed" }
+    if (($dirty | Measure-Object).Count -gt 0) {
+        Write-Host "工作区还有未提交的改动：" -ForegroundColor Yellow
+        foreach ($line in $dirty) { Write-Host ("  " + $line) -ForegroundColor Yellow }
+        throw "先把这些提交（或让改它的人提交）再发版；确认无误要强行发版就加 -AllowDirty"
+    }
+}
+
+# --- 字库覆盖表必须和随包字库一致：字体面板那句"带了多少汉字"念的就是它 ---
+$py = if (Get-Command py -ErrorAction SilentlyContinue) { "py" }
+      elseif (Get-Command python -ErrorAction SilentlyContinue) { "python" } else { $null }
+if ($py) {
+    & $py (Join-Path $root "tools/build-font-coverage.py") --check
+    if ($LASTEXITCODE -ne 0) { throw "DocxFontCoverage.java 与随包字库对不上：py tools/build-font-coverage.py 重生成后再发" }
+} else {
+    Write-Warning "找不到 py/python，没核对字库覆盖表"
+}
 
 # --- gates ---
 if (-not $SkipTests) { & (Join-Path $root "tools/test-host.ps1"); if ($LASTEXITCODE -ne 0) { throw "host suite failed" } }

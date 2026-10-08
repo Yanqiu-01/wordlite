@@ -653,24 +653,39 @@ public class EditorActivity extends Activity {
         }
         for (int i = 0; i < names.length; i++) {
             final String family = names[i];
+            final String facePath = DocxFontAssets.pathFor(family);
+            // 一行两行字：字体名用它自己那张脸写，"带了多少字"用系统的脸写（装饰脸的笔画认不得数字）。
+            final LinearLayout line = new LinearLayout(this);
+            line.setOrientation(LinearLayout.VERTICAL);
+            line.setPadding(dp(20), dp(12), dp(20), dp(12));
             final TextView row = new TextView(this);
             row.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f);
             row.setTextColor(0xFF1A1A1A);
-            row.setPadding(dp(20), dp(12), dp(20), dp(12));
-            String face = DocxFontAssets.label(DocxFontAssets.pathFor(family));
+            String face = DocxFontAssets.label(facePath);
             boolean currentRow = family.equals(current);
             // 名字写法不同不等于换了脸（MS Gothic 就是ＭＳ ゴシック），只有 substitution 说话才算替代。
             boolean own = DocxFontAssets.substitution(family).isEmpty();
             row.setText((currentRow ? "✓ " : "") + (own || face.equals(family)
                     ? family : family + "（字库没有，用" + face + "）"));
-            Typeface loaded = FontManager.load(DocxFontAssets.pathFor(family));
+            Typeface loaded = FontManager.load(facePath);
             if (loaded != null) row.setTypeface(loaded);
-            row.setBackgroundResource(currentRow ? android.R.drawable.list_selector_background : 0);
-            row.setOnClickListener(v -> {
+            /* 这一行回答"你到底留了什么字"：数由 tools/build-font-coverage.py 从随包字库量出来，
+               tests/FontSubstitution 第 12 段拿 java.awt 复量过一遍，所以它不许漂。 */
+            String coverage = DocxFontCoverage.detail(facePath);
+            if (coverage.length() > 0) {
+                TextView detail = new TextView(this);
+                detail.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+                detail.setTextColor(0xFF8A8A8A);
+                detail.setText(own ? coverage : face + "：" + coverage);
+                line.addView(detail);
+            }
+            line.addView(row, 0);
+            line.setBackgroundResource(currentRow ? android.R.drawable.list_selector_background : 0);
+            line.setOnClickListener(v -> {
                 applyFontFamily(family);
                 dialog.dismiss();
             });
-            rows.addView(row);
+            rows.addView(line);
         }
         dialog.show();
     }

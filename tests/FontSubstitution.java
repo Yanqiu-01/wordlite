@@ -276,6 +276,31 @@ public final class FontSubstitution {
                     + " 的基本汉字覆盖不许缩水（实测 " + got + "，地板 " + hanziFloors[i][1] + "）");
         }
 
+        /* 12. 字体面板里那句"这张脸带了多少字"念的是 DocxFontCoverage 里的数，而那张表是
+               tools/build-font-coverage.py 从随包字库量出来写死的。这里用 java.awt（也就是界面
+               实际会读的那张映射）逐张脸再量一遍：数对不上就红，界面那句话因此不可能漂。 */
+        long coverageFaces = 0;
+        for (String path : DocxFontAssets.PATHS) {
+            long measured = countHanzi(path);
+            check(DocxFontCoverage.hanzi(path) == measured,
+                    DocxFontAssets.label(path) + " 面板里写的汉字数 " + DocxFontCoverage.hanzi(path)
+                            + " 与实测 " + measured + " 不一致：跑 py tools/build-font-coverage.py 重生成");
+            check(DocxFontCoverage.glyphs(path) > 0, DocxFontAssets.label(path) + " 的总字数不为 0");
+            check(DocxFontCoverage.detail(path).length() > 0,
+                    DocxFontAssets.label(path) + " 在面板里有那句覆盖说明");
+            coverageFaces++;
+        }
+        check(coverageFaces == DocxFontAssets.PATHS.length && coverageFaces >= 25,
+                "逐张脸复量了 " + coverageFaces + " 张随包字库的覆盖数");
+        check("6,763".equals(DocxFontCoverage.group(6763)) && "20,992".equals(DocxFontCoverage.group(20992))
+                        && "1,234,567".equals(DocxFontCoverage.group(1234567)),
+                "覆盖数按三位一组写：" + DocxFontCoverage.group(20992));
+        check(DocxFontCoverage.hanzi(DocxFontAssets.ST_XINWEI) == 6763
+                        && DocxFontCoverage.hanzi(DocxFontAssets.ST_CAIYUN) == 6763
+                        && DocxFontCoverage.hanzi(DocxFontAssets.SONG) >= 20990,
+                "封面能选到的那几张脸：华文新魏/华文彩云 6,763，宋体 "
+                        + DocxFontCoverage.hanzi(DocxFontAssets.SONG));
+
         System.out.println("SUMMARY " + checks + " font-substitution assertions passed; " + summary);
     }
 
