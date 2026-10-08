@@ -115,6 +115,50 @@ else {
     }
 }
 
+# 数据线不是唯一的去路：手机和电脑连同一个 WiFi 时，把应用里的代理填成"电脑的局域网地址:端口"
+# 也能出去，手机就能拔线用。但这条路要两件事同时成立——Clash 得开着"允许局域网连接"
+# （默认只监听 127.0.0.1，从局域网地址根本连不上），手机也得在同一网段。
+# 所以这里先探一次：能从局域网地址走到代理就说明这条路真的通，不然就照着没通的那件事说。
+function Show-LanRoute([int]$number) {
+    # 只报走外网那一张网卡的地址：按 InterfaceMetric 排会挑到 WSL / Hyper-V 的虚拟适配器
+    # （实测挑中过 172.24.192.1，手机永远到不了那个地址），所以问系统"去外网会用哪个源地址"，
+    # 问不到再退回按跃点排的第一项。
+    $ips = @()
+    try {
+        # 真机踩过：这里若只按 InterfaceMetric 排，会挑中 WSL 的 172.24.x，
+        # 而手机能到的是走默认路由那张网卡的地址。
+        $route = Find-NetRoute -RemoteIPAddress "223.5.5.5" -ErrorAction Stop |
+            Where-Object { $_.IPAddress -and $_.IPAddress -ne "127.0.0.1" } |
+            Select-Object -First 1
+        if ($route) { $ips = @([string]$route.IPAddress) }
+    } catch { $ips = @() }
+    if ($ips.Count -eq 0) {
+        $ips = @(Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
+            Sort-Object -Property RouteMetric | ForEach-Object {
+                Get-NetIPAddress -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            } | Where-Object { $_.IPAddress -notlike "169.*" -and $_.IPAddress -ne "127.0.0.1" } |
+            Select-Object -First 1 | ForEach-Object { $_.IPAddress })
+    }
+    if ($ips.Count -eq 0) {
+        Write-Host "  这台电脑没有可用的局域网地址（没连 WiFi 也没插网线），只能走 USB 反代" -ForegroundColor Yellow
+        return
+    }
+    foreach ($ip in $ips) {
+        $reachable = $false
+        $client = New-Object System.Net.Sockets.TcpClient
+        try {
+            $begin = $client.BeginConnect($ip, $number, $null, $null)
+            if ($begin.AsyncWaitHandle.WaitOne(800)) { $client.EndConnect($begin); $reachable = $client.Connected }
+        } catch { $reachable = $false } finally { $client.Close() }
+        if ($reachable) {
+            Write-Host ('  {0}:{1} 能连上代理：手机连上和电脑同一个 WiFi，应用里 检索设置 → 代理 填 {0}:{1}' -f $ip, $number) -ForegroundColor Green
+            Write-Host "                    之后就能拔线用，这条路不依赖 adb" -ForegroundColor Green
+        } else {
+            Write-Host ('  {0}:{1} 连不上：Clash 现在只听 127.0.0.1，要拔线用得在 Clash 里打开「允许局域网连接」(allow-lan)' -f $ip, $number) -ForegroundColor Yellow
+        }
+    }
+}
+Show-LanRoute ([int]$found)
 Write-Host "== USB 反代 ==" -ForegroundColor Cyan
 $listed = ReverseList
 if ($listed.Count -eq 0) { Write-Host "  （当前没有任何反代）" -ForegroundColor DarkGray }
