@@ -285,7 +285,7 @@ def stage_fetch(args):
     for spec in CORPORA:
         dst = os.path.join(args.data, spec.get("raw_file") or spec["file"])
         if os.path.exists(dst) and os.path.getsize(dst) > 1024 and not args.redo:
-            print("已有 %-24s %8.1f MB" % (spec["file"], os.path.getsize(dst) / 1e6)); continue
+            print("已有 %-24s %8.1f MB" % (os.path.basename(dst), os.path.getsize(dst) / 1e6)); continue
         req = urllib.request.Request(spec["url"], headers={"User-Agent": "wordlite-aigc/1.0"})
         cap = 90_000_000 if spec["code"] == "pangda" else None
         got = 0
@@ -298,7 +298,7 @@ def stage_fetch(args):
                     f.write(chunk); got += len(chunk)
                     if cap and got >= cap:
                         break
-            print("取回 %-24s %8.1f MB  匿名=是  许可=%s" % (spec["file"], got / 1e6, spec["license"]))
+            print("取回 %-24s %8.1f MB  匿名=是  许可=%s" % (os.path.basename(dst), got / 1e6, spec["license"]))
         except Exception as e:
             print("失败 %-24s %s" % (spec["file"], str(e)[:70]))
     ensure_drlx_zh(args.data, redo=args.redo)
