@@ -11,3 +11,6 @@ tools/debug.keystore
 .gradle/
 *.apk.1
 base.apk*
+
+__pycache__/
+*.pyc
