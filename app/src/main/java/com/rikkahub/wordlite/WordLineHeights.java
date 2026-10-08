@@ -18,16 +18,19 @@ import java.util.LinkedHashMap;
 final class WordLineHeights {
     private WordLineHeights() { }
     /**
-     * 这张实测表要不要真的用到排版上。2026-10-08 关掉，因为真机对账不认它：
-     * 把宋体的行高从字库表的 1.000 em 换成 Word 实测的 1.31335 em 之后，同一篇稿子在真机上
-     * 从 29 页变成 30 页（Word 28 页），word-parity 的错位段从 50 段涨到 74 段、页码全对的比例
-     * 从 75.7% 掉到 64.1%（reports 见 CHANGELOG 2.1.1）。也就是说"行高对不上"不是分页漂移的主因，
-     * 至少在这篇稿子上不是：错位的形状是从 Word 第 2 页末段（para 56）起整篇 +1 页，
-     * 那是封面/目录那几页的一次性溢出，不是正文每行累计出来的。
+     * 这张实测表要不要真的用到排版上。两次真机对账都不许开：
      *
-     * 表和算式一律留着——它们是量出来的真值，配套的 PageBreaker 基线判页尾（Item.hang）也留着，
-     * Host 侧 47 条断言钉着。要重开这个开关，必须先把那一次性溢出的成因找出来并重新真机对账，
-     * 不许在这儿把数调成能让页码对上的样子。
+     * 2.1.1 第一次开：宋体行高从字库表的 1.000 em 换成实测 1.31335 em，同一篇稿子 29→30 页
+     * （Word 28 页），错位段 50→74。当时记下的两个原因现在都修好了——选脸改按字符走（西文行
+     * 不再被中文脸抬高一档），长高的行也不再补齐到整格（下标行不再整行翻倍）。
+     *
+     * cand-lh1 第二次开（修完再开）：逐行行高误差中位 -0.767px → 0.000px、p90 3.267px → 0.934px、
+     * 纯西文段落回到 Word 的 23.533px、整行翻倍归零，可页码全对反而从 96.6% 掉到 65.05%
+     * （错页段 7→72，全是晚一页），页数 28→29，全篇多算 868.9px = 正好一个版心页。
+     *
+     * 这条读数把话说白了：HEAD 的 96.6% 是两处反向误差抵出来的假平账——行高每行少算 0.767px，
+     * 另一处每页多算约 8.6px（真值账见 docs/layout-parity-target.md 第 13 节）。所以开关继续关掉，
+     * 等那处多算被单独定出来并修掉再开；不许把比值调小去凑页码。
      */
     static boolean APPLIED_TO_LAYOUT = false;
     /** 键取 DocxFontAssets 的资源路径：决定行高的是真正落笔那张脸，不是文档里写的字体名。 */
@@ -47,6 +50,39 @@ final class WordLineHeights {
     }
     /** 回归用：表里有几条实测值。新增一条必须同时带来测量出处。 */
     static int measured() { return EM.size(); }
+
+    /** 挑脸的两位掩码：EAST_ASIAN 是有中日韩文字或全角标点，LATIN 是西文字母、数字、半角符号。 */
+    private static final int EAST_ASIAN = 1, LATIN = 2;
+
+    /** 这一笔里出现了哪几类字符；空白不算任何一边。 */
+    private static int scriptsIn(CharSequence text) {
+        int kinds = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == 32 || c == 9 || c == 10 || c == 13 || c == 12 || c == 0xA0 || c == 0x3000) continue;            kinds |= isEastAsianChar(c) ? EAST_ASIAN : LATIN;
+        }
+        return kinds;
+    }
+
+    /**
+     * Word 在行高上的选脸口径：中日韩文字与全角标点归中文脸，其余归西文脸。这里只收无歧义的区段
+     * ——宽度歧义那一批（— … “ ” ·）归西文脸，因为唯一的西文真值是那 19 段纯西文参考文献行 23.533px
+     * （docs/layout-parity-target.md 第 1 节），把它们归进中文脸就把 19 段抬到了 26.267px。
+     * 代理对（扩展 B 及以后）没有分类：本仓库还没有那种样本，不猜。
+     */
+    static boolean isEastAsianChar(char c) {
+        if (c >= 0x1100 && c <= 0x115F) return true;      // 谚文字母
+        if (c >= 0x2E80 && c <= 0x33FF) return true;      // 部首、康熙、CJK 符号与标点、假名、注音、兼容区
+        if (c >= 0x3400 && c <= 0x4DBF) return true;      // 扩展 A
+        if (c >= 0x4E00 && c <= 0xA4CF) return true;      // 统一汉字、彝文
+        if (c >= 0xA960 && c <= 0xA97F) return true;      // 谚文字母扩展
+        if (c >= 0xAC00 && c <= 0xD7FF) return true;      // 谚文音节
+        if (c >= 0xF900 && c <= 0xFAFF) return true;      // 兼容表意文字
+        if (c >= 0xFE10 && c <= 0xFE1F) return true;      // 竖排标点
+        if (c >= 0xFE30 && c <= 0xFE6F) return true;      // CJK 兼容形式
+        if (c >= 0xFF00 && c <= 0xFFDC) return true;      // 全角形式、半角片假名
+        return c >= 0xFFE0 && c <= 0xFFE6;                // 全角货币符号
+    }
 
     /** 把"字体名 -> 该脸的度量"这条依赖交进来：本类不许碰 Android。 */
     interface Metrics {
@@ -86,15 +122,46 @@ final class WordLineHeights {
                 String latin = run.style.asciiFontFamily != null ? run.style.asciiFontFamily : baseLatin;
                 FontScriptMetrics mEA = metrics.forFamily(ea);
                 FontScriptMetrics mLatin = metrics.forFamily(latin);
-                float runH = half / 2f * Math.max(mEA.lineHeightRatio, mLatin.lineHeightRatio);
+                String face;
+                float ratio;
+                FontScriptMetrics scriptMetrics;
+                if (APPLIED_TO_LAYOUT) {
+                    /* Word 按字符挑脸：这一笔里出现了中日韩文字或全角标点才轮到中文脸，只有西文字母、
+                       数字和半角符号才轮到西文脸。无条件取 max(中西) 等于让没参与这一行的中文脸替纯西文行
+                       定行高：真机对账量到 19 段纯西文参考文献被抬到 26.267px，Word 是 23.533px，每行多算
+                       2.7~3.6px（docs/layout-parity-target.md 第 7 节 A 表）。分开之后中文行 26.267px 与
+                       纯西文行 23.533px 同时成立，那才是 Word 的口径。 */
+                    int kinds = scriptsIn(run.text);
+                    boolean eaSide = (kinds & EAST_ASIAN) != 0;
+                    boolean latinSide = (kinds & LATIN) != 0;
+                    if (eaSide && ea != null
+                            && (!latinSide || mEA.lineHeightRatio >= mLatin.lineHeightRatio)) {
+                        face = ea;
+                        ratio = mEA.lineHeightRatio;
+                    } else {
+                        // 只剩一个宽度歧义的符号（— … “ ” ·）也按西文脸算：全角标点 、。「」 在
+                        // scriptsIn 里已经归到中文脸，所以中文行不会因为这条矮下去。
+                        face = latin != null ? latin : ea;
+                        ratio = latin != null ? mLatin.lineHeightRatio : mEA.lineHeightRatio;
+                    }
+                    scriptMetrics = face == ea ? mEA : mLatin;
+                } else {
+                    /* 开关关掉时保持 2.1.0 的取法，一个字都不改：无条件取中西两脸里比值较大的那一张。
+                       这不是 Word 的口径，但字库表给中文脸的 1.000 em 本来就是错的（Word 量到 1.313 em），
+                       HEAD 一直是靠西文脸的 1.1074 em 把中文行垫到 23px；先按字符选脸会把它们垫到 20px，
+                       离 Word 的 25.8px 更远——snap 段还有网格地板兜底，170 段非 snap 的没有。所以这条改动
+                       与实测行高同进同退，不单独开。上下标的折算脸也沿用原取法，保持逐字节一致。 */
+                    boolean eastAsiaWins = mEA.lineHeightRatio >= mLatin.lineHeightRatio;
+                    face = eastAsiaWins ? ea : latin;
+                    ratio = eastAsiaWins ? mEA.lineHeightRatio : mLatin.lineHeightRatio;
+                    scriptMetrics = mLatin.lineHeightRatio >= mEA.lineHeightRatio ? mLatin : mEA;
+                }
+                float runH = half / 2f * ratio;
                 if (run.style.superscript || run.style.subscript)
-                    // 折算上下标用的是"哪张脸更高"，平手时以 Latin 脸为准——沿用改动前的取法，
-                    // 免得这条改动顺手把上下标的行盒也改了（那是另一件事，要动得另外拿真值）。
-                    runH *= ScriptGeometry.of(run.style.superscript,
-                            mLatin.lineHeightRatio >= mEA.lineHeightRatio ? mLatin : mEA).scale;
+                    runH *= ScriptGeometry.of(run.style.superscript, scriptMetrics).scale;
                 if (runH > maxH) {
                     maxH = runH;
-                    winner = mEA.lineHeightRatio >= mLatin.lineHeightRatio ? ea : latin;
+                    winner = face;
                 }
             }
         }

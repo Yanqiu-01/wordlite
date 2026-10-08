@@ -68,6 +68,18 @@ public final class ScriptGeometry {
      */
     public static int[] lineBox(int baseAscent, int baseDescent, int needAscent, int needDescent,
                                 int gridPitchPx, boolean clip) {
+        return lineBox(baseAscent, baseDescent, needAscent, needDescent, gridPitchPx, clip, true);
+    }
+
+    /**
+     * snapGrownRow=false 时长高的行不补齐到整格。行高走 Word 实测值的那一段专用：实测行距
+     * 12pt/w:line=300 = 26.267px 本身已经高过一格网格（25px），再按长高就补到整格算，只多
+     * 1px 的下标行会直接跳到两格——真机量到 25.5px 的下标行变 50.267px，一个段落多 272px
+     * （docs/layout-parity-target.md 第 7 节 A 表最后一条）。Word 对那些行量到的仍是 26.267px，
+     * 而同一篇里 Word 开网格与不开网格只差 0.13px（第 3 节）：网格在 Word 的行高上是惰性的。
+     */
+    public static int[] lineBox(int baseAscent, int baseDescent, int needAscent, int needDescent,
+                                int gridPitchPx, boolean clip, boolean snapGrownRow) {
         if (clip || (needAscent <= baseAscent && needDescent <= baseDescent))
             return new int[]{baseAscent, baseDescent};
         // Raised text pushes the line upward: the baseline keeps its distance
@@ -75,7 +87,7 @@ public final class ScriptGeometry {
         // shifts down exactly like Word.
         int ascent = Math.max(baseAscent, needAscent);
         int descent = Math.max(baseDescent, needDescent);
-        if (gridPitchPx > 0) {
+        if (gridPitchPx > 0 && snapGrownRow) {
             // On a document grid the grown row snaps to whole grid rows, and the
             // leftover space goes below the baseline for the same reason.
             int grown = ascent + descent;

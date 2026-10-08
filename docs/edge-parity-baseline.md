@@ -210,3 +210,41 @@ Justified non-last lines, the lines the user calls "not flush", in document coor
    is the clearest case), nor about the ~550 capture lines Word never measured; and because it
    compares advances rather than glyph ink, a line ending in a wide or hanging mark reads as short by
    that mark's blank half, which is why `word_gap_px` sits beside `delta_px`.
+
+## Re-run 2026-10-08 (HEAD a762bd5, capture `artifacts/device-round3`)
+
+Full three-step suite, run against the working tree at HEAD and the cached Word truth files listed above.
+`pwsh tools/capture-device.ps1 -Serial EAMUT20528011355 -Impls new -OutDir artifacts/device-round3`
+produced a `lines-all.tsv` with sha256 `F6FC9574FC9BBC07`, 84757 bytes - **bit-identical to the `new`
+baseline capture pinned above**, so the numbers below are the same rendering, not a stale capture.
+
+```text
+pwsh tools/word-parity.ps1 -Impl new -Device artifacts/device-round3/new/paragraphs-wordformat.tsv \
+     -Sup artifacts/device-round3/new/superscript-inventory.txt \
+     -Summary artifacts/device-round3/new/summary.txt -OutFile artifacts/parity-round3.tsv
+  word_total_pages=28 device_total_pages=28 delta_pages=0
+  aligned=206 shifted=7 page_delta_histogram: -1=>7  0=>199   exact_page_match=96.6%
+  first_shifted: 121  33  14 14 13 13 -1  （2）多孔Cu辅助TLP反应区具有三维非均匀特征，传统单一I
+  script_paragraphs_aligned=34 script_paragraphs_shifted=1
+
+pwsh tools/edge-parity.ps1 -Impl artifacts/device-round3/new -Out artifacts/edge-parity/round3.tsv
+  lines matched=47/70   justify-not-last n=32 mean|x|=0.99 median=0.20 p90=0.93 max=15.93 mean signed=-0.00
+  within 1 px of the right margin: 32/32 (100.0%)   more than 8 px short: 0
+  our raggedness stddev 0.00 px (5 paragraphs) vs Word 1.94 px; toc-tab-entry n=5 mean|x|=0.56
+
+pwsh tools/line-break-delta.ps1 -Stage report -DeviceLines artifacts/device-round3/new/lines-all.tsv ...
+  map matched=208/210   selected paragraphs=29 cohorts=a_scriptx12 b_boundaryx4 c_controlx8 d_latinx5
+  paragraphs=27 lines=165 aligned=103 rate=62.4%
+```
+
+Verdict per metric against the recorded baseline: unchanged on all three. The right-edge and raggedness
+figures are identical to the `new` baseline (32/32 within 1 px, 0.00 px raggedness, the same single
+-15.93 px line where Word hangs punctuation), pagination is still 7 paragraphs one page early out of
+206 aligned, and the line-break rate is still 103/165.
+
+The unexplained part of the pagination figure is now quantified separately: it is a line-height deficit,
+not a script (super/subscript) effect. Word bills 26.267 px per body line where we bill 25.5 px
+(snapToGrid) or 23 px (snapToGrid false/absent); -0.767 px per line x 27 lines = -20.7 px per page, 0.80
+of one line. See `docs/layout-parity-target.md` for the cohort table, the font-metric arithmetic that
+rules out OS/2 usWinAscent/Descent, sTypo, hhea, GDI TEXTMETRIC and GDI+ line spacing as the source of
+Word's number, and the proposed floors.

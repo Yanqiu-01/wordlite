@@ -1076,6 +1076,8 @@ public final class DocxTextLayout {
         /** 末行允许垂到版心以下的量，见 Paragraph.lineHang。 */
         private float lineHang;
         private boolean clipScripts;
+        /** 行高走 Word 实测值的那一段：长高的行不许补齐到整格，见 ScriptGeometry.lineBox。 */
+        private boolean gridSnapGrownRow = true;
 
         Spacing(DocxDocument.ParagraphFormat f, float coordinateScale,
                 float singleLineHeightPt, float ascentFrac, int lineGridPitchTwips, boolean measuredAdvance) {
@@ -1129,6 +1131,9 @@ public final class DocxTextLayout {
                 float advance = WordLineHeights.advancePx(singleLineHeightPt, lineTwips, coordinateScale);
                 float carry = advance - desiredHeight;
                 if (Math.abs(carry) < 1f) {
+                    /* 这一段的行高来自 Word 实测值，网格那两条都不许再插手：整行跳格与这 0.27px
+                       是同一件事的两种写法，叠在一起就是真机量到的 25.5px -> 50.267px。 */
+                    gridSnapGrownRow = false;
                     lineCarry = carry;
                     // 上伸按 chooseHeight 画出来的那个整数算，两者必须同源，否则版心还回去的量
                     // 与屏幕上真正的基线位置就对不上。
@@ -1144,7 +1149,7 @@ public final class DocxTextLayout {
             int ascent = Math.max(1, Math.round(desiredHeight * ascentFraction));
             int[] need = scriptSpace(text, start, end);
             int[] box = ScriptGeometry.lineBox(ascent, Math.max(0, desiredHeight - ascent),
-                    need[0], need[1], gridPitchPx, clipScripts);
+                    need[0], need[1], gridPitchPx, clipScripts, gridSnapGrownRow);
             fm.ascent = -box[0];
             fm.descent = box[1];
             fm.top = fm.ascent;

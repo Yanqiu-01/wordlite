@@ -51,6 +51,14 @@ public final class WordLineHeightRegression {
             }
         }
     };
+    /** 字库表推导那一张口径：中文脸 1.000 em、西文脸 1.1074 em（宋体与 Times 表里的 win 和）。 */
+    private static final WordLineHeights.Metrics TABLE = new WordLineHeights.Metrics() {
+        @Override public FontScriptMetrics forFamily(String family) {
+            return "Times New Roman".equals(family)
+                    ? FontScriptMetrics.DEFAULT.withLineHeight(1.1074f)
+                    : FontScriptMetrics.DEFAULT.withLineHeight(1.000f);
+        }
+    };
 
     private static void check(boolean ok, String message) {
         if (!ok) throw new AssertionError(message);
@@ -175,16 +183,22 @@ public final class WordLineHeightRegression {
         check(!WordLineHeights.carries(paragraph("黑体", "Calibri",
                 new Object[]{"Acknowledgements", "黑体", "Calibri", 12, false}), REAL, "黑体"),
                 "黑体配 Calibri：1.2207 高于黑体的 1.000，说话的是没量过的 Calibri，不补");
-        check(WordLineHeights.carries(paragraph("宋体", "Calibri",
+        check(!WordLineHeights.carries(paragraph("宋体", "Calibri",
                 new Object[]{"Abstract", "宋体", "Calibri", 12, false}), REAL, "宋体"),
-                "宋体实测 1.31335 比随包任何一张西文字体都高（最高的 Calibri 也只有 1.2207）：中文正文一律带实测行高");
+                "纯西文的 Abstract 由 Calibri 撑行高：段里写着宋体也不算量过。2.1.1 那版就是把中文脸的"
+                        + " 1.31335 套到这 19 段参考文献上，每行多算 2.7~3.6px（layout-parity-target 第 7 节 A 表）");
+        check(WordLineHeights.carries(paragraph("宋体", "Times New Roman",
+                new Object[]{"接头性能随连接时间变化，Cu 含量 3%。", "宋体", "Times New Roman", 12, false}),
+                REAL, "宋体"),
+                "中西混排：这一笔里有中文，中文脸 1.31335 高于 Times 1.17665，照旧带实测行高");
         check(!WordLineHeights.carries(null, REAL, "宋体"), "空段落返回 false，不许抛");
         check(!WordLineHeights.carries(paragraph("宋体", "Times New Roman"), REAL, "宋体"),
                 "整段没有可测的 run：退回段默认字体判断，不猜");
         WordLineHeights.APPLIED_TO_LAYOUT = saved;
         // 出厂状态必须是被关掉的那一个，且关的是"用不用实测值"，不是把数改小。
         check(!WordLineHeights.APPLIED_TO_LAYOUT,
-                "APPLIED_TO_LAYOUT 出厂为 false：实测行高不参与分页（真机对账 29→30 页、错位段 50→74，账记在 CHANGELOG 2.1.1）");
+                "APPLIED_TO_LAYOUT 出厂为 false：实测行高不参与分页（cand-lh1 真机对账：行高中位误差已经是 0.000px，"
+                        + " 但错页段 7→72、页数 28→29；HEAD 的 96.6% 是反向误差抵出来的，账在第 13 节）");
         check(!WordLineHeights.carries(paragraph("宋体", "Times New Roman",
                 new Object[]{"正文。", "宋体", "Times New Roman", 12, false}), REAL, "宋体"),
                 "开关关掉之后宋体正文也不带小数行距，也不带垂下量：分页与 2.1.0 一字不差");
@@ -258,11 +272,94 @@ public final class WordLineHeightRegression {
                 "黑体没套实测值，仍是字库表里的 1.000 em");
     }
 
+    /**
+     * 行高由这一行里真正落了笔的那张脸说了算，不是由段里写着哪几张脸说了算。
+     *
+     * 这条是 2.1.1 实测行高被真机对账否掉的直接原因之一：`tallest` 原来无条件取
+     * max(中西比值)，纯西文的参考文献段被中文脸抬到 26.267px，Word 量到 23.533px，
+     * 19 段每行多算 2.7~3.6px，整篇多算出一页半（docs/layout-parity-target.md 第 7 节 A/B 表）。
+     */
+    private static void faceFollowsTheCharactersOnTheLine() {
+        boolean savedFlag = WordLineHeights.APPLIED_TO_LAYOUT;
+        WordLineHeights.APPLIED_TO_LAYOUT = true;
+        try {
+        WordLineHeights.Height latin = WordLineHeights.tallest(
+                paragraph("宋体", "Times New Roman",
+                        new Object[]{"[12] Kim T, Su W. Copper bonding at 250 C for 30 min.",
+                                "宋体", "Times New Roman", 12, false}), REAL, "宋体");
+        close(latin.pt, 12d * TIMES_EM, 0.002d, "纯西文段按 Times 算行高（12pt × 1.17665），不跟中文脸走");
+        check(DocxFontAssets.TIMES.equals(DocxFontAssets.pathFor(latin.family)),
+                "撑起纯西文行高的是 Times：这一段的小数按 23.533px 补，不是 26.267px");
+
+        WordLineHeights.Height cjk = WordLineHeights.tallest(
+                paragraph("宋体", "Times New Roman",
+                        new Object[]{"接头强度 245MPa，孔隙率 3.1%。", "宋体", "Times New Roman", 12, false}),
+                REAL, "宋体");
+        close(cjk.pt, 12d * SONG_EM, 0.002d, "同字号混排仍由中文脸撑：12pt × 1.31335");
+        check(DocxFontAssets.SONG.equals(DocxFontAssets.pathFor(cjk.family)),
+                "这一行里有中文，中文脸就是说了算的那一张");
+
+        WordLineHeights.Height punct = WordLineHeights.tallest(
+                paragraph("宋体", "Times New Roman",
+                        new Object[]{"\u3001\u3002\uff08\uff09\u300c\u300d", "宋体", "Times New Roman", 12, false}),
+                REAL, "宋体");
+        check(DocxFontAssets.SONG.equals(DocxFontAssets.pathFor(punct.family)),
+                "全角标点 、。（）「」 归中文脸：中文行不会因为没有汉字就矮下去");
+        WordLineHeights.Height ambiguous = WordLineHeights.tallest(
+                paragraph("宋体", "Times New Roman",
+                        new Object[]{"\u2014\u2026\u201c\u201d\u00b7", "宋体", "Times New Roman", 12, false}),
+                REAL, "宋体");
+        check(DocxFontAssets.TIMES.equals(DocxFontAssets.pathFor(ambiguous.family)),
+                "宽度歧义那一批（— … “ ” ·）归西文脸：唯一的西文真值 23.533px 就是靠这条守住的");
+        check(WordLineHeights.isEastAsianChar('\u6c49') && WordLineHeights.isEastAsianChar('\u3001')
+                        && WordLineHeights.isEastAsianChar('\uff08') && WordLineHeights.isEastAsianChar('\uac00'),
+                "汉字、CJK 标点、全角形式、谚文都算中文字符");
+        check(!WordLineHeights.isEastAsianChar('A') && !WordLineHeights.isEastAsianChar('3')
+                        && !WordLineHeights.isEastAsianChar('.') && !WordLineHeights.isEastAsianChar('\u2014'),
+                "字母、数字、半角符号与那个破折号都不算中文字符");
+        } finally {
+            WordLineHeights.APPLIED_TO_LAYOUT = savedFlag;
+        }
+    }
+
+    /**
+     * 按字符选脸这条必须与实测行高同进同退，不许单独开。
+     *
+     * 字库表口径下中文脸只有 1.000 em（Word 实测量到的是 1.313 em），HEAD 一直靠"取中西较大值"
+     * 用西文脸的 1.1074 em 把中文行垫到 23px。关掉开关时就继续这么垫（与 2.1.0 逐字节一致）；
+     * 要是先把按字符选脸单独开出去，170 段 snapToGrid=false 的正文会从 23px 掉到 20px，离 Word
+     * 的 25.8px 更远（snap 段还有网格地板兜着，非 snap 段没有）。这是 cand-lh1 真机对账之后补的
+     * 一条闸，账记在 docs/layout-parity-target.md 第 13 节。
+     */
+    private static void characterFaceRuleTravelsWithTheSwitch() {
+        DocxDocument.ParagraphBlock cjk = paragraph("宋体", "Times New Roman",
+                new Object[]{"接头性能随连接时间变化。", "宋体", "Times New Roman", 12, false});
+        DocxDocument.ParagraphBlock latinOnly = paragraph("宋体", "Times New Roman",
+                new Object[]{"[12] Kim T, Su W.", "宋体", "Times New Roman", 12, false});
+        boolean saved = WordLineHeights.APPLIED_TO_LAYOUT;
+        try {
+            WordLineHeights.APPLIED_TO_LAYOUT = false;
+            close(WordLineHeights.tallest(cjk, TABLE, "宋体").pt, 12d * 1.1074d, 0.002d,
+                    "关掉开关：中文行照旧取中西较大值（西文脸 1.1074 垫着），与 2.1.0 一字不差");
+            close(WordLineHeights.tallest(latinOnly, TABLE, "宋体").pt, 12d * 1.1074d, 0.002d,
+                    "纯西文段本来就走西文脸：开关前后一样，这条改动没碰它");
+            WordLineHeights.APPLIED_TO_LAYOUT = true;
+            close(WordLineHeights.tallest(cjk, TABLE, "宋体").pt, 12d * 1.0d, 0.002d,
+                    "开着开关：这一行里没有西文字符，中文脸表里的 1.000 自己说话——这正是要与实测值同开的原因");
+            close(WordLineHeights.tallest(latinOnly, TABLE, "宋体").pt, 12d * 1.1074d, 0.002d,
+                    "开着开关：纯西文行仍按西文脸 1.1074，段里写着宋体也不算数");
+        } finally {
+            WordLineHeights.APPLIED_TO_LAYOUT = saved;
+        }
+    }
+
     public static void main(String[] args) {
         tableHoldsOnlyMeasuredFaces();
         advanceIsOneStepFractional();
         tallestWeighsSizeNotJustRatio();
         onlyMeasuredFacesCarry();
+        faceFollowsTheCharactersOnTheLine();
+        characterFaceRuleTravelsWithTheSwitch();
         pageBudgetCountsBaselinesNotLineBoxes();
         overrideKeepsEverythingElse();
         System.out.println("SUMMARY " + checks + " line-height assertions passed (Word truth from "
