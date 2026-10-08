@@ -233,6 +233,18 @@
 
 `tools/capture-device.ps1` 原来把每个 `.class` 平铺在 d8 命令行上，Windows 直接报"文件名或扩展名太长"，现在先 jar 再喂 d8。门禁三条命令本身没变：`tools/word-parity.ps1`（分页归属）、`tools/edge-parity.ps1 -Impl new`（右边界）、`tools/line-break-delta.ps1`（逐行换行点）。
 
+## 改动怎么进仓库（多人在同一棵树里干活时）
+
+今天踩到的：几个分头干活的进程报过来的提交号，在这个仓库里 `git cat-file -t` 都找不到对象（例：报过来 8a40b42 / 222483f / 1d05c7f / 5f07990，本仓库 main 当时是 68beb77）。它们改的文件确实落在这棵树里（`git status` 看得见），但**提交没有落进来**——于是发版前的必跑测试跑的是一个不含这些改动的 main，报告里写的数也就没地方复核。
+
+规矩：谁改的文件谁负责让它变成**这个仓库**里的一个 ref（分支或 main），并且把 `git log --oneline -1` 与 `git status --porcelain` 的原样输出贴回来。报上来的号能不能用，一条命令就能验：
+
+```
+git cat-file -t <那个号>
+```
+
+验不过就当它没提交。发版只从 `main` 走（`tools/release-version.ps1 -Isolated` 会开一棵 main 的干净副本），所以工作区里未提交的改动再多也不会被发出去——这是保险，不是省事：没进 `main` 的东西等于没做。
+
 ## 版本账（2.4.0 这轮对一次总数，免得各说各话）
 
 GitHub 上现在 35 个 release（`gh api repos/.../releases` 数的，不是凭印象）：`v0.3.4` 到 `v2.5.0`。**34 个带可直接安装的 APK**，`v0.3.4` 那一个只挂了源码包（`wordlite-source-0.3.4.tar.gz`）——它是第一个 release，当时还没把出包挂上去，别把它算进"可安装"里。"至少迭代 20 个版本"这一条按 34 这个数已经过了。
