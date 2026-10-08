@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Standalone on-device render probe. Separate applicationId so it never replaces the installed
+     Word Lite; built by tools/build-pagerender-probe.ps1, purpose in tools/device-probe/PageRenderActivity.java -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.rikkahub.wordlite.pagerender"
+    android:versionCode="1"
+    android:versionName="probe">
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="29" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <application android:label="WordLiteRender" android:debuggable="true"
+        android:usesCleartextTraffic="true">
+        <activity android:name="com.rikkahub.wordlite.PageRenderActivity" android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
