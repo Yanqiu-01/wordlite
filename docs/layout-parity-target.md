@@ -18,7 +18,7 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 量不出来按没过算。这一节是验收线，谁改排版引擎都拿它复核；复核由常驻的排版对账子代理执行，
 每轮改动重跑一遍，结果贴回本文与 `docs/edge-parity-baseline.md`。
 
-| # | 指标 | 量法（真值来源） | HEAD 复采（tag `autospace1`，2026-10-09；engine head_sha `bdd2e6a`） | 验收线 |
+| # | 指标 | 量法（真值来源） | HEAD 复采（tag `head898`，2026-10-09；engine head_sha `594c1a6`；与 tag `autospace1` 逐项一字不差，见第 22 节） | 验收线 |
 | --- | --- | --- | --- | --- |
 | 1 | 段落页归属 | `tools/word-parity.ps1`（Word 28 页真值 `artifacts/word/pages.tsv`） | 7 段错页 / 206（exact 96.6%，页差全是 -1，首个 para 121；28/28 页） | exact >= 99%，错页 <= 2 段 |
 | 2 | 逐行行高误差中位 | `artifacts/agent-typeset/line-height-rows.ps1`（Word 相邻基线距离，COM） | -0.767 px（n=91，Word 26.267 px） | 绝对值 <= 0.10 px |
@@ -31,7 +31,7 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 
 本轮落到的 HEAD 是 tag `autospace1`（第 20 节）：`w:autoSpaceDE` / `w:autoSpaceDN` 的缺省从"没写=关"改成 Word 的"没写=开"，第 5 条 62.4% → 69.1%，其余五条一字不差（`pages.tsv` sha `921A8FAB4D3D09F8` 不变、右边界仍 0/32、`lines-all.tsv` sha `D9822E2C3396D6EC` → `AC44D355853F4616`）。
 
-再后一轮（第 21 节，U+207B 上下标单位那条线索）没有动引擎：量完确认这个字符两边用的是同一张随包 Times New Roman、advance 也一致（0.3384 em 对 Word 的 0.338 em），所以六个数与上一行完全相同，新增的只是量台 `tools/font-advance-audit.py`（逐字把 Word 导出 PDF 的脸/advance 与我们随包字库对账）。
+再后一轮（第 21 节，U+207B 上下标单位那条线索）没有动引擎：量完确认这个字符两边用的是同一张随包 Times New Roman、advance 也一致（0.3384 em 对 Word 的 0.338 em），所以六个数与上一行完全相同，新增的只是量台 `tools/font-advance-audit.py`（逐字把 Word 导出 PDF 的脸/advance 与我们随包字库对账）。发版前又按最新 HEAD（engine head_sha `594c1a6`，含别人那笔字库装载改动）真机复采一次，六个数与三个指纹（`lines-all` / `pages.tsv` / 字体表）全部一字不差，见第 22 节。
 
 三条规矩：
 
@@ -858,4 +858,54 @@ Word（PDF，页 19）与手机（`autospace1/new/lines-all.tsv`）并排，第 
   的 Java 字符串里有没转义的引号（`"检索设置里"联网检索"是关着的…"`），`javac` 报 4 个错，
   `tools/build-host.ps1` 与 `tools/test-host.ps1` 现在都会挂在那儿。那是别人在飞的改动，我没有动它，
   所以我这一轮的测试是从 `git archive HEAD` 的源码单独编一遍跑的。
+
+
+
+## 22. 发版前复采（tag `head898`，engine head_sha `594c1a6`）：别人那三笔（含字库装载）没动到一个换行点
+
+为什么要重采：`921b0ae` 改了字库装载（一次装载失败不再永久退成宋体、APK 里字库不压缩存放），
+`3a5d247`、`594c1a6` 是界面。字库装载在排版路径上，所以不能拿 `autospace1` 的旧读数交差。
+
+命令：`pwsh tools/parity-six.ps1 -Serial EAMUT20528011355 -Tag head898`（设备 `EAMUT20528011355`，
+CDY-AN90 / Android 10）
+
+| # | 指标 | `autospace1`（第 20 节） | `head898`（本轮） |
+| --- | --- | --- | --- |
+| 1 | 段落页归属 | 7 段错页 / 206（exact 96.6%，页差 -1×7，首个 para 121；28/28 页） | **一样**：7 段错页 / 206，直方图 `-1=>7 0=>199`，首个仍是 para 121 |
+| 2 | 逐行行高中位 | -0.767 px（n=91） | -0.767 px |
+| 3 | 逐行行高 p90 | 2.533 px（max 3.467） | 2.533 px |
+| 4 | 每页累计高度 | 0.79 行 | 0.79 行（最差队列 sz12 line300 snap=false 2.55 行） |
+| 5 | 逐行换行点 | 114/165 = 69.1% | 114/165 = 69.1% |
+| 6 | 右边界超出 1px | 0 / 32 | **0 / 32（守住）** |
+
+指纹也对得上，所以"一样"不是四舍五入出来的：`lines-all.tsv` sha `AC44D355853F4616`、
+`pages.tsv` sha `921A8FAB4D3D09F8`、字体表指纹 `E751F0AFAC19`——三个与 `autospace1` 一字不差，
+即那三笔改动没动到任何一个换行点、任何一次分页。
+
+### 22.1 每页余量的分布（两边同口径，末行基线到页底）
+
+命令：`pwsh tools/page-fill-ledger.ps1 -Tag head898`（单位 px，页高 1122.53；自检
+`max|A+B+C-页高| = 0.00 px`、`max|dA+dB+dC| = 0.10 px`）
+
+| 每页余量 C | Word | 我们 |
+| --- | --- | --- |
+| 最小 | 120.5 | 119.4 |
+| p25 | 137.9 | 133.9 |
+| 中位 | 155.0 | 162.4 |
+| 最大 | 859.0 | 936.9 |
+| 页差 dC | 中位 +9.4，均值 +12.1 |  |
+| 每页行数 | 均值 26.8（min 5 / 中位 29 / max 65） | 均值 27.4（min 2 / 中位 30 / max 66） |
+
+我们比 Word 多排 17 行（749 → 766），多排的 13 页、少排的 6 页；第 5 条要涨的分就在这 17 行里。
+两边都没有"页尾只剩两三像素"那种硬撑的页（余量最小 119.4 px ≈ 4.6 行），所以之前担心的
+"靠余量硬撑"这一条在数据上不成立，方向仍是每行装几个字。
+
+### 22.2 这一版能不能发：主机侧与真机侧都过在哪
+
+- 主机：`git archive HEAD` 的源码 `javac` 83 个文件通过；七套断言全过
+  （`Regression 74 / OriginalDocx 19 / WordLineHeight 63 / Script 65 / TableGeometry 31 /
+  Preservation 11 / TextCorpus 209`）。工作树（含别人未提交的改动）`javac` 也通过。
+- 真机：六条见上表，第 6 条守住 0/32。
+- 相对 2.3.0 的净变化只有第 5 条 `62.4% → 69.1%`（`w:autoSpaceDE/DN` 缺省按 Word 当开，第 20 节），
+  其余五条与页归属分布未动，行高没有单独去补（原因见第 19、20.3 节）。
 
