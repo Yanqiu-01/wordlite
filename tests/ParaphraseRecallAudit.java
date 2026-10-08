@@ -696,6 +696,9 @@ public final class ParaphraseRecallAudit {
         }
         System.out.println("  注：整段那一行是拿 TextCorpus.dice / bagDice 直接量改写段与源段（DetectionFloor"
                 + " 同一批原语）；句级那一行是产品自己的切句口径，每一句去对源段里最像的一句。");
+
+        paragraphTierCeiling(dir, TextCorpus.bagDice(tiers.get(4).text, base),
+                TextCorpus.bagDice(tiers.get(tiers.size() - 1).text, base));
         head("降重闭环自己的复核读数（判据、预算、基线全照 RewriteRateRegression，不另算一套）");
         List<String> plantedSentences = RewriteRateRegression.lines(dir + "/oa-planted-cjmenet.txt");
         TextCorpus loopCorpus = new TextCorpus();
@@ -771,4 +774,342 @@ public final class ParaphraseRecallAudit {
                 + "）——证据在整段口径上还活着，掉下去的是句级读数");
         line("总耗时", elapsed + " ms（" + tiers.size() + " 档 x 5 种判据配置 x 2 份库）");
     }
+
+    /* ======================= 段落口径的负例分布（给段落档下限定数用） ======================= */
+
+    /** 一段话与它的每一句：袋、三元组、拉丁占比、有效字全用 TextCorpus.bagUnit 算，不另起口径。 */
+    private static final class Para {
+        final String file;
+        final TextCorpus.BagUnit unit;
+        final ArrayList<TextCorpus.BagUnit> sentences = new ArrayList<TextCorpus.BagUnit>();
+        Para(String file, String text) {
+            this.file = file;
+            this.unit = TextCorpus.bagUnit(text);
+            ArrayList<int[]> spans = TextCorpus.sentences(text);
+            for (int i = 0; i < spans.size(); i++) {
+                String piece = text.substring(spans.get(i)[0], spans.get(i)[1]).trim();
+                TextCorpus.BagUnit sentence = TextCorpus.bagUnit(piece);
+                if (sentence.chars >= TextCorpus.MIN_SENTENCE_CHARS
+                        && sentence.latinRatio < AigcFamily.LATIN_RATIO) sentences.add(sentence);
+            }
+        }
+    }
+
+    /** 排序三元组的交集枚数；与 TextCorpus.dice 同一把尺，下面有一处断言比过它俩一致。 */
+    private static int sharedGrams(long[] a, long[] b) {
+        int i = 0, j = 0, shared = 0;
+        while (i < a.length && j < b.length) {
+            if (a[i] < b[j]) i++;
+            else if (a[i] > b[j]) j++;
+            else { shared++; i++; j++; }
+        }
+        return shared;
+    }
+
+    private static float sentenceDice(TextCorpus.BagUnit a, TextCorpus.BagUnit b) {
+        if (a.grams.length == 0 || b.grams.length == 0) return 0f;
+        return 2f * sharedGrams(a.grams, b.grams) / (a.grams.length + b.grams.length);
+    }
+
+    /** 这一段与那一段之间有没有一句真的过句级那一线（三元组或袋）。段落档兜底的前提就是它。 */
+    private static boolean sharesALine(Para left, Para right) {
+        for (int i = 0; i < left.sentences.size(); i++) {
+            TextCorpus.BagUnit a = left.sentences.get(i);
+            for (int j = 0; j < right.sentences.size(); j++) {
+                TextCorpus.BagUnit b = right.sentences.get(j);
+                if (sentenceDice(a, b) >= TextCorpus.SIMILAR_DICE) return true;
+                if (TextCorpus.bagDiceOf(a.bag, b.bag) >= TextCorpus.SIMILAR_BAG_DICE) return true;
+            }
+        }
+        return false;
+    }
+
+    /** 一个文件按行拆段（# 开头是取回说明）。 */
+    private static ArrayList<Para> paragraphsFrom(String path, String label) throws IOException {
+        ArrayList<Para> out = new ArrayList<Para>();
+        for (String row : read(path).split("\n")) {
+            String text = row.trim();
+            if (text.isEmpty() || text.startsWith("#")) continue;
+            Para para = new Para(label, text);
+            if (para.unit.chars >= TextCorpus.MIN_SENTENCE_CHARS) out.add(para);
+        }
+        return out;
+    }
+
+    /** 分布的顶、p99、p95、中位数。values 会被排序。 */
+    private static String spread(double[] values, int count) {
+        if (count == 0) return "对子 0";
+        double[] taken = new double[count];
+        System.arraycopy(values, 0, taken, 0, count);
+        java.util.Arrays.sort(taken);
+        int at = (int) Math.ceil(0.99d * count) - 1;
+        int at95 = (int) Math.ceil(0.95d * count) - 1;
+        return "对子 " + count + " 顶 " + trim((float) taken[count - 1])
+                + " p99 " + trim((float) taken[Math.max(0, at)])
+                + " p95 " + trim((float) taken[Math.max(0, at95)])
+                + " 中位 " + trim((float) taken[count / 2]);
+    }
+
+    private static double[] shape(ArrayList<Float> values) {
+        double[] out = new double[values.size()];
+        for (int i = 0; i < out.length; i++) out[i] = values.get(i).doubleValue();
+        return out;
+    }
+
+    /** 段落长度分布：兜底只会落在够长的段上，这个数决定"够长"该定在哪里。 */
+    private static String lengthShape(ArrayList<Para> paras) {
+        double[] chars = new double[paras.size()];
+        for (int i = 0; i < chars.length; i++) chars[i] = paras.get(i).unit.chars;
+        return paras.size() + " 段（有效字）" + spread(chars, chars.length);
+    }
+
+    /** 袋 Dice 低于这个数的对子不必再问句级前提：它抬不到任何可用的下限之上，问一次只是白扫。 */
+    private static final double PAIR_PROBE_FROM = 0.30d;
+    /** "长段"那一档的门槛：段落档兜底不太可能落在三五十字的短段上，短段的袋 Dice 抖得厉害。 */
+    private static final int LONG_PARAGRAPH_CHARS = 120;
+    /** 候选下限：一次把这几档的漏网对数都打出来，免得每改一个数重跑一遍。 */
+    private static final float[] CANDIDATE_FLOORS = { 0.72f, 0.74f, 0.76f, 0.78f, 0.80f };
+    /** 句级那条老规矩：下限压在实测顶之上 0.14（0.577 到 0.72 就是这么来的）。 */
+    private static final float MARGIN_OVER_CEILING = 0.14f;
+
+    private static float floorOf(float ceiling) {
+        return (float) (Math.ceil((ceiling + MARGIN_OVER_CEILING) * 100d) / 100d);
+    }
+
+    /** 一组对子的收集器。all 是全量，lined 是段落档兜底真能碰到的那部分（前提成立）。 */
+    private static final class Pairs {
+        final ArrayList<Float> all = new ArrayList<Float>();
+        final ArrayList<Float> lined = new ArrayList<Float>();
+        final ArrayList<Float> linedLong = new ArrayList<Float>();
+        /** 构造档专用，与 lined 同序：嵌进去之前宿主自己对那段文库段的袋 Dice、以及真被抄走那句占整段的比例。 */
+        final ArrayList<Float> pre = new ArrayList<Float>();
+        final ArrayList<Float> quotedShare = new ArrayList<Float>();
+        int gated, belowProbe;
+        float top, topLined;
+        String topLabel = "", topLinedLabel = "";
+    }
+
+    private static void consider(Pairs group, Para left, Para right) {
+        consider(group, left, right, null, -1f);
+    }
+
+    private static void consider(Pairs group, Para left, Para right, Float beforeQuoting, float share) {
+        if (left.unit.latinRatio >= AigcFamily.LATIN_RATIO || right.unit.latinRatio >= AigcFamily.LATIN_RATIO) {
+            group.gated++;
+            return;
+        }
+        float dice = TextCorpus.bagDiceOf(left.unit.bag, right.unit.bag);
+        String who = left.file + " x " + right.file + "（" + left.unit.chars + " x " + right.unit.chars + " 字）";
+        if (dice > group.top) { group.top = dice; group.topLabel = who; }
+        group.all.add(Float.valueOf(dice));
+        if (dice < PAIR_PROBE_FROM) { group.belowProbe++; return; }
+        if (!sharesALine(left, right)) return;
+        group.lined.add(Float.valueOf(dice));
+        if (beforeQuoting != null) group.pre.add(beforeQuoting);
+        if (share >= 0f) group.quotedShare.add(Float.valueOf(share));
+        if (dice > group.topLined) { group.topLined = dice; group.topLinedLabel = who; }
+        if (left.unit.chars >= LONG_PARAGRAPH_CHARS && right.unit.chars >= LONG_PARAGRAPH_CHARS) {
+            group.linedLong.add(Float.valueOf(dice));
+        }
+    }
+
+    private static int atLeast(ArrayList<Float> values, float floor) {
+        int n = 0;
+        for (int i = 0; i < values.size(); i++) if (values.get(i).floatValue() >= floor) n++;
+        return n;
+    }
+
+    /** 一组负例的分布。只有 lined 那一档才是段落档兜底真会碰到的对子。 */
+    private static void report(String name, Pairs group, ArrayList<Pairs> sinks) {
+        sinks.add(group);
+        System.out.println("  " + name + "  可比对子 " + group.all.size()
+                + "（字族门挡掉 " + group.gated + "，袋 Dice 低于 " + PAIR_PROBE_FROM + " 没问句级前提 "
+                + group.belowProbe + "）");
+        System.out.println("      " + pad("全部对子", 22) + spread(shape(group.all), group.all.size()));
+        System.out.println("      " + pad("过了句级那一线", 22)
+                + spread(shape(group.lined), group.lined.size()));
+        if (group.lined.isEmpty()) {
+            System.out.println("          这一组没有一对走到段落档兜底的前提上");
+            return;
+        }
+        System.out.println("          最高那对 " + group.topLinedLabel);
+        StringBuilder tails = new StringBuilder("          前提成立的对子里袋 Dice ");
+        for (int i = 0; i < CANDIDATE_FLOORS.length; i++) {
+            tails.append(">= " + trim(CANDIDATE_FLOORS[i]) + " 有 " + atLeast(group.lined, CANDIDATE_FLOORS[i]) + " 对  ");
+        }
+        System.out.println(tails.toString());
+        System.out.println("      " + pad("其中两侧都 >= 120 字", 22)
+                + spread(shape(group.linedLong), group.linedLong.size()));
+        if (!group.pre.isEmpty()) {
+            double[] before = shape(group.pre);
+            java.util.Arrays.sort(before);
+            System.out.println("          把引用那句抽掉再量同一批对子：" + spread(before, before.length)
+                    + "，过 " + trim(0.72f) + " 的 " + atLeast(group.pre, 0.72f) + " 对");
+            ArrayList<Float> fired = new ArrayList<Float>();
+            for (int i = 0; i < group.lined.size() && i < group.quotedShare.size(); i++) {
+                if (group.lined.get(i).floatValue() >= 0.72f) fired.add(group.quotedShare.get(i));
+            }
+            if (!fired.isEmpty()) {
+                System.out.println("          会真触发的 " + fired.size() + " 对里，真被抄走那一句只占整段 "
+                        + spread(shape(fired), fired.size()).replace("对子", "比例"));
+            }
+        }
+    }
+    private static TextCorpus.BagUnit longestSentenceOf(Para para) {
+        TextCorpus.BagUnit longest = null;
+        for (int i = 0; i < para.sentences.size(); i++) {
+            if (longest == null || para.sentences.get(i).chars > longest.chars) longest = para.sentences.get(i);
+        }
+        return longest;
+    }
+
+    /**
+     * 把文库某段的整句原样嵌进宿主段中间——真引用的形状：段里有一句话是别人的，整段不是。
+     * 同一批对子量两次：嵌进去之前、嵌进去之后。差出来那截就是段落档兜底会多圈的字。
+     */
+    private static void stitch(Pairs sink, ArrayList<Para> hosts, int k, Para lib, TextCorpus.BagUnit quoted) {
+        for (int n = 0; n < 3 && n < hosts.size(); n++) {
+            Para host = hosts.get((k * 3 + n) % hosts.size());
+            if (host.unit.text.length() < 40 || host.unit.latinRatio >= AigcFamily.LATIN_RATIO) continue;
+            int cut = host.unit.text.length() / 2;
+            String stitched = host.unit.text.substring(0, cut) + quoted.text + host.unit.text.substring(cut);
+            float alone = TextCorpus.bagDiceOf(host.unit.bag, lib.unit.bag);
+            float share = quoted.chars <= 0 ? 0f : (float) quoted.chars / (float) (host.unit.chars + quoted.chars);
+            consider(sink, new Para("构造:整句嵌进" + host.file, stitched), lib, Float.valueOf(alone), share);
+        }
+    }
+
+    /**
+     * 段落袋口径的负例分布：文库那侧的"段"与另一侧的"段"同粒度逐对算袋 Dice，取分布的顶。
+     *
+     * <p>为什么必须先量这个再动引擎：句级那一条的数是顶 0.577、线 0.72（20 段没进库的真人负例
+     * x 20 段入库段逐对，RewriteRobustnessRegression.bagStudy，docs/paraphrase-robustness.md 的 D2），
+     * 0.72 与 0.577 之间那 0.143 就是它不误伤的余量。段落档把比较对象从一句换成一段，分子分母都换了，
+     * 那个顶不作数，必须重测一份段落档自己的顶。顶 + 0.14 落不到两条目标行的真值之下，这条兜底就不能上。
+     *
+     * <p>负例分法与句级那份同源：同一份 real-prose.txt 奇偶对半分，偶数段当入库、奇数段当没入库
+     * （同领域、同一支笔、同一套术语，这台器能拿到的最狠负例），再加上三批与文库不相干的真人段
+     * （已发表论文摘要 H2、CNKI 跨领域摘要、DetectionFloor 夹具）与一批构造档（真引用的形状）。
+     * aigc-hard-human.txt（从 real-prose 逐字挑出来的）与 aigc-label-human-polish-agent.txt
+     * （同一批底本的轻度润色）不是负例——它们与文库是同一段话，后者只报顶当正例侧的参照。
+     */
+    private static void paragraphTierCeiling(String dir, float weakestTarget, float strongerTarget)
+            throws IOException {
+        head("段落袋口径的负例分布（先量顶，再决定动不动引擎）");
+        ArrayList<Para> realProse = paragraphsFrom(dir + "/real-prose.txt", "real-prose");
+        ArrayList<Para> indexed = new ArrayList<Para>();
+        ArrayList<Para> holdout = new ArrayList<Para>();
+        for (int i = 0; i < realProse.size(); i++) {
+            if (i % 2 == 0) indexed.add(realProse.get(i));
+            else holdout.add(realProse.get(i));
+        }
+        ArrayList<Para> published = paragraphsFrom(dir + "/aigc-label-human-verbatim.txt", "外部:H2 已发表摘要");
+        ArrayList<Para> crossDomain = paragraphsFrom(dir + "/cnki-cross.txt", "外部:CNKI 跨领域");
+        ArrayList<Para> fixture = new ArrayList<Para>();
+        fixture.addAll(paragraphsFrom(dir + "/floor-source-01-verbatim.txt", "夹具:floor-01"));
+        fixture.addAll(paragraphsFrom(dir + "/floor-source-04-decoy.txt", "夹具:floor-04"));
+        fixture.addAll(paragraphsFrom(dir + "/floor-source-05-references.txt", "夹具:floor-05"));
+        ArrayList<Para> library = new ArrayList<Para>();
+        library.addAll(indexed);
+        library.addAll(paragraphsFrom(dir + "/oa-planted-cjmenet.txt", "文库:oa-planted"));
+        library.addAll(paragraphsFrom(dir + "/oa-abstract-cjmenet.txt", "文库:oa-abstract"));
+        line("入库那侧（偶数段 + OA）", lengthShape(library));
+        line("未入库的真人段（奇数段）", lengthShape(holdout));
+        line("外部真人段", "H2 " + published.size() + " 段 + CNKI " + crossDomain.size()
+                + " 段 + 夹具 " + fixture.size() + " 段");
+
+        Pairs holdoutGroup = new Pairs();
+        Pairs publishedGroup = new Pairs();
+        Pairs crossGroup = new Pairs();
+        Pairs fixtureGroup = new Pairs();
+        Pairs quotedSameDoc = new Pairs();
+        Pairs quotedFar = new Pairs();
+        for (int i = 0; i < holdout.size(); i++) {
+            for (int j = 0; j < indexed.size(); j++) consider(holdoutGroup, holdout.get(i), indexed.get(j));
+        }
+        for (int i = 0; i < published.size(); i++) {
+            for (int j = 0; j < library.size(); j++) consider(publishedGroup, published.get(i), library.get(j));
+        }
+        for (int i = 0; i < crossDomain.size(); i++) {
+            for (int j = 0; j < library.size(); j++) consider(crossGroup, crossDomain.get(i), library.get(j));
+        }
+        for (int i = 0; i < fixture.size(); i++) {
+            for (int j = 0; j < library.size(); j++) consider(fixtureGroup, fixture.get(i), library.get(j));
+        }
+        ArrayList<Para> farHosts = new ArrayList<Para>();
+        farHosts.addAll(published);
+        farHosts.addAll(crossDomain);
+        int stride = Math.max(1, indexed.size() / 20);
+        for (int i = 0, k = 0; i < indexed.size(); i += stride, k++) {
+            Para lib = indexed.get(i);
+            TextCorpus.BagUnit longest = longestSentenceOf(lib);
+            if (longest == null) continue;
+            stitch(quotedSameDoc, holdout, k, lib, longest);
+            stitch(quotedFar, farHosts, k, lib, longest);
+        }
+        ArrayList<Pairs> negatives = new ArrayList<Pairs>();
+        report("未入库的真人段 x 入库段", holdoutGroup, negatives);
+        report("外部:H2 已发表摘要", publishedGroup, negatives);
+        report("外部:CNKI 跨领域", crossGroup, negatives);
+        report("外部:DetectionFloor 夹具", fixtureGroup, negatives);
+        report("构造:整句被引用（宿主是同篇未入库段）", quotedSameDoc, negatives);
+        report("构造:整句被引用（宿主是跨文档段）", quotedFar, negatives);
+
+        float ceiling = 0f;
+        String ceilingFrom = "";
+        for (int i = 0; i < negatives.size(); i++) {
+            if (negatives.get(i).topLined > ceiling) {
+                ceiling = negatives.get(i).topLined;
+                ceilingFrom = negatives.get(i).topLinedLabel;
+            }
+        }
+        int linedTotal = 0;
+        int leakAt72 = 0;
+        StringBuilder leakTally = new StringBuilder();
+        for (int f = 0; f < CANDIDATE_FLOORS.length; f++) {
+            int leaks = 0;
+            for (int i = 0; i < negatives.size(); i++) {
+                leaks += atLeast(negatives.get(i).lined, CANDIDATE_FLOORS[f]);
+                if (f == 0) linedTotal += negatives.get(i).lined.size();
+            }
+            if (f == 0) leakAt72 = leaks;
+            leakTally.append(trim(CANDIDATE_FLOORS[f]) + " 档漏 " + leaks + " 对  ");
+        }
+        float sameThesis = Math.max(holdoutGroup.topLined, quotedSameDoc.topLined);
+        float crossDoc = Math.max(Math.max(publishedGroup.topLined, crossGroup.topLined),
+                Math.max(fixtureGroup.topLined, quotedFar.topLined));
+        line("前提成立的负例对子", linedTotal + " 对，最高那对 " + trim(ceiling) + "  " + ceilingFrom);
+        line("同一支笔那两组的顶", trim(sameThesis) + "  下限要 " + trim(floorOf(sameThesis)));
+        line("跨文档那四组的顶", trim(crossDoc) + "  下限要 " + trim(floorOf(crossDoc)));
+        line("六组合起来的顶", trim(ceiling) + "  按句级那条老规矩（顶 + " + MARGIN_OVER_CEILING
+                + "）落下限 " + trim(floorOf(ceiling)));
+        line("各候选下限的漏网对数", leakTally.toString());
+        line("两条目标行的真值", "同义 35% 档 " + trim(weakestTarget) + "、叠加档 " + trim(strongerTarget));
+        float floor = floorOf(ceiling);
+        System.out.println("  判定：" + (floor <= weakestTarget
+                ? "有余量——下限取 " + trim(floor) + " 时两条目标行都在线之上（余量 "
+                        + trim(weakestTarget - floor) + " / " + trim(strongerTarget - floor) + "）"
+                : (floor <= strongerTarget
+                        ? "只够抬叠加档那一条（" + trim(strongerTarget) + " 在线之上），"
+                                + trim(weakestTarget) + " 那一行抬不起来"
+                        : "不够——下限要 " + trim(floor) + "（大于 1 就等于永远过不了线），两条目标行（"
+                                + trim(weakestTarget) + " / " + trim(strongerTarget) + "）都够不到，"
+                                + "这条兜底上了也量不出效果，只会多圈字")));
+        System.out.println("  注：即使把下限压到不需要余量（直接取顶 " + trim(ceiling) + "），也仍然在两条目标行之上；"
+                + "把 0.720 那一档的 " + leakAt72 + " 对负例算进去，就是「取一句真引用、判一整段抄」的误伤对数。");
+
+        // 正例侧参照：同一批底本的轻度润色（X1，编码代理润色，无真人编辑）与文库的顶。
+        // 它不进上面的顶——它与文库是同一段话；但它告诉我们"轻度润色"落在哪个数上，
+        // 下限若比它高，这类稿子就永远只能靠句级那一条。
+        ArrayList<Para> polished = paragraphsFrom(dir + "/aigc-label-human-polish-agent.txt", "正例侧:X1 轻度润色");
+        Pairs polishGroup = new Pairs();
+        for (int i = 0; i < polished.size(); i++) {
+            for (int j = 0; j < realProse.size(); j++) consider(polishGroup, polished.get(i), realProse.get(j));
+        }
+        double[] polished2 = shape(polishGroup.lined);
+        java.util.Arrays.sort(polished2);
+        line("正例侧参照（不进顶）", "轻度润色段 x 底本段：过句级那一线的对子 " + polishGroup.lined.size()
+                + " 对，" + spread(polished2, polished2.length));
+    }
+
 }
