@@ -352,6 +352,16 @@ public final class ApiWorkflow {
         box.addView(label(result.detectedAt + "  ·  用时 " + (result.elapsedMillis / 1000L) + " 秒", 11));
         for (String note : result.notes) box.addView(label("提示：" + note, 11));
         downloadables(box, result);
+        /* 降重这一格只在真的判出重复之后出现。名字里写清它和在线降重的区别：改完要拿同一把尺子
+           再量一次整篇，整篇命中字数没变小就退回原文——"改写过了"不等于"降下来了"。 */
+        if (scanShowsDuplicates && !result.hits.isEmpty()) {
+            TextView fix = label("降重并复核：只改判为重复的段落，改完用同一把尺子再量整篇（"
+                    + result.hits.size() + " 处命中）", 14);
+            fix.setTypeface(Typeface.DEFAULT_BOLD);
+            fix.setPadding(0, dp(10), 0, dp(10));
+            fix.setOnClickListener(view -> rewriteVerified());
+            box.addView(fix);
+        }
         if (scanShowsDuplicates) for (final TextCorpus.Hit hit : result.hits) {
             TextView snippet = label(snippetText(hit), 14);
             snippet.setPadding(0, dp(10), 0, dp(10)); snippet.setTextIsSelectable(true);
@@ -865,6 +875,90 @@ public final class ApiWorkflow {
         }, "wordlite-rewrite-local"); worker.start();
     }
     /** Worker-thread progress line; dropped once the dialog is gone. */
+    /**
+     * 查重结果页上的"降重并复核"。判据、采纳口径、回退规则全在 RewriteLoop 里（那一份与查重
+     * 用的是同一个 TextCorpus.match），这一层只管线程、进度、取消和回写：手机上一轮整篇验证
+     * 是唯一贵的动作，所以预算按命中处数给，取消按钮随时能停。
+     */
+    private void rewriteVerified() {
+        host.sync();
+        final TextSelection selection = lastScanned;
+        final DuplicateEngine.Report scan = lastScan;
+        if (selection == null || scan == null || scan.hits.isEmpty()) {
+            toast("先做一次查重，才知道哪几段判为重复"); return;
+        }
+        if (!selection.unchanged(host.document())) { toast("文档已经改过，重新查重之后再降重"); return; }
+        final ArrayList<String> terms = new ArrayList<String>();
+        try { terms.addAll(settings.load(ApiConfig.Service.REWRITE).terms); } catch (Exception ignored) { }
+        final RewriteLoop.Limits limits = new RewriteLoop.Limits();
+        limits.regions = Math.max(limits.regions, scan.hits.size());
+        limits.verifications = 12 * Math.max(1, scan.hits.size());
+        preRewriteText = snapshotText();
+        final ApiClient.Task task = begin("降重并复核");
+        worker = new Thread(() -> {
+            final RewriteLoop.Result out;
+            try {
+                TextCorpus corpus = new TextCorpus();
+                library.index(corpus);
+                out = RewriteLoop.run(selection.text, corpus, terms, limits, new RewriteLoop.Listener() {
+                    public void onProgress(String stage, int done, int total) {
+                        progress(total > 0 ? stage + " " + done + "/" + total : stage);
+                    }
+                    public boolean cancelled() { return task.cancelled(); }
+                });
+            } catch (Exception error) { fail(task, error); return; }
+            /* 取消不是回滚：已经采纳的每一条都让整篇命中字数变小过，所以取消那一轮照样要落盘。
+               complete() 在取消时不跑回调，这里自己回主线程。 */
+            activity.runOnUiThread(() -> {
+                if (job != task) return;
+                job = null; worker = null; host.busy(false); jobLabel = null;
+                if (progressDialog != null) { progressDialog.dismiss(); progressDialog = null; }
+                if (alive()) applyRewriteLoop(selection, out);
+            });
+        }, "wordlite-rewrite-loop"); worker.start();
+    }
+
+    /** 闭环回来的落法：从最后一条往前替换，段落号是 RewriteLoop.edits 自己校验过的。 */
+    private void applyRewriteLoop(TextSelection selection, RewriteLoop.Result result) {
+        ArrayList<RewriteLoop.Edit> edits;
+        try {
+            edits = RewriteLoop.edits(selection, result, selection.text);
+            for (int i = edits.size() - 1; i >= 0; i--) {
+                RewriteLoop.Edit edit = edits.get(i);
+                DocxDocument.ParagraphBlock paragraph = TextSelection.find(host.document(), edit.paragraphIndex);
+                host.beforeRewrite(edit.paragraphIndex);
+                TextRewriter.replace(host.document(), paragraph, edit.start, edit.end, edit.replacement);
+            }
+            if (!edits.isEmpty()) host.changed();
+        } catch (IllegalArgumentException error) { toast(error.getMessage()); return; }
+        showRewriteLoopResult(selection, result, edits.size());
+    }
+
+    private void showRewriteLoopResult(TextSelection selection, RewriteLoop.Result result, int applied) {
+        LinearLayout box = column(); box.setPadding(dp(16), dp(8), dp(16), dp(8));
+        box.addView(label(result.verdict, 15));
+        if (result.measured)
+            box.addView(label(String.format(Locale.CHINA, "重复率 %.2f%% → %.2f%%  ·  重复 %d/%d 字  ·  改写 %d 处",
+                    result.rateBefore, result.rateAfter, result.dupAfter, result.comparedChars, applied), 13));
+        else box.addView(label(result.reason, 13));
+        box.addView(label(String.format(Locale.CHINA, "命中区 %d 处压下去 %d 处  ·  整篇验证 %d 次  ·  退回候选 %d 个",
+                result.regions, result.regionsImproved, result.verified, result.rejected), 12));
+        int shown = 0;
+        for (RewriteLoop.Segment segment : RewriteLoop.details(result)) {
+            if (segment.cleared || segment.dupAfter <= 0) continue;
+            if (shown++ == 0) box.addView(label("改了但单独比对仍判为重复的段落：", 13));
+            if (shown > 8) { box.addView(label("其余从略。", 11)); break; }
+            box.addView(label(String.format(Locale.CHINA, "仍命中 %d 字（最高 %.3f）：%s",
+                    segment.dupAfter, segment.scoreAfter,
+                    safeSlice(selection.text, segment.start, segment.end)), 12));
+        }
+        ScrollView scroll = new ScrollView(activity); scroll.addView(box);
+        AlertDialog.Builder dialog = new AlertDialog.Builder(activity).setTitle("降重结果")
+                .setView(scroll).setNegativeButton("关闭", null);
+        if (result.budgetHit) dialog.setPositiveButton("再跑一轮", (d, which) -> rewriteVerified());
+        dialog.show();
+    }
+
     private void progress(final String value) {
         activity.runOnUiThread(() -> { if (jobLabel != null && alive()) jobLabel.setText(value); });
     }

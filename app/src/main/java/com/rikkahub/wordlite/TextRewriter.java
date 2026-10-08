@@ -34,9 +34,25 @@ public final class TextRewriter {
                              TextProtection.Mask mask, String suggestion) {
         if (start < 0 || start + mask.original.length() > paragraph.text.length()
                 || !paragraph.text.substring(start, start + mask.original.length()).equals(mask.original)) throw new IllegalArgumentException("原文已更改");
-        ArrayList<Edit> edits = plan(mask, suggestion);
+        write(document, paragraph, start, plan(mask, suggestion));
+    }
+
+    /**
+     * 把一段里的 [start,end) 换成 replacement。与掩码那条路同一套 run 拆分与修订记录，
+     * 给改写闭环回写用：那边算出来的是整段替换，没有掩码可递。
+     */
+    public static void replace(DocxDocument document, DocxDocument.ParagraphBlock paragraph,
+                               int start, int end, String replacement) {
+        if (start < 0 || start > end || end > paragraph.text.length()) throw new IllegalArgumentException("原文已更改");
+        ArrayList<Edit> forced = new ArrayList<Edit>();
+        forced.add(new Edit(start, end, replacement == null ? "" : replacement));
+        write(document, paragraph, 0, forced);
+    }
+
+    private static void write(DocxDocument document, DocxDocument.ParagraphBlock paragraph,
+                             int base, ArrayList<Edit> edits) {
         for (int i = edits.size() - 1; i >= 0; i--) {
-            Edit edit = edits.get(i); int lo = start + edit.start, hi = start + edit.end;
+            Edit edit = edits.get(i); int lo = base + edit.start, hi = base + edit.end;
             ArrayList<DocxDocument.Run> before = ReviewManager.runs(paragraph, 0, lo), after = ReviewManager.runs(paragraph, hi, paragraph.text.length());
             DocxDocument.RunStyle style = style(paragraph, lo);
             ReviewManager.recordEdit(document, paragraph, lo, hi - lo, edit.replacement);

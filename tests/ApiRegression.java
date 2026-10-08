@@ -109,6 +109,20 @@ public final class ApiRegression {
             if (r.kind == DocxDocument.Revision.Kind.INSERT) ReviewManager.decide(document, r, false);
         for (DocxDocument.Revision r : new ArrayList<DocxDocument.Revision>(document.revisions)) ReviewManager.decide(document, r, false);
         check(p.text.equals(before), "reject rewriting revisions restores original text");
+        /* 改写闭环走的是整段替换这条路（它交回来的是整段新文本，没有掩码可递）。这条路必须与
+           掩码那条路共用同一套 run 拆分与修订记录：引文角标、字号、可回退三件事一件都不能少。 */
+        String spanBefore = p.text;
+        int from = p.text.indexOf("在"), to = p.text.indexOf("取得成果");
+        TextRewriter.replace(document, p, from, to, "于");
+        check(p.text.equals(spanBefore.substring(0, from) + "于" + spanBefore.substring(to)),
+                "整段替换只改那一段文字：" + p.text);
+        boolean stillSuperscript = false;
+        for (DocxDocument.Run run : p.runs) if (run.text.contains("[2]")) stillSuperscript = run.style.superscript;
+        check(stillSuperscript && p.runs.get(0).style.fontSizeHalfPoints == 24,
+                "整段替换保住引文角标与字号");
+        boolean outOfRange = false;
+        try { TextRewriter.replace(document, p, 5, 2, "越界"); } catch (IllegalArgumentException error) { outOfRange = true; }
+        check(outOfRange, "越界的替换必须拒绝，不许悄悄把文本改坏");
         ApiClient.Response response = new ApiClient.Response(); response.body = "{\"data\":{\"rate\":\"10%\",\"fragments\":[{\"text\":\"😀μ\",\"start\":1,\"end\":3}]}}";
         ApiResult.Check unicode = ApiResult.check(config, response, "A😀μB");
         check(unicode.fragments.get(0).start == 1 && unicode.fragments.get(0).end == 4, "Unicode codepoint offsets map to UTF-16 document anchors");
