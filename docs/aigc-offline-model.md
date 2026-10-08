@@ -1,10 +1,17 @@
 # 离线 AIGC 模型（字符 n-gram + 逻辑回归）：三档留出、新语料、为什么界面上还是不印百分比
 
-日期 2026-10-09（本轮：换/补同域语料重训）。上一版同日（第一轮：从 0 到 1 训出模型）。
+日期 2026-10-09（第二轮补料：按第 8 节那张单子找到并接进三路现代模型语料，重训三个配置，真稿那一档还是没过）。同日第一轮：换/补同域语料重训；更早一版：从 0 到 1 训出模型。
 训练台 `tools/build-aigc-model.py`，权重与字频表在 `app/src/main/assets/aigc/`，打分器
 `AigcNgramModel.java`，测试 `tests/AigcOfflineModelRegression.java`（48 条断言，已进 `tools/test-host.ps1`）。
 
 ## 0. 一句话
+
+第二轮补料（本轮）：按第 8 节那张单子又找到并接进**三路机器侧是 2024-2025 模型的中文语料**
+（MAGA-Bench 中文基线档 + 风格改写档、DetectRL-X 中文四台现代模型），其中学术域两档
+——中文核心期刊论文摘要（真人原文 vs 现代模型整篇写）与中文期刊正文（真人原文 vs 现代模型改写）。
+新语料在自己那一档上好分得很：**同域 AUC 0.9488 / 0.9333**，可**真稿独立留出那一档 0.4519 ~ 0.5006**，
+出厂门槛（AUC ≥ 0.85 且真人误报 ≤ 2 句/千句）一条都没过，界面继续一个 AIGC 百分比都不印。
+候选清单、许可、逐配置三档数与第二把外部的尺子（RealDet 928,978 句 → 0.6639）都在第 8b 节。
 
 任务书点名的两路同域语料：SemEval-2024 Task 8 中文子任务**取回来了并且进了训练**；
 TUPE **按给的 arXiv 号取不到**（第 3 节逐条附 HTTP 状态；今天顺着这批论文里出现的另一个名字
@@ -49,7 +56,7 @@ TUPE **按给的 arXiv 号取不到**（第 3 节逐条附 HTTP 状态；今天�
 同样口径换成这一版出厂这份是 0.8091（第 4 节第 3 条：剔掉与公共留出逐字相同的训练句之后掉的那些）。
 这一版起 ① ② ③ 永远并排列，谁也不许代替谁。
 
-## 2. 语料（本轮新增两路，许可与可分性）
+## 2. 语料（两轮分别新增两路 / 三路，许可与可分性）
 
 只允许放派生统计量：仓库里进的是权重表、字频表与这份清单，**一个字原文都不进**；
 原文留在仓库外的同级目录 `../aigc-corpus/`。
@@ -62,6 +69,16 @@ TUPE **按给的 arXiv 号取不到**（第 3 节逐条附 HTTP 状态；今天�
 | **setask8zh（新）** | `anyangsong/SemEval2024-Task8-SubtaskA` 的 `chinese/subtaskA_train_chinese.jsonl`（22.1 MB，HTTP 200） | 镜像卡声明 MIT（上游许可核对不了，见第 3 节） | web-ugc（网络社区口语：11,934 篇 = 真人 6,000 / chatGPT 2,970 / davinci 2,964） | 67,459 / 36,389 |
 | **anxzh（新）** | `AnxForever/chinese-ai-detection-dataset` 的 `train.csv`（87.3 MB，HTTP 200） | MIT | news（THUCNews 真人新闻 + 同一批的 AI 润色稿 C4）/ essay（`parallel_*`、`auto_*`、C3 改写）/ misc-human | 170,228 / 480,251（news 159,151 / 37,857，essay 仅机器 442,394，misc-human 11,077 / —） |
 | ateeqq | `Ateeqq/AI-and-Human-Generated-Text` | MIT | 英文，本轮中文模型不用 | — |
+| **magazh（本轮新）** | `anyangsong/MAGA-cn` 的 `train/MGB-cn_train.jsonl`（348 MB，HTTP 200） | MIT（数据集卡声明；内嵌的人类源文本上游另有约束，见第 3 节） | 10 个中文域：`academic-maga`（CSL＝中文核心期刊论文摘要）+ `maga-feature`（CLTS 新闻特稿）/ `maga-baike` / `maga-zhihu` / `maga-tieba` / `maga-zhidao` / `maga-douban` / `maga-dianping` / `maga-rednote` / `maga-weibo` | 792,692 / 500,549（academic-maga 那一档 20,610 / 48,589） |
+| **magaaug（本轮新）** | 同一仓库的 `train/MAGA-cn_train.jsonl`（400 MB，HTTP 200） | MIT（同上） | 同一套 10 个域；差别是生成时挂一个与任务无关的人格/文风 system prompt＝公开中文语料里唯一一档现代模型强风格改写 | 792,692 / 689,645 |
+| **drlxzh（本轮新）** | `WUJUNCHAO/DetectRL-X` 的 `Binary/binary_general_open.json`（878 MB，HTTP 200；取回后只留 `lang=chinese` 的 15,600 行另存 jsonl） | MIT | 六个域：`drlx-academic`（中文期刊/鉴定文书正文）+ `drlx-news` / `drlx-novel` / `drlx-seo` / `drlx-webtext` / `drlx-wiki` | 366,646 / 343,030（drlx-academic 那一档 70,180 / 74,835） |
+
+这三路只进了本轮新加的 N / O / P 三个配置，**出厂那一份 B-prhpp-only 一个字都没用到它们**
+（选择规则这一轮仍选 B，见第 8b 节；本轮起随包清单的 `trained_on` 也只写这份配置真正读到的来源）。
+机器侧模型清单：magazh / magaaug 是 DeepSeek-V3、DeepSeek-R1-0528-Qwen3-8B、Qwen3-plus、Qwen3-8B、
+Hunyuan-7B-Instruct、Hunyuan-TurboS、GPT-4o-mini、Gemini-2.0-flash、Llama-3.1-8B-Instruct、gemma-3-12b-it、
+Ministral-8B-Instruct-2410、Mistral-Medium；drlxzh 是 DeepSeek-V3、Gemini-2.5-Flash、GPT-4o、Qwen-Max。
+**没有一台是 gpt-3.5 / davinci**——这正是第 6b 节末尾那句"语料的机器侧停在两年前，能力就停在两年前"要补的东西。
 
 全量合计 **1,030,116 个计分句**（真人 355,111 / 机器 675,005），去掉逐字重复后 966,708 句。
 
@@ -91,6 +108,15 @@ HTTP 200）——`chinese_train.jsonl` 前 4,000 行的 `source` 只有 `hc3`(3,
 | 顺着名字再挖一遍（怀疑任务书把数据集名写错了：这批 SemEval-2024 Task 8 的分析论文里出现的名字是 **TUPA / "Text Under Pinch"**） | 还是取不到。`export.arxiv.org/api/query?...ti:"TUPA"` → HTTP 200，5 条命中全是航空/离子阱/宇宙线，没有一条是 NLP 数据集；`all:"Text Under Pinch"` → HTTP 200、`totalResults=0`；`all:"TUPA" AND all:"machine-generated text"` → HTTP 200、0 条；`arxiv.org/search/?query=TUPA+adversarial+machine-generated` → HTTP 200、页面写 "produced no results"（同一个页面查 `SemEval-2024 Task 8 multilingual dataset creation` 也说 produced no results，而那篇是 arXiv 2402.11169，所以这个检索页本身不可信，以上面的 API 为准）；`huggingface.co/api/datasets?author=TNO-UnitNLP` → HTTP 200、`[]`；`api/datasets/TNO-UnitNLP/TUPA` → **HTTP 401**；HuggingFace 全文检索 `TUPA text under pinch` → HTTP 200、唯一命中是《切韵拼音（TUPA）》音韵数据集；`html.duckduckgo.com/html/?q="Text+Under+Pinch"+adversarial+dataset+LLM-generated+detection+huggingface` → HTTP 200、页面写 "No results found"；Semantic Scholar → **HTTP 429** |
 | 顺手查的两个候选：`SNEAKO`、`MGT-detection` | HuggingFace `api/datasets?search=SNEAKO` → HTTP 200、`[]`；`api/datasets?search=MGT-detection` → HTTP 200、只命中下一行那个镜像 |
 | **COLING-2025 MGT-Detection Task 1 中文**（镜像 `anyangsong/COLING2025-MGT-Detection-Task1`，官方 test 带标签 178,161,905 字节，HTTP 200 已取回） | 不进训练，两条理由：① 镜像卡自称 Unofficial Mirror，上游 `github.com/mbzuai-nlp/COLING-2025-Workshop-on-MGT-Detection-Task1` 从本机一律 **HTTP 451 / 404**，许可核对不了；② `chinese_train.jsonl`（39,577,183 字节）与 `chinese_dev.jsonl`（16,614,725 字节，14,772 行）的 `source` 字段只有 `hc3`（11,324）与 `m4gt`（3,448），就是 HC3 + SemEval-2024 Task 8 的重新打包，进训练等于同一条句子数两遍。**但官方 test 那份是另一批料**（`source` = MNBVC-Gov-Report / CUDRT / Zhihu-qa / high-school-student-essay / 325_gaokao_titles / human_student_essays，机器侧 model = GPT-4o / GPT-4o-mini / claude-3-5-sonnet / glm-4-9b-chat / Baichuan2-13B-Chat / ChatGLM3-6B），所以只拿来当外部对照量一次（第 6b 节），一个字不进训练 |
+
+本轮补料时另外查过的（都写进随包清单的 `not_used`）：
+
+| 目标 | 结果 |
+| --- | --- |
+| **任务书点名的 ModelScope `FlagEvaldet` 系列中文 AIGC 检测数据集** | **查不到这个库**。ModelScope 的检索接口从本机可用，但对这个名字一律空：`GET /api/v1/datasets?Owner=FlagEvaldet` → HTTP 200 且 `Data=[]`（同一个 `Owner` 参数对 `simpleai` 返回 2 条 HC3，所以参数与网络都没问题）；`Owner=FlagEval` 同样 0 条；`Query=FlagEvaldet` / `AIGC检测` / `中文AIGC` / `AI文本检测` 全部 0 条（`Query=HC3` 能返回 `simpleai/HC3-Chinese`，检索本身是好的）；`GET /api/v1/datasets/FlagEvaldet/<任意名>` → HTTP 404「不存在的数据集」；`/api/v1/organizations/FlagEvaldet` → HTTP 404；HuggingFace 侧 `api/datasets?author=FlagEvaldet` → 0 条、`author=FlagEval` 只有 CLCC_v1 / HalluDial / ERQA 这些视觉与认知库。GitHub 检索 `FlagEvaldet` → `total_count=0` |
+| ModelScope 上唯一对得上的两个同名库 | `hyx111111/CCKS2025`（卡片写「CCKS2025-大模型生成文本检测」，声明 Apache-2.0）与 `ssssyyyyadc/ccks2025`（Apache-2.0）：仓库树里只有 `.gitattributes` 与 `README.md` 两个文件，**一个数据文件都没有**，弃用 |
+| `koakuma/RealDet`（ACL 2025，中英双语，15 个域 22 台模型） | **许可不过：数据集卡 `cc-by-nc-4.0`，仅限非商业使用**，而这份模型随 APK 出厂，不做训练语料。内容也接不上产品域：中文侧每行只有 `text`/`label` 两个字段、没有域标签，抽出来是网络问答（游戏加点、汽车维修这类）；真人侧只有 10,545 行，机器侧 125,295 行（Claude-3 / DeepSeek / GPT-4o / 文心一言 / 通义千问 / 360GPT / 星火 / Baichuan / ChatGLM-2 / MOSS / BLOOMz）；README 里那个 Academic Writing 域是 Arxiv Abstracts，中文侧没有对应的学术正文。**只当第二把外部的尺子量了一次**（第 8b 节末尾），一个字不进训练 |
+| `QiYuan-tech/LLM-Detector`（仍是这几路里最贴产品域的） | 匿名仍是 **HTTP 401**（要登录接受条款）。取回步骤写死在随包清单的 `not_used` 里：登录该库页面点 Accept and access → 在 settings/tokens 建 read 权限 token → 带 `Authorization: Bearer $HF_TOKEN` 走 7897 代理 `resolve/main/train_set.json` 下到 `../aigc-corpus/`（或 `hf download QiYuan-tech/LLM-Detector --repo-type dataset`）→ 按本文件规矩只进派生统计量。这一步需要人工授权，本轮没有账号，没取 |
 
 网络口径：任务书说走 clash 的 7890。这台机器上 `http://127.0.0.1:7890` 是
 **连接被拒（由于目标计算机积极拒绝，无法连接）**，`http://127.0.0.1:7897` 返回
@@ -405,6 +431,95 @@ claude-3-5-sonnet 还有 0.7819、glm-4-9b-chat 0.7491，ChatGLM3-6B / Baichuan 
 它要登录接受条款才能取（本轮匿名请求仍是 **HTTP 401**）。要走这条路就得人工过一次授权，
 拿回来之后照本文件的规矩：只进派生统计量，许可与来源写进清单，留出真稿一个字不进训练。
 
+
+## 8b. 第二轮补料：现代模型 + 学术域找到了，接进来重训，真稿那一档 0.45~0.50
+
+按第 8 节那三条要求筛完，公开侧能拿到的是三路（许可、行数、模型清单、域分布见第 2 节的表，
+查过又放弃的见第 3 节）：**magazh / magaaug**（MAGA-Bench 中文，MIT 声明，13 台 2024-2025 模型）与
+**drlxzh**（DetectRL-X 中文，MIT，DeepSeek-V3 / Gemini-2.5-Flash / GPT-4o / Qwen-Max）。
+三条要求现在的状态：
+
+1. **真人侧学术正文：补上一半。** `drlx-academic` 的真人侧是中文期刊与法医学鉴定文书的正文（70,180 计分句，
+   多篇多位作者），这是公开中文语料里第一次有正文级的真人学术稿；`academic-maga`（CSL）仍然只是中文核心期刊的**摘要**，
+   和 `prhpp` 一样到不了 H1 那种 120~656 字的段落。
+2. **机器侧现代模型整篇生成：补上了。** 12 台 + 4 台，全部 2024-2025，没有 gpt-3.5 / davinci。
+   但生成方式是"按题目整篇写摘要"（MAGA）和"拿真人正文当材料改写/摘要"（DetectRL-X 的 Academic 档），
+   不是"给一个论文选题整篇写正文"。
+3. **规避风格档：补上一部分。** `magaaug` 是挂人格/文风 system prompt 的强风格改写档；
+   DetectRL-X 另有 11 种改写策略（回译、encoder/decoder/seq2seq 改写、压缩、扩写、字符增删、零宽字符……），
+   本轮只接了 `general` 那一路，改写那几路每路 0.7~1.2 GB，没下。
+
+接进之后新加三个配置（`tools/build-aigc-model.py` 的 `CONFIGS`），三档留出的数：
+
+| 配置 | 用什么料 | 计分句 | ① 公共留出 | ② 学术配对档 | 现代模型同域那一栏 | 规则那一栏 | ③ 真稿 AUC | ③ 真人误报/千句 | ③ 机器过线 | 跨域均值 / 最差 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| N-maga-academic | prhpp 全部 + MAGA 的学术档（摘要，两边同域） | 38,898 | 0.8940 | 0.7869 | **0.9488** | 0.7444 | **0.4519** | 35.26 | 1.08% | 0.7108 / 0.6700 |
+| O-modern-mix | 上面 + MAGA 全部 10 域 + DetectRL-X 全部 6 域（域内配平） | 398,340 | **0.9330** | 0.7521 | 0.9400 | 0.7055 | **0.5006** | 22.44 | 0.00% | 0.9011 / 0.7056 |
+| P-modern-evasive | 上面 + MAGA 风格改写档 + 跨域同号剪枝 0.75 | 414,257 | 0.8642 | 0.6798 | 0.8657 | 0.6205 | **0.4933** | 11.22 | 0.00% | 0.8418 / 0.6490 |
+| **B-prhpp-only（出厂这份，本轮没动）** | 只有学术摘要配对档 | 13,897 | 0.8091 | 0.8091 | 无 | **0.7756** | 0.5556 | 3.21 | 0.27% | 无 |
+
+表注一：三个新配置的每域上限是 **25,000 句**（`CAP_PER_DOMAIN_NEW`），不是老配置的 60,000。
+这台机器只有 16 GB（空载剩 5 GB），17 个域 × 60,000 句在字符 2-4-gram 的 CountVectorizer 上会撑爆内存；
+三个新配置之间这个上限一致，与 13 个老配置比句数时把这一条差异按实记在这儿。
+表注二：① ② ③ 与"现代模型同域那一栏"由 `py tools/build-aigc-model.py compare --configs N-maga-academic,O-modern-mix,P-modern-evasive`
+现取（`compare.json`）；规则那一栏、跨域与逐域明细由 `py tools/build-aigc-model.py train --configs B-prhpp-only,N-maga-academic,O-modern-mix,P-modern-evasive`
+现取（`train-summary.json`）。"现代模型同域那一栏"是本轮新加的诊断列 = `academic-maga` 那一档的公共留出 AUC
+（真人摘要 vs 2024-2025 模型整篇生成），只报数，不参与选择规则。
+
+四条读法：
+
+- **新语料在自己那一档好分得很，真稿上不买账。** `academic-maga` 同域 **0.9488**、`drlx-academic` 同域 **0.9333**，
+  跨域留出均值最高 0.9011（17 个域），这是这套字符 n-gram 在公开侧拿到过的最好一档；
+  同一份权重的 ③ 真稿却是 0.4519 / 0.5006 / 0.4933，三份都低于出厂那份的 0.5556。
+  第 5 节那句"公共侧任何留出手法量的都是公开域之间的距离"，换成现代模型 + 学术域之后一模一样。
+- **① 越高 ③ 不一定越好。** ① 刷到 0.9330（公开侧历史最高一档）的那份，真稿 0.5006。
+  本轮三个配置自己算 r(①,③) = +0.2148，n=3，什么也说明不了，别当结论用。
+- **真人误报这一栏全线不过。** 门槛是 2 句/千句，本轮三个配置是 35.26 / 22.44 / 11.22，
+  连最保守的 P（带跨域同号剪枝）也超五倍。域加得越多、公共侧越好分、真稿上把真人误伤得越狠，
+  与第 5 节"从 B 到 A"那条同向。
+- **选择规则没动，出厂那份没变。** 规则那一栏 B 0.7756 > N 0.7444 > O 0.7055 > P 0.6205，
+  `train` 仍选 **B-prhpp-only**；`gate` 重跑复核与上一版一字不差（真稿 0.5556、真人误报 3.21、
+  逐对 AUC 与第 6 节那张表逐格相同），所以 `assets/aigc/` 三个文件与随包清单本轮**一个字节都没改**，
+  `calibrated()` 仍是 false，界面继续不印百分比。新语料没进出厂那份，是规则没选它，不是没接上。
+
+第二把外部的尺子：`koakuma/RealDet` 中文那两份（CC-BY-NC-4.0，只做对照，一个字没进训练）。
+135,840 篇 → **928,978 个计分句**，与出厂这份训练集**逐字重合 0 句**，句长没有偏置
+（只看句长 AUC 0.4780，句长中位 真人 36 / 机器 35）：
+
+| 量在哪 | 计分句 | AUC | 真人误报/千句 | 机器过线 |
+| --- | --- | --- | --- | --- |
+| RealDet 中文全部（真人 9.2 万句 + 机器 83.7 万句） | 928,978 | **0.6639** | 22.31 | 4.24% |
+
+按生成模型拆开（真人侧共用同一批）：tongyiqianwen 0.7261、360GPT 0.7100、ChatGLM-2 0.7055、MOSS 0.7007、
+wenxinyiyan 0.6977、星火 0.6922、Baichuan 0.6873、GPT-4o 0.6600、BLOOMz 0.6542、DeepSeek 0.6250、
+**Claude-3 只有 0.5305**。与第 6b 节同一件事：换一台生成机器，分数就换一档（这里跨 0.1955），越新的模型越难判。
+这把尺子同样指着 0.62~0.66 那一带，离 0.85 差 0.19 以上。一处保留：RealDet 中文真人侧只有 10,545 篇
+（机器侧 125,295 篇），两边不成比例，那十一个 AUC 用的是同一个真人池。
+
+**还差的那一段，两轮筛完仍然在公开侧之外。** 要的是：真人学位论文/期刊**正文**（多位作者、段落级 120~656 字）
+与"同一个选题让现代模型整篇写"逐段配对的中文。本轮这两路都差一截：MAGA 的学术档是摘要 + 人格 prompt，
+DetectRL-X 的 Academic 档是"真人正文 → 模型改写/摘要"。它同域能到 0.9333 恰恰说明这种配对有改写痕迹可学，
+而真稿里最难那一档 M-DOMAIN 是整篇直出，一点痕迹都没有（它在公开语料里依然**没有对应档**，第 8 节第 2 条原样成立）。
+往下只剩两条路：① `QiYuan-tech/LLM-Detector` 那类要人工授权才能取的库（步骤在第 3 节与随包清单里）；
+② 自建：拿真稿那篇的同一批选题让现代模型整篇写正文当机器侧，真人侧另找多位作者的公开学位论文/期刊正文。
+第 ② 条有一条硬边界：不许拿 `tests/corpus/` 里那 995 句真稿当训练料，那是留出集；
+本轮复核过三路新语料与它**逐字相同 0 句**，用了这个数就废了。
+
+训练台这一轮改了五件事（都在 `tools/build-aigc-model.py`）：
+
+1. `CORPORA` 加 `magazh` / `magaaug` / `drlxzh` 三路，`rows_of` 认它们的字段
+   （MAGA：`model=="human"` 判真人、`domain` 查 `MAGA_DOMAINS` 落域、组号用 `human_source_id`
+   且两份文件共用一个前缀，同一条人类原文与它的机器版本一定落在同一折；
+   DetectRL-X：一行里同时有 `human_written_text` 与 `llm_generated_text`，一行拆成一对）。
+2. `fetch` 支持"下载的文件名与训练读的文件名不是一回事"（`raw_file`），并自动把 DetectRL-X 那个
+   878 MB 的 JSON 数组流式扫一遍，只留 `lang=chinese` 的 15,600 行另存 jsonl（`ensure_drlx_zh`）。
+   原文与抽取件都留在 `../aigc-corpus/`，仓库里只有派生统计量。
+3. `CONFIGS` 加 N / O / P 三个配置 + 新的每域上限 `CAP_PER_DOMAIN_NEW = 25000`（内存只有 16 GB，见 8b 表注一）。
+4. `compare` 也吃 `--configs` 了：17 个配置全跑一遍要十几分钟，指哪几个跑哪几个。
+5. 随包清单的 `trained_on` 改成只写这份配置**真正读到**的来源（以前把 `CORPORA` 里所有中文源一律列上去，
+   选了 B 也照抄全套，等于清单在说谎）；`external` 那一步认第二种标法（RealDet 的 `label` 是模型名字而不是 0/1），
+   `--file` 支持逗号分隔的多个文件。
+
 ## 9. 怎么复现
 
 ```
@@ -414,11 +529,19 @@ py tools/build-aigc-model.py fetch
 # 2) 13 个配置全跑：公共/学术/跨域三档 + 逐域明细，落 artifacts/agent-aigc-offline/train-summary.json
 py tools/build-aigc-model.py train
 #    单跑一个：py tools/build-aigc-model.py train --configs B-prhpp-only
+#    本轮新加的三个配置（现代模型中文语料，别和全量一起跑；三个约 12 分钟）：
+#    py tools/build-aigc-model.py train   --configs B-prhpp-only,N-maga-academic,O-modern-mix,P-modern-evasive
+#    py tools/build-aigc-model.py compare --configs N-maga-academic,O-modern-mix,P-modern-evasive
 # 3) 三档留出 + 滑窗落点 + 两条出厂门槛，落 gate.json（只有这一格能把 calibrated 打开：③ 真稿）
 py tools/build-aigc-model.py gate
 # 3b) 外部对照：第三方中文 test（只读不训）。先取回 178 MB：
 #     py -c "..." 见第 3 节那一行的 URL，存成 ../aigc-corpus/coling25_zh_test.jsonl
 py tools/build-aigc-model.py external
+#     第二把外部的尺子（RealDet 中文那两份，CC-BY-NC-4.0：只读不训；--file 可以逗号分隔给多个文件）：
+#     py tools/build-aigc-model.py external --file ../aigc-corpus/realdet_hwt_cn.jsonl,../aigc-corpus/realdet_mgt_cn.jsonl
+#     本轮三路新料的取回：MAGA-cn 的 train/MGB-cn_train.jsonl 与 train/MAGA-cn_train.jsonl，
+#     DetectRL-X 的 Binary/binary_general_open.json —— fetch 那一步会自动把里面 lang=chinese 的 15,600 行
+#     另存成 ../aigc-corpus/drlx_zh_general.jsonl，原文与抽取件都留在仓库外，不进仓库
 # 3c) 13 个配置的三档对照表 + "公共侧哪一栏预测得了真稿"的 r（约 10 分钟，落 compare.json）
 py tools/build-aigc-model.py compare
 # 4) 导出随包三件（只写派生统计量，不写原文）

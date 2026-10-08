@@ -67,6 +67,26 @@ CORPORA = [
          note="中文 AI 检测集（MIT）：THUCNews 真人新闻 7,971 + 同一批的 AI 润色稿 C4 1,949 + 现代模型整篇稿 "
               "parallel_* 7,804（gpt-4.1-mini / gpt-5(cursor) / gemini-2.5-flash / claude-haiku-4.5 / Kimi-K2 / deepseek-v3.2）"
               " + C3 改写 1,265 + auto_* 1,346 + Human 3,535；HC3 重复副本与 C2 人机混合稿不进训练"),
+    dict(code="magazh", kind="zh", license="MIT（数据集卡声明；卡里内嵌的人类源文本上游另有约束，见 not_used）",
+         ship_raw=False, anon=True,
+         url="https://huggingface.co/datasets/anyangsong/MAGA-cn/resolve/main/train/MGB-cn_train.jsonl",
+         file="mgb_cn_train.jsonl",
+         note="MAGA-Bench 中文基线档（arXiv:2601.04633，机器侧全部是 2024-2025 的模型）：10 个中文域 × 13 台模型整篇生成 "
+              "DeepSeek-V3 / DeepSeek-R1-0528-Qwen3-8B / Qwen3-plus / Qwen3-8B / Hunyuan-7B-Instruct / Hunyuan-TurboS / "
+              "GPT-4o-mini / Gemini-2.0-flash / Llama-3.1-8B-Instruct / gemma-3-12b-it / Ministral-8B / Mistral-Medium；"
+              "真人侧是同一批提示词的人类原文，CSL 那一档是中文核心期刊论文摘要原文，CLTS 那一档是中文新闻特稿"),
+    dict(code="magaaug", kind="zh", license="MIT（同上，数据集卡声明）", ship_raw=False, anon=True,
+         url="https://huggingface.co/datasets/anyangsong/MAGA-cn/resolve/main/train/MAGA-cn_train.jsonl",
+         file="maga_cn_train.jsonl",
+         note="MAGA-Bench 中文 alignment-augment 档：同一批提示词在生成时挂一个与任务无关的人格/文风 system prompt"
+              "（老舍、军人、侦探、八岁小孩……）。这是公开中文语料里唯一一档现代模型的强风格改写，"
+              "对应真稿留出里 M-EVADE 那种规避档；域与机器侧模型与 magazh 同一套"),
+    dict(code="drlxzh", kind="zh", license="MIT", ship_raw=False, anon=True,
+         url="https://huggingface.co/datasets/WUJUNCHAO/DetectRL-X/resolve/main/Binary/binary_general_open.json",
+         file="drlx_zh_general.jsonl", raw_file="drlx_general_open.json",
+         note="DetectRL-X（ACL 2026 shared task 侧公开集，MIT）中文子集：真人原文 vs DeepSeek-V3 / Gemini-2.5-Flash / "
+              "GPT-4o / Qwen-Max 整篇生成，四个域 academic / news / webtext / seo；上游是一个约 900 MB 的 JSON 数组，"
+              "取回后只把 lang=chinese 的行另存成 drlx_zh_general.jsonl（原文一样留在 ../aigc-corpus，不进仓库）"),
     dict(code="ateeqq", kind="en", license="MIT", ship_raw=False, anon=True,
          url="https://huggingface.co/datasets/Ateeqq/AI-and-Human-Generated-Text/resolve/main/train.csv",
          file="ateeqq_train.csv", note="英文论文摘要人写/AI 写。中文模型不用，留着给拉丁族"),
@@ -94,7 +114,34 @@ NOT_USED = [
      "而且它是别人比赛的考题。只当外部对照量一次（tools/build-aigc-model.py external）："
      "63,009 篇 → 1,222,872 计分句，与出厂这份训练集逐字重合 0 句，句级 AUC 0.6240，"
      "真人误报 36.68 句/千句——换一把外部的尺子同样印不出百分比"),
-    ("QiYuan-tech/LLM-Detector（中文，7 个国产模型 + GPT-4 与真人答案配对）", "要登录接受条款，匿名取回 401"),
+    ("QiYuan-tech/LLM-Detector（中文，7 个国产模型 + GPT-4 与真人答案配对，最贴产品域）",
+     "要登录接受条款：匿名请求 https://huggingface.co/api/datasets/QiYuan-tech/LLM-Detector 与 "
+     "resolve/main/train_set.json 都是 **HTTP 401**（上一轮同样 401，本轮复核仍是 401）。"
+     "取回步骤（需要人工过一次授权，本轮没有账号，故没取）：① 用本人 HuggingFace 账号登录 "
+     "huggingface.co/datasets/QiYuan-tech/LLM-Detector，点 \"Accept and access\" 接受该库的使用条款；"
+     "② 在 huggingface.co/settings/tokens 建一个有 read 权限的 access token；"
+     "③ 带着 token 取文件：curl -L -H \"Authorization: Bearer $HF_TOKEN\" "
+     "-x http://127.0.0.1:7897 -o ../aigc-corpus/qiyuan_train.json "
+     "\"https://huggingface.co/datasets/QiYuan-tech/LLM-Detector/resolve/main/train_set.json\""
+     "（或 pip install \"huggingface_hub[hf_transfer]\" 后 hf download QiYuan-tech/LLM-Detector --repo-type dataset "
+     "--local-dir ../aigc-corpus）；④ 按本文件的规矩接进训练：只进派生统计量，原文留在 ../aigc-corpus，"
+     "许可与来源写进随包清单，995 句真稿一个字不进训练"),
+    ("koakuma/RealDet（ACL 2025，中英双语，15 个域 22 台模型，已取回中文侧两份：真人 5.8 MB / 机器 102 MB）",
+     "许可不过：数据集卡写 cc-by-nc-4.0（仅限非商业使用），而这份模型是随 APK 出厂的，不做训练语料。"
+     "内容本身也接不上产品域：中文侧没有域字段（每行只有 text/label），抽出来是网络问答（游戏加点、汽车维修这类），"
+     "真人侧只有 10,545 行、机器侧 125,295 行（Claude-3 / DeepSeek / GPT-4o / 文心一言 / 通义千问 / 360GPT / Baichuan / ChatGLM-2 各一万上下）；"
+     "README 里那个 Academic Writing 域是 Arxiv Abstracts，中文侧没有对应的学术正文。"
+     "本轮只拿它当第二把外部的尺子量一次（py tools/build-aigc-model.py external --file ../aigc-corpus/realdet_*.jsonl 那两份合并），"
+     "一个字不进训练"),
+    ("任务书点名的 ModelScope FlagEvaldet 系列中文 AIGC 检测数据集",
+     "匿名查不到这个库：ModelScope 的组织/数据集接口从本机一律不通或不认——"
+     "GET https://www.modelscope.cn/api/v1/datasets?Owner=FlagEvaldet → HTTP 200 且 Data=[]（同一个 Owner 参数对 simpleai 返回 2 条，"
+     "所以参数与网络都没问题）；Owner=FlagEval 同样 0 条；Query=FlagEvaldet / AIGC检测 / 中文AIGC / AI文本检测 → 全部 0 条"
+     "（Query=HC3 能返回 simpleai/HC3-Chinese，说明检索本身可用）；GET api/v1/datasets/FlagEvaldet/<任意名> → HTTP 404 \"不存在的数据集\"；"
+     "organizations 接口 → HTTP 404；HuggingFace 侧 api/datasets?author=FlagEvaldet 与 author=FlagEval 也是 0 条"
+     "（author=FlagEval 只有 CLCC_v1 / HalluDial / ERQA 这些视觉与认知库，没有文本检测）。"
+     "顺手把 ModelScope 上能查到的两个同名 CCKS2025-大模型生成文本检测 库（hyx111111/CCKS2025、ssssyyyyadc/ccks2025，"
+     "声明 Apache-2.0）都打开看了：仓库树里只有 .gitattributes 与 README.md 两个文件，一个数据文件都没有，弃用"),
     ("liud169/ChatGPT-detector（Reddit 英文）", "同上，匿名 401"),
     ("krisfu/Chinese-Corpus-DetectGPT", "同上，匿名 401"),
     ("HaochenWang/TreeBench", "名字叫 TreeBench，内容实为 ScienceQA 图文题（TSV 里是 base64 图片），不是人写/机写语料"),
@@ -236,7 +283,7 @@ def stage_fetch(args):
     opener = urllib.request.build_opener(*handlers)
     print("代理：%s（清空 --proxy 即直连；本机直连不通，DNS 把 huggingface.co 污染到了别的地址）" % (proxy or "直连"))
     for spec in CORPORA:
-        dst = os.path.join(args.data, spec["file"])
+        dst = os.path.join(args.data, spec.get("raw_file") or spec["file"])
         if os.path.exists(dst) and os.path.getsize(dst) > 1024 and not args.redo:
             print("已有 %-24s %8.1f MB" % (spec["file"], os.path.getsize(dst) / 1e6)); continue
         req = urllib.request.Request(spec["url"], headers={"User-Agent": "wordlite-aigc/1.0"})
@@ -254,6 +301,7 @@ def stage_fetch(args):
             print("取回 %-24s %8.1f MB  匿名=是  许可=%s" % (spec["file"], got / 1e6, spec["license"]))
         except Exception as e:
             print("失败 %-24s %s" % (spec["file"], str(e)[:70]))
+    ensure_drlx_zh(args.data, redo=args.redo)
     print("\n试过但没用的：")
     for what, why in NOT_USED:
         print("   - %s：%s" % (what, why))
@@ -277,6 +325,41 @@ def as_list(v):
 
 ANX_DROP = ("C2",)             # 人写开头 + 机器续写：逐句归属分不清，整条丢
 
+# MAGA-Bench 中文十个域 → 本文件的域标签。CSL（中文核心期刊论文摘要）单独成一档并算进学术域，
+# 其余九档是网络问答/评论/百科/新闻特稿，只作诊断用，不许冒充产品域。
+MAGA_DOMAINS = {"CSL": "academic-maga", "CLTS": "maga-feature", "Baidu Baike": "maga-baike",
+                "Zhihu": "maga-zhihu", "Baidu Tieba": "maga-tieba", "Baidu Zhidao": "maga-zhidao",
+                "Douban Review": "maga-douban", "Dianping": "maga-dianping",
+                "Rednote Review": "maga-rednote", "Weibo Review": "maga-weibo"}
+MAGA_ACADEMIC = ("academic-maga",)
+
+
+def ensure_drlx_zh(data_dir, redo=False):
+    """DetectRL-X 上游是一个约 900 MB 的 JSON 数组（八种语言混在一起）。这里流式扫一遍，
+    只把 lang=chinese 的行另存成 jsonl 留在语料目录里，训练侧读那份小的；原文一个字不进仓库。"""
+    raw = os.path.join(data_dir, "drlx_general_open.json")
+    dst = os.path.join(data_dir, "drlx_zh_general.jsonl")
+    if os.path.exists(dst) and os.path.getsize(dst) > 1024 and not redo:
+        return dst
+    if not os.path.exists(raw):
+        return dst
+    dec = json.JSONDecoder()
+    txt = io.open(raw, encoding="utf-8", errors="ignore").read()
+    i, n, kept = txt.find("{"), 0, 0
+    with io.open(dst, "w", encoding="utf-8", newline="\n") as f:
+        while i >= 0:
+            try:
+                o, end = dec.raw_decode(txt, i)
+            except ValueError:
+                break
+            n += 1
+            if o.get("lang") == "chinese":
+                f.write(json.dumps(o, ensure_ascii=False) + "\n")
+                kept += 1
+            i = txt.find("{", end)
+    print("DetectRL-X：%d 行里留下 lang=chinese 的 %d 行 → %s" % (n, kept, os.path.basename(dst)))
+    return dst
+
 
 def domain_of(code, src):
     """公共侧的"域"：按文本群体划分，专门用来量域偏移（同域配对的分 vs 跨域迁移的分）。"""
@@ -290,6 +373,8 @@ def domain_of(code, src):
         return "web-ugc"
     if code == "anxzh":
         return src
+    if code in ("magazh", "magaaug", "drlxzh"):
+        return src
     return code
 
 
@@ -298,6 +383,7 @@ def rows_of(data_dir, norm, only=None):
     group_id 里带来源行号/标题：同一条样本的人写与机器版本落进同一组，防止改写对跨划分泄漏。"""
     out, stats, dropped = [], Counter(), Counter()
     import csv
+    ensure_drlx_zh(data_dir)                    # 有原始大数组但没抽过中文子集时先抽一次
     for spec in CORPORA:
         if spec["kind"] != "zh" or not os.path.exists(os.path.join(data_dir, spec["file"])):
             continue
@@ -348,6 +434,19 @@ def rows_of(data_dir, norm, only=None):
                     dom = "essay"
                 gid = "anxzh:%s:%d" % (cat or src, i)
                 pairs = [(row.get("text") or "", lab)]
+            elif code in ("magazh", "magaaug"):
+                mdl_v = str(row.get("model") or "")
+                lab = 0 if mdl_v == "human" else 1
+                d0 = str(row.get("domain") or "?").strip()
+                dom = MAGA_DOMAINS.get(d0, "maga-" + d0.lower().replace(" ", "-"))
+                # 同一条人类原文与它的各个机器版本必须落进同一组（两份文件共用一个前缀，防跨划分泄漏）
+                gid = "maga:%s" % (row.get("human_source_id") or row.get("id") or i)
+                pairs = [(row.get("text") or "", lab)]
+            elif code == "drlxzh":
+                dom = "drlx-" + str(row.get("domain") or "?").strip().lower()
+                gid = "drlxzh:%d" % i                      # 同一条指令的真人稿与机器稿在一行里，一起进同一组
+                pairs = [(row.get("human_written_text") or "", 0),
+                         (row.get("llm_generated_text") or "", 1)]
             else:
                 gid = "%s:%s" % (code, row.get("title") or i)
                 lab = int(row.get("label", 1)) if row.get("label") is not None else 1
@@ -404,6 +503,11 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
 CAP_PER_DOMAIN = 60000    # 每个域最多取多少计分句（按组哈希整组砍）：句数不许成为配置之间的差异
+# 本轮新加的那三个配置（N/O/P）用 25,000/域：机器只有 16 GB（空载剩 5 GB），
+# 17 个域 × 60,000 会在字符 2-4-gram 的 CountVectorizer 上撑爆内存。三个新配置之间这个上限一致，
+# 与 13 个老配置比句数时这一条差异写在 docs/aigc-offline-model.md 的表注里。
+CAP_PER_DOMAIN_NEW = 25000
+ACADEMIC_DOMAINS = ("academic-abstract",)   # ② 学术配对档看的域（挪到 CONFIGS 之前：配置要拿它拼 keep_domains）
 
 CONFIGS = [
     dict(name="A-all", only=None, ngram=(2, 4), min_df=20, C=1.0, cap=CAP_PER_DOMAIN),
@@ -428,10 +532,17 @@ CONFIGS = [
          min_share=0.9, cap=CAP_PER_DOMAIN),
     dict(name="M-academic-news", only=["prhpp", "prhpp_te", "prhppgen", "anxzh"],
          ngram=(2, 4), min_df=8, C=1.0, balance="domain", cap=CAP_PER_DOMAIN, keep_domains=("academic-abstract", "news")),
+    # 本轮新增：机器侧换到 2024-2025 的现代模型（MAGA-Bench 中文 + DetectRL-X 中文学术档），现代学术域单独成档
+    dict(name="N-maga-academic", only=["prhpp", "prhpp_te", "prhppgen", "magazh"],
+         ngram=(2, 4), min_df=8, C=1.0, cap=CAP_PER_DOMAIN_NEW, balance="domain",
+         keep_domains=ACADEMIC_DOMAINS + MAGA_ACADEMIC),
+    dict(name="O-modern-mix", only=["prhpp", "prhpp_te", "prhppgen", "magazh", "drlxzh"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN_NEW, balance="domain"),
+    dict(name="P-modern-evasive", only=["prhpp", "prhpp_te", "prhppgen", "magazh", "magaaug", "drlxzh"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN_NEW, balance="domain", prune="domain-sign"),
 ]
 CACHE = {}
 LODO_MIN_ROWS = 400          # 一个域要两边各 >= 400 句才进跨域考核
-ACADEMIC_DOMAINS = ("academic-abstract",)
 
 
 def fold_of(gid, folds=10):
@@ -630,6 +741,14 @@ def academic_proxy(res):
     return min(vals) if len(vals) == 2 else None
 
 
+def modern_academic_proxy(res):
+    """本轮新加的一栏：学术域里"真人原文 vs 2024-2025 现代模型整篇生成"的公共留出 AUC
+    （MAGA-Bench 的 CSL 档 = 中文核心期刊论文摘要）。量的是"机器侧换到现代模型上，同域还分不分得开"。
+    与 academic_proxy 一样只看公共侧，不参与选择规则。"""
+    v = res["per_domain"].get("academic-maga")
+    return v["auc"] if v else None
+
+
 def lodo_summary(res):
     vals = [v["auc"] for v in res["lodo"].values() if v["auc"] == v["auc"]]
     if not vals:
@@ -648,6 +767,7 @@ def stage_train(args):
             continue
         r = fit_config(args.data, norm, cfg, want_lodo=not args.no_lodo)
         r["proxy"] = academic_proxy(r)
+        r["modern_proxy"] = modern_academic_proxy(r)
         r["lodo_sum"] = lodo_summary(r)
         results.append(r)
     if not results:
@@ -667,11 +787,14 @@ def stage_train(args):
               (r["name"], r["auc_va"], ("%.4f" % r["proxy"]) if r["proxy"] else "  —  ",
                ls["mean"], ls["worst"], ls["n_domains"],
                "-" if r["share_kept"] is None else "%.2f" % float(np.mean(r["share_kept"]))))
+        print("      现代模型同域那一栏（学术域：真人摘要 vs 2024-2025 模型整篇生成）= %s" %
+              (("%.4f" % r["modern_proxy"]) if r.get("modern_proxy") is not None else "这批配置里没有 MAGA 的学术档"))
     print("\n选择规则=公共侧学术档配对留出最高（不看真稿留出）：选 %s（学术档 %.4f，公共留出 %.4f）" %
           (pick["name"], pick["proxy"], pick["auc_va"]))
     summary = [dict(name=r["name"], n=r["n"], n_dup_with_valid=r["n_dup"], vocab=r["vocab"],
                     features=len(r["cols"]), auc_fit=r["auc_tr"], auc_valid=r["auc_va"],
-                    academic_proxy=r["proxy"], per_source=r["per"], per_domain=r["per_domain"],
+                    academic_proxy=r["proxy"], modern_academic_proxy=r.get("modern_proxy"),
+                    per_source=r["per"], per_domain=r["per_domain"],
                     lodo=r["lodo"], lodo_summary=r["lodo_sum"],
                     share_kept=None if r["share_kept"] is None else dict(
                         features=int(len(r["share_kept"])),
@@ -759,7 +882,10 @@ def stage_compare(args):
     ho = holdout_rows(args.repo, norm)
     yh = np.array([r[1] for r in ho])
     out_rows = []
+    wanted = set(args.configs.split(",")) if getattr(args, "configs", "") else None
     for cfg in CONFIGS:
+        if wanted and cfg["name"] not in wanted:
+            continue
         r = fit_config(args.data, norm, cfg, want_lodo=False, verbose=False)
         vec, cols, m2 = r["vec"], r["cols"], r["model"]
         y, va, scores = r["y"], r["va"], r["scores"]
@@ -787,7 +913,8 @@ def stage_compare(args):
         p = sigmoid(m2.decision_function(vectors([q[4] for q in ho], vec, cols)) + bias)
         real = side(p, yh)
         out_rows.append(dict(name=cfg["name"], n=r["n"], features=len(cols),
-                             academic_proxy=academic_proxy(r), public=pub, academic=aca, holdout=real))
+                             academic_proxy=academic_proxy(r), public=pub, academic=aca, holdout=real,
+                             modern_academic_proxy=modern_academic_proxy(r)))
         print("[%s] 句 %-7d  ① 公共 %.4f / 误报 %.2f  ② 学术 %s / 误报 %s  ③ 真稿 %.4f / 误报 %.2f / 机器过线 %.2f%%" %
               (cfg["name"], r["n"], pub["auc"], pub["fp_per_mille"],
                ("%.4f" % aca["auc"]) if aca["auc"] is not None else "  —  ",
@@ -819,15 +946,19 @@ def stage_compare(args):
     pa, pb = col("public")
     aa, ab = col("academic")
     qa, qb = col("academic_proxy")
+    ma, mb = col("modern_academic_proxy")
     corr = dict(n_configs=len(out_rows),
                 public_auc=dict(r=pear(pa, pb), n=len(pa)),
                 academic_auc=dict(r=pear(aa, ab), n=len(aa)),
                 academic_proxy=dict(r=pear(qa, qb), n=len(qa)),
+                modern_academic_proxy=dict(r=pear(ma, mb), n=len(ma)),
                 note="对配置求相关（每行一个配置），不是对句子求相关；只描述，不参与选择")
     json.dump(dict(configs=out_rows, corr_with_holdout_auc=corr),
               io.open(os.path.join(ART, "compare.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-    print("公共侧哪一栏预测得了真稿（对 13 个配置求 Pearson r）：① 公共留出 %s  ② 学术配对档 %s  "
-          "选择规则那一栏 %s" % (corr["public_auc"]["r"], corr["academic_auc"]["r"], corr["academic_proxy"]["r"]))
+    print("公共侧哪一栏预测得了真稿（对表里 %d 个配置求 Pearson r）：① 公共留出 %s  ② 学术配对档 %s  "
+          "选择规则那一栏 %s  现代模型同域那一栏 %s" %
+          (corr["n_configs"], corr["public_auc"]["r"], corr["academic_auc"]["r"], corr["academic_proxy"]["r"],
+           corr["modern_academic_proxy"]["r"]))
     print("表与相关写 artifacts/agent-aigc-offline/compare.json")
     return dict(configs=out_rows, corr=corr)
 
@@ -836,16 +967,31 @@ EXTERNAL_URL = ("https://huggingface.co/datasets/anyangsong/COLING2025-MGT-Detec
                 "resolve/main/chinese/test_set_chinese_with_label.jsonl")
 
 
+def external_label(row):
+    """外部对照语料的两种标法：COLING 那份 label 是 0/1，RealDet 那份 label 是 Human 或生成模型的名字。"""
+    lab = row.get("label")
+    if isinstance(lab, int) or (isinstance(lab, str) and lab.strip().isdigit()):
+        lab = int(lab)
+        return lab, str(row.get("source") or "?"), str(row.get("model") or ("human" if lab == 0 else "?"))
+    tag = str(lab or "?").strip()
+    is_h = tag.lower() in ("human", "human_written", "hwt", "真人")
+    src_ = str(row.get("source") or "").strip() or "?"        # 没有 source 字段的由调用方按文件名补
+    return (0 if is_h else 1), src_, ("human" if is_h else tag)
+
+
 def stage_external(args):
-    """第三方中文留出对出厂那份模型再量一次：COLING-2025 MGT-Detection Task 1 官方 test 的中文那份。
-    这份一个字不进训练（许可核对不了 + 它是别人比赛的考题，见 NOT_USED），也不参与出厂门槛，
-    只回答一个问题：真稿独立留出上那 0.55 是不是我们自己那份留出集太窄/太怪。"""
+    """第三方中文留出对出厂那份模型再量一次：COLING-2025 MGT-Detection Task 1 官方 test 的中文那份，
+    或 koakuma/RealDet 的中文那两份（CC-BY-NC-4.0，只做对照不做训练，见 NOT_USED）。
+    这些一个字不进训练，也不参与出厂门槛，只回答一个问题：
+    真稿独立留出上那 0.55 是不是我们自己那份留出集太窄/太怪。--file 可以给逗号分隔的多个文件。"""
     import pickle
     path = args.file or os.path.join(DEFAULT_DATA, "coling25_zh_test.jsonl")
-    if not os.path.exists(path):
-        raise SystemExit("缺外部对照语料：%s\n"
-                         "  取法（178 MB，走代理）：curl -x http://127.0.0.1:7897 -o \"%s\" \\\n    %s\n"
-                         "  或下载后放别处再用 --file 指过来。" % (path, path, EXTERNAL_URL))
+    paths = [p.strip() for p in str(path).split(",") if p.strip()]
+    for p in paths:
+        if not os.path.exists(p):
+            raise SystemExit("缺外部对照语料：%s\n"
+                             "  取法（COLING 那份 178 MB，走代理）：curl -x http://127.0.0.1:7897 -o \"%s\" \\\n    %s\n"
+                             "  或下载后放别处再用 --file 指过来。" % (p, p, EXTERNAL_URL))
     norm = Normalizer(load_trad_table())
     with open(os.path.join(ART, "model-cache.pkl"), "rb") as f:
         cache = pickle.load(f)
@@ -853,15 +999,16 @@ def stage_external(args):
     bias = cache_bias(cache)
 
     rows, docs, dropped_long = [], 0, 0
-    for line in io.open(path, encoding="utf-8"):
+    for path in paths:
+      for line in io.open(path, encoding="utf-8"):
         line = line.strip()
         if not line.startswith("{"):
             continue
         r = json.loads(line)
         docs += 1
-        lab = int(r.get("label"))
-        src_ = str(r.get("source") or "?")
-        mdl = str(r.get("model") or ("human" if lab == 0 else "?"))
+        lab, src_, mdl = external_label(r)
+        if src_ == "?":
+            src_ = os.path.splitext(os.path.basename(path))[0]
         for s in split_sentences(str(r.get("text") or "")):
             c = norm.compact(s)
             if len(c) < MIN_SENT:
@@ -870,6 +1017,7 @@ def stage_external(args):
                 dropped_long += 1
                 continue
             rows.append((src_, mdl, lab, c))
+    path = "+".join(os.path.basename(p) for p in paths)
     if not rows:
         raise SystemExit("外部对照语料读不出计分句：%s" % path)
     ps = []
@@ -904,7 +1052,7 @@ def stage_external(args):
             per_model[s] = side(pool)
     train_compacts = set(r[4] for r in cache["rows"])
     dup_train = sum(1 for q in rows if q[3] in train_compacts)
-    out = dict(model=cache.get("name"), file=os.path.basename(path), url=EXTERNAL_URL,
+    out = dict(model=cache.get("name"), file=path, url=EXTERNAL_URL if len(paths) == 1 else "多个文件（见 file 字段）",
                docs=docs, sentences=int(len(rows)), dropped_too_long=dropped_long,
                verbatim_overlap_with_this_model_s_training=dup_train,
                overall=side(all_sel),
@@ -1198,6 +1346,8 @@ def stage_export(args):
     with open(os.path.join(ART, "freq-cache.pkl"), "rb") as f:
         freq = pickle.load(f)
     vec, cols, model = cache["vec"], cache["cols"], cache["model"]
+    only = cache["cfg"].get("only")
+    uses = (lambda code: True) if only is None else (lambda code: code in only)
     inv = {v: k for k, v in vec.vocabulary_.items()}
     w = model.coef_[0]
     os.makedirs(ASSETS, exist_ok=True)
@@ -1244,7 +1394,8 @@ def stage_export(args):
         ("created", "2026-10-09"),
         ("what", "字符 2/3/4-gram + 词表 + 逻辑回归（CPU 训练，手机侧纯手写打分，无 ONNX、无新依赖）；"
                  "另附字级 1/2/3-gram 频率表做滑窗困惑度代理"),
-        ("trained_on", "；".join("%s（%s，%s）" % (s["code"], s["license"], s["note"]) for s in CORPORA if s["kind"] == "zh")),
+        ("trained_on", "；".join("%s（%s，%s）" % (s["code"], s["license"], s["note"])
+                                 for s in CORPORA if s["kind"] == "zh" and uses(s["code"]))),
         ("not_used", "；".join("%s：%s" % (w, why) for w, why in NOT_USED)),
         ("split", "按来源行/标题分组随机十等分，第 0 份留出；同一条样本的人写与机器版本落进同一组；另把与公共留出逐字相同的训练句从拟合侧剔掉（跨语料重复，见 counts 行）"),
         ("independent_holdout", "仓库内人工标注真稿：真人 H1 学位论文正文 + H2 已发表摘要逐字摘录 + H3 知网片段 + "
