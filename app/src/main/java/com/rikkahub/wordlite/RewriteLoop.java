@@ -609,4 +609,44 @@ public final class RewriteLoop {
     public static List<Segment> details(Result out) {
         return out == null ? Collections.<Segment>emptyList() : Collections.unmodifiableList(out.details);
     }
+
+    /** 界面上"这一段改对了没有，要不要采纳"的一行。段落号是能回写文档的那个号。 */
+    public static final class Review {
+        public int paragraphIndex;
+        /** 这段单独对着语料的命中字数，改前/改后（照抄 details，界面不再自己算第二遍）。 */
+        public int dupBefore, dupAfter;
+        public boolean cleared;
+        public String original = "", adopted = "";
+    }
+
+    /**
+     * 把一轮闭环摊成界面能直接渲染的逐段清单。顺序与 edits() 完全相同（同一套切分、同一套跳过条件），
+     * 所以界面勾掉一行就等于少落 edits() 里对应的那一条。命中字数从 details 按段落取。
+     */
+    public static ArrayList<Review> review(TextSelection selection, Result out, String original) {
+        ArrayList<Review> rows = new ArrayList<Review>();
+        if (selection == null || out == null || original == null || out.text.equals(original)) return rows;
+        ArrayList<int[]> before = paragraphs(original), after = paragraphs(out.text);
+        if (before.size() != after.size()) return rows;
+        for (int i = 0; i < before.size(); i++) {
+            String oldText = original.substring(before.get(i)[0], before.get(i)[1]);
+            String newText = out.text.substring(after.get(i)[0], after.get(i)[1]);
+            if (oldText.equals(newText)) continue;
+            ArrayList<TextSelection.Range> ranges = selection.ranges(before.get(i)[0], before.get(i)[1]);
+            if (ranges.size() != 1) continue;
+            Review row = new Review();
+            row.paragraphIndex = ranges.get(0).paragraphIndex;
+            row.original = oldText;
+            row.adopted = newText;
+            for (int d = 0; d < out.details.size(); d++) {
+                Segment segment = out.details.get(d);
+                if (segment.start >= before.get(i)[1] || segment.end <= before.get(i)[0]) continue;
+                row.dupBefore += segment.dupBefore;
+                row.dupAfter += segment.dupAfter;
+            }
+            row.cleared = row.dupAfter <= 0;
+            rows.add(row);
+        }
+        return rows;
+    }
 }

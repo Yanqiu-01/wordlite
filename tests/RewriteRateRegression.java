@@ -302,6 +302,31 @@ public final class RewriteRateRegression {
         check(edits.size() == changed, "回写条数与被改的段落数对上（" + edits.size() + " = " + changed + "）");
         check(ordered, "回写按段落号递增，界面可以从后往前替换而不串位");
 
+        /* 逐段勾选那一屏（降重先给人看再落笔）：审的清单必须和回写的清单是同一条流水线出来的，
+           否则界面勾掉一行、文档里落的却是另一段。命中字数照抄 details，不许界面自己算第二遍。 */
+        ArrayList<RewriteLoop.Review> rows = RewriteLoop.review(TextSelection.all(document(targetFile)), r, before);
+        check(rows.size() == edits.size(), "可审的段数与回写条数一致（" + rows.size() + " = " + edits.size() + "）");
+        boolean sameOrder = rows.size() == edits.size();
+        int reviewedCleared = 0, reviewedHitsBefore = 0;
+        for (int i = 0; i < rows.size() && sameOrder; i++) {
+            sameOrder = rows.get(i).paragraphIndex == edits.get(i).paragraphIndex;
+            RewriteLoop.Review row = rows.get(i);
+            if (row.adopted.equals(row.original)) sameOrder = false;
+            if (row.cleared) reviewedCleared++;
+            reviewedHitsBefore += row.dupBefore;
+        }
+        check(sameOrder, "逐段清单的段落号与回写条目一字不差地对得上");
+        check(reviewedCleared == cleared, "清单里「已清」的段数与逐段读数一致（"
+                + reviewedCleared + " = " + cleared + "）");
+        check(reviewedHitsBefore > 0, "清单带着真实的改前命中字数（合计 " + reviewedHitsBefore + " 字）");
+        RewriteLoop.Result same = new RewriteLoop.Result();
+        same.text = before;
+        check(RewriteLoop.review(TextSelection.all(document(targetFile)), same, before).isEmpty(),
+                "一个字都没改就没有可审的段");
+        check(RewriteLoop.review(null, r, before).isEmpty() && RewriteLoop.review(
+                TextSelection.all(document(targetFile)), null, before).isEmpty(),
+                "缺参数就返回空清单，不许抛");
+
         // 反向一条：没有任何规则能让数字变小的时候，必须照实说没降，并且一个字都不回写。
         String stuck = "本文研究了工艺参数对接头质量的影响。";
         TextCorpus stuckCorpus = new TextCorpus();

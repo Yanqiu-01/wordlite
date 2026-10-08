@@ -944,8 +944,8 @@ public final class ApiWorkflow {
         final ApiClient.Task task = begin("降重并复核");
         worker = new Thread(() -> {
             final RewriteLoop.Result out;
+            final TextCorpus corpus = new TextCorpus();
             try {
-                TextCorpus corpus = new TextCorpus();
                 library.index(corpus);
                 out = RewriteLoop.run(selection.text, corpus, terms, limits, new RewriteLoop.Listener() {
                     public void onProgress(String stage, int done, int total) {
@@ -960,25 +960,115 @@ public final class ApiWorkflow {
                 if (job != task) return;
                 job = null; worker = null; host.busy(false); jobLabel = null;
                 if (progressDialog != null) { progressDialog.dismiss(); progressDialog = null; }
-                if (alive()) applyRewriteLoop(selection, out);
+                if (alive()) reviewRewrite(selection, out, corpus);
             });
         }, "wordlite-rewrite-loop"); worker.start();
     }
 
-    /** 闭环回来的落法：从最后一条往前替换，段落号是 RewriteLoop.edits 自己校验过的。 */
-    private void applyRewriteLoop(TextSelection selection, RewriteLoop.Result result) {
-        ArrayList<RewriteLoop.Edit> edits;
+    /** 落笔：从最后一条往前替换，段落号是 RewriteLoop.edits 自己校验过的。返回真写进去的条数。 */
+    private int applyEdits(ArrayList<RewriteLoop.Edit> edits) {
+        int applied = 0;
         try {
-            edits = RewriteLoop.edits(selection, result, selection.text);
             for (int i = edits.size() - 1; i >= 0; i--) {
                 RewriteLoop.Edit edit = edits.get(i);
                 DocxDocument.ParagraphBlock paragraph = TextSelection.find(host.document(), edit.paragraphIndex);
                 host.beforeRewrite(edit.paragraphIndex);
                 TextRewriter.replace(host.document(), paragraph, edit.start, edit.end, edit.replacement);
+                applied++;
             }
-            if (!edits.isEmpty()) host.changed();
-        } catch (IllegalArgumentException error) { toast(error.getMessage()); return; }
-        showRewriteLoopResult(selection, result, edits.size());
+        } catch (IllegalArgumentException error) { toast(error.getMessage()); return applied; }
+        if (applied > 0) host.changed();
+        return applied;
+    }
+
+    /**
+     * 闭环跑完先让人逐段过一遍再落笔。一段一行，写清这段单独对着语料改前改后各命中多少字，
+     * 勾了才写进文档：默认全勾（和以前一样），但任何人都能把某一段退回原文。
+     * 顺序与 RewriteLoop.edits() 相同，所以勾掉一行就等于少落对应那一条替换。
+     */
+    private void reviewRewrite(final TextSelection selection, final RewriteLoop.Result result,
+                               final TextCorpus corpus) {
+        final ArrayList<RewriteLoop.Edit> all;
+        try { all = RewriteLoop.edits(selection, result, selection.text); }
+        catch (IllegalArgumentException error) { toast(error.getMessage()); return; }
+        if (all.isEmpty()) { showRewriteLoopResult(selection, result, 0); return; }
+        final ArrayList<RewriteLoop.Review> rows = RewriteLoop.review(selection, result, selection.text);
+        final java.util.LinkedHashSet<Integer> kept = new java.util.LinkedHashSet<Integer>();
+        for (int i = 0; i < all.size(); i++) kept.add(Integer.valueOf(all.get(i).paragraphIndex));
+        LinearLayout box = column(); box.setPadding(dp(16), dp(8), dp(16), dp(8));
+        box.addView(label(result.verdict, 15));
+        box.addView(label(result.measured
+                ? String.format(Locale.CHINA, "闭环测得选区 %.2f%% → %.2f%%。下面 %d 段是它改过的，勾掉的段落保持原文不动。",
+                        Double.valueOf(result.rateBefore), Double.valueOf(result.rateAfter),
+                        Integer.valueOf(all.size()))
+                : result.reason, 13));
+        int shown = 0;
+        for (int i = 0; i < rows.size() && shown < 20; i++) {
+            final RewriteLoop.Review row = rows.get(i);
+            CheckBox mark = new CheckBox(activity);
+            mark.setChecked(true);
+            mark.setPadding(dp(4), dp(6), dp(4), dp(6));
+            mark.setText(String.format(Locale.CHINA, "第 %d 段 · 命中 %d → %d 字%s\n%s",
+                    Integer.valueOf(row.paragraphIndex), Integer.valueOf(row.dupBefore),
+                    Integer.valueOf(row.dupAfter), row.cleared ? "（已清）" : "",
+                    safeSlice(row.adopted, 0, 64)));
+            mark.setOnCheckedChangeListener((view, on) -> {
+                if (on) kept.add(Integer.valueOf(row.paragraphIndex));
+                else kept.remove(Integer.valueOf(row.paragraphIndex));
+            });
+            box.addView(mark);
+            shown++;
+        }
+        if (all.size() > shown) box.addView(label("其余 " + (all.size() - shown) + " 段没有列出来，默认一并采纳。", 12));
+        ScrollView scroll = new ScrollView(activity); scroll.addView(box);
+        final AlertDialog dialog = new AlertDialog.Builder(activity).setTitle("降重准备改的段落")
+                .setView(scroll).setPositiveButton("采纳", null)
+                .setNegativeButton("一段都不要", null).create();
+        dialog.show();
+        Button accept = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+        if (accept != null) accept.setText(String.format(Locale.CHINA, "采纳 %d 处", Integer.valueOf(all.size())));
+        if (accept != null) accept.setOnClickListener(view -> {
+            dialog.dismiss();
+            ArrayList<RewriteLoop.Edit> chosen = new ArrayList<RewriteLoop.Edit>();
+            for (int i = 0; i < all.size(); i++)
+                if (kept.contains(Integer.valueOf(all.get(i).paragraphIndex))) chosen.add(all.get(i));
+            if (chosen.isEmpty()) { toast("一段都没勾，文档没动"); return; }
+            final int applied = applyEdits(chosen);
+            if (applied == 0) return;
+            if (corpus == null || corpus.isEmpty() || preRewriteText.isEmpty()
+                    || applied < chosen.size()) { showRewriteLoopResult(selection, result, applied); return; }
+            measureRewriteEffect(result, applied, all.size(), corpus);
+        });
+    }
+
+    /** 采纳完之后拿同一份基线把全文前后各检一次，前后两个数由 DuplicateEngine.compareRewrite 一个人写。 */
+    private void measureRewriteEffect(final RewriteLoop.Result result, final int applied,
+                                      final int offered, final TextCorpus corpus) {
+        final String before = preRewriteText, after = snapshotText();
+        if (after.isEmpty()) { showRewriteLoopResult(lastScanned, result, applied); return; }
+        final ApiClient.Task task = begin("复核降重效果");
+        worker = new Thread(() -> {
+            final DuplicateEngine.RewriteDelta delta;
+            try { delta = DuplicateEngine.compareRewrite(before, after, corpus); }
+            catch (Exception error) { fail(task, error); return; }
+            complete(task, () -> showRewriteEffect(delta, applied, offered, result.budgetHit));
+        }, "wordlite-rewrite-measure"); worker.start();
+    }
+
+    private void showRewriteEffect(DuplicateEngine.RewriteDelta delta, int applied, int offered,
+                                   boolean budgetHit) {
+        LinearLayout box = column(); box.setPadding(dp(16), dp(8), dp(16), dp(8));
+        box.addView(label(delta.verdict, 15));
+        box.addView(label(String.format(Locale.CHINA, "全文 %.2f%% → %.2f%%  ·  重复 %d/%d 字",
+                Double.valueOf(delta.beforeRate), Double.valueOf(delta.afterRate),
+                Integer.valueOf(delta.afterDuplicate), Integer.valueOf(delta.afterCompared)), 13));
+        box.addView(label(String.format(Locale.CHINA, "采纳 %d/%d 处改动，没勾的段落保持原文。",
+                Integer.valueOf(applied), Integer.valueOf(offered)), 12));
+        ScrollView scroll = new ScrollView(activity); scroll.addView(box);
+        AlertDialog.Builder dialog = new AlertDialog.Builder(activity).setTitle("降重结果")
+                .setView(scroll).setNegativeButton("关闭", null);
+        if (budgetHit) dialog.setPositiveButton("再跑一轮", (d, which) -> rewriteVerified());
+        dialog.show();
     }
 
     private void showRewriteLoopResult(TextSelection selection, RewriteLoop.Result result, int applied) {
