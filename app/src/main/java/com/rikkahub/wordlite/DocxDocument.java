@@ -250,10 +250,16 @@ public final class DocxDocument {
         /** Right-aligned tab position in twips; -1 means no tab stop was declared. */
         public int rightTabTwips = -1;
         public String tabLeader = "";
-        /** Word autoSpaceDE / autoSpaceDN; absent means not enabled. */
-        public boolean autoSpaceDe;
+        /**
+         * OOXML autoSpaceDE / autoSpaceDN are on unless the file (or the style chain, or
+         * docDefaults) says otherwise: input-liu.docx declares them on in only 105 of its 373
+         * paragraphs, so reading "absent" as off loses the quarter-em gap Word puts between CJK
+         * and Latin/digits in the other 268. The *Set fields keep recording what the file
+         * actually declared, which is all DocxWriter writes back out.
+         */
+        public boolean autoSpaceDe = true;
         public boolean autoSpaceDeSet;
-        public boolean autoSpaceDn;
+        public boolean autoSpaceDn = true;
         public boolean autoSpaceDnSet;
         public boolean wordWrap;
         public boolean wordWrapSet;

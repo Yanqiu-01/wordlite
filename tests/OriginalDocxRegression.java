@@ -39,6 +39,21 @@ public final class OriginalDocxRegression {
                 imageBytes += image.bytes == null ? 0 : image.bytes.length;
         }
         check(document.paragraphs.size() == 373, "real document paragraph count survives CRC-tolerant ZIP reading");
+        // Word charges a quarter em between CJK and Latin/digits unless the file turns
+        // autoSpaceDE/autoSpaceDN off. Only 105 of these 373 paragraphs spell the pair out
+        // (word/document.xml scan: 105 w:autoSpaceDE, 105 w:autoSpaceDN, none with w:val=0; the
+        // pair is absent from styles.xml and settings.xml too), so the other 268 have to reach
+        // the layout with the default-on or every mixed line gains a character Word does not fit.
+        int declaredGap = 0, silentGap = 0, gapTurnedOff = 0;
+        for (DocxDocument.ParagraphBlock paragraph : document.paragraphs) {
+            if (!paragraph.format.autoSpaceDeSet && !paragraph.format.autoSpaceDnSet) silentGap++;
+            else declaredGap++;
+            if (!paragraph.format.autoSpaceDe || !paragraph.format.autoSpaceDn) gapTurnedOff++;
+        }
+        check(declaredGap == 105 && silentGap == 268 && gapTurnedOff == 0,
+                "autoSpaceDE/DN: 105 declared + 268 silent paragraphs, none left without the gap");
+
+        check(document.paragraphs.size() == 373, "real document paragraph count survives CRC-tolerant ZIP reading");
         check(document.sections.size() == 3
                         && document.sections.get(2).marginLeftTwips == 1701
                         && document.sections.get(2).marginRightTwips == 1701

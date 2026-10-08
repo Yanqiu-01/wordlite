@@ -18,18 +18,18 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 量不出来按没过算。这一节是验收线，谁改排版引擎都拿它复核；复核由常驻的排版对账子代理执行，
 每轮改动重跑一遍，结果贴回本文与 `docs/edge-parity-baseline.md`。
 
-| # | 指标 | 量法（真值来源） | HEAD 复采（tag `lh-revert1`，2026-10-09；`lines-all.tsv` 与 `lh-base2` 逐字节同） | 验收线 |
+| # | 指标 | 量法（真值来源） | HEAD 复采（tag `autospace1`，2026-10-09；engine head_sha `bdd2e6a`） | 验收线 |
 | --- | --- | --- | --- | --- |
 | 1 | 段落页归属 | `tools/word-parity.ps1`（Word 28 页真值 `artifacts/word/pages.tsv`） | 7 段错页 / 206（exact 96.6%，页差全是 -1，首个 para 121；28/28 页） | exact >= 99%，错页 <= 2 段 |
 | 2 | 逐行行高误差中位 | `artifacts/agent-typeset/line-height-rows.ps1`（Word 相邻基线距离，COM） | -0.767 px（n=91，Word 26.267 px） | 绝对值 <= 0.10 px |
 | 3 | 逐行行高误差 p90 | 同上（取 \|误差\| 的 p90） | 2.533 px（max 3.467） | <= 0.50 px |
 | 4 | 每页累计高度误差 | 同上 x 每页行数（Word 每页 27-35 行） | 0.79 行（最差队列 sz12 line300 snap=false 2.55 行） | <= 0.25 行 |
-| 5 | 逐行换行点一致率 | `tools/line-break-delta.ps1 -Stage report` | 103/165 = 62.4% | >= 90% |
+| 5 | 逐行换行点一致率 | `tools/line-break-delta.ps1 -Stage report` | 114/165 = 69.1%（`autospace1`，改前 103/165 = 62.4%） | >= 90% |
 | 6 | 两端对齐右边界超出 1px 的行数 | `tools/edge-parity.ps1 -Impl new` | 0 / 32 | 0 / 32（守住，不许为了行高牺牲它） |
 
 一条命令复采这六条：`pwsh tools/parity-six.ps1 -Tag <tag>`（真机采样 + 行高探针 + 三条对比，只调已有脚本、不重新定义量法；Word 真值走缓存，不重开 Word 会话；结果写 `<tag>/six.tsv`、`<tag>/six.txt`，带 head_sha 与 `lines-all.tsv` 的 sha）。第 0 节的六个数每一轮都以这条命令的输出为准，第 17 节记下本轮的复采与指纹。
 
-本轮落到的 HEAD 是 tag `lh-revert1`（第 19 节）：上一轮那族按 Word 实测 em 抬行高的做法整个改回原状，六条与 `lh-base2` 一字不差（`lines-all.tsv` sha `D9822E2C3396D6EC`、`pages.tsv` sha `921A8FAB4D3D09F8`，28 页 / 601 行）。
+本轮落到的 HEAD 是 tag `autospace1`（第 20 节）：`w:autoSpaceDE` / `w:autoSpaceDN` 的缺省从"没写=关"改成 Word 的"没写=开"，第 5 条 62.4% → 69.1%，其余五条一字不差（`pages.tsv` sha `921A8FAB4D3D09F8` 不变、右边界仍 0/32、`lines-all.tsv` sha `D9822E2C3396D6EC` → `AC44D355853F4616`）。
 
 三条规矩：
 
@@ -659,3 +659,74 @@ lines-all sha=D9822E2C3396D6EC  pages.tsv sha=921A8FAB4D3D09F8  字体指纹=E75
 1. 先用 `repag-pagefill.tsv` 与 Word 的逐段页账（`artifacts/agent-layout-verify/page-stack-all/page_stack.tsv`）对第 13 / 15 / 16 / 24 / 26 页：把我们每页多占的那一项定出来（候选：黑体标题行高、表格行高、图高、段前后距、`snapToGrid=true` 那 268 行的 25.5px 经验值），拿到段号与 px。
 2. 那一项定出来并单独复采过，再开这一族：一次一档（1 档 → 2 档），每档跑 `tools/parity-six.ps1`，行高三条与页归属一起看。
 3. 不许为了让第 2/3/4 条好看而把 em 调小或只抬一部分行——第 1 条会替你记住这件事。
+
+
+## 20. `autospace1`：`w:autoSpaceDE/DN` 缺省按 Word 当开（第 5 条 62.4% → 69.1%）；顺带把逐页账本做成工具，并否掉"每页多收 40~60px"这个假设
+
+### 20.1 这一刀改了什么，凭什么
+
+稿件自查（`Expand-Archive tests/samples/input-liu.docx` 后数 `word/document.xml`）：373 段里只有
+**105 段**写了 `<w:autoSpaceDE/>` + `<w:autoSpaceDN/>`，显式关掉的 **0 段**，
+`word/styles.xml` 的 docDefaults 与 `word/settings.xml` 里一次都没出现 `autoSpace`。
+OOXML 与桌面 Word 的缺省是**开**，旧解析器把"没写"读成"关"，于是另外 268 段的中文与西文/数字之间
+少了 1/4 em 的自动空隙——`tools/line-break-delta.ps1` 把它单列成一档"中西文混排留白未计入"
+（13 行，4 个首分歧）。
+
+代码只动一处：`DocxDocument.ParagraphFormat` 的 `autoSpaceDe` / `autoSpaceDn` 字段默认值改成 `true`，
+`autoSpaceDeSet` / `autoSpaceDnSet` 仍然只记录文件真正写过什么，`DocxWriter` 的回写口径一字未改。
+断言：`tests/Regression.java` 两条（沉默=开、显式 `w:val="0"` 仍然关，Regression 72 → 74 条）、
+`tests/OriginalDocxRegression.java` 一条（真稿 105 声明 + 268 沉默 + 0 关掉，19 条全过）、
+Robolectric `tests/ui/.../AutoSpaceTest.java` 拆成"显式关掉"与"沉默走缺省"两条。
+
+### 20.2 六条前后
+
+命令：`pwsh tools/parity-six.ps1 -Serial EAMUT20528011355 -Tag autospace1`
+（engine head_sha `bdd2e6a`，`lines-all.tsv` sha `D9822E2C3396D6EC` → `AC44D355853F4616`，
+`pages.tsv` sha `921A8FAB4D3D09F8` **未变**，字体表指纹 `E751F0AFAC19`）
+
+| # | 指标 | 改前（tag `lh-revert1`） | 改后（tag `autospace1`） | 结论 |
+| --- | --- | --- | --- | --- |
+| 1 | 段落页归属 | 7 段错页 / 206（exact 96.6%，全 -1，首个 para 121；28/28 页） | **7 段错页 / 206**（同一分布，首个仍是 para 121） | 不动 |
+| 2 | 逐行行高误差中位 | -0.767 px（n=91） | -0.767 px | 不动 |
+| 3 | 逐行行高误差 p90 | 2.533 px | 2.533 px | 不动 |
+| 4 | 每页累计高度误差 | 0.79 行 | 0.79 行 | 不动 |
+| 5 | 逐行换行点一致率 | 103/165 = 62.4% | **114/165 = 69.1%** | 涨 6.7 分（多对 11 行） |
+| 6 | 右边界超出 1px 的行数 | 0 / 32 | **0 / 32** | 守住 |
+
+没有退步项，所以 CHANGELOG 只记涨的那条。
+
+### 20.3 逐页账本做成工具（`tools/page-fill-ledger.ps1` + `tools/pdf-line-truth.py`）
+
+Word 的 COM 只报"每段首行"的位置，续排页的页顶和表格内部的行问不到，所以改拿 Word 自己导出的 PDF
+（`artifacts/agent-typeset/word-export-pdf.ps1`，28 页，sha256 前缀 `ab298ac416dcfc72`）。
+每页三条数：`A` 首行基线到页顶、`B` 首末基线之差、`C` 末行基线到页底，三条相加必然等于页高
+（自检 `max|A+B+C-pageH| = 0.00 px`，`max|dA+dB+dC| = 0.10 px`）。手机侧配套给探针
+`artifacts/device/probe/DeviceCapture.java` 加了 `lines-geo.tsv`（每行的盒顶/基线/盒底，
+**含表格单元格行**，共 766 行 = 610 段行 + 156 表格行）与 `page-geo.tsv`；加 dump 后的第一次采样
+`lines-all.tsv` / `pages.tsv` 的 sha 与 `lh-revert1` 一字不差，证明这份 dump 是惰性的。
+
+HEAD（`pwsh tools/page-fill-ledger.ps1 -Tag autospace1`，单位 px）：
+
+| 项 | Word | 我们 | 差 |
+| --- | --- | --- | --- |
+| 正文行数（含表格行） | 749 | 766 | **+17 行** |
+| 每行基线间距（页均） | 26.78 | 25.61 | **-1.17 px**（全篇 -844 px） |
+| 首行基线到页顶 A（页均） | 163.6 | 166.0 | +2.4 |
+| 末行基线到页底 C（中位） | 155.0 | 162.4 | +9.4 |
+| 末行基线到页底 C（min） | 120.5 | 119.4 | -1.1 |
+
+**否决一条假设**："我们在行高之外每页多收 40~60px"不存在——每页差的中位只有 9.4px、均值 12.1px，
+是噪声量级。页尾之所以看起来"卡"，是因为 Word 第 13 页页尾本来就有半行溢出 + 悬挂标点，那是 Word
+自己的例外机制，我们不抄它，所以那一页不该朝"把余量填平"的方向修；朝这个方向多花的钱都是亏的。
+行高差的 -844px 现在就躺在页尾余量里，单独把它补回来必然挤出整页（第 19 节实测 68 段错页），
+所以它必须等到断行收敛之后再动。
+
+### 20.4 主攻方向按实测排下来
+
+1. **每行装几个字、断点落在第几行**（第 5 条）：+17 行 ≈ +435px，比行高差里属于换行的那部分更直接。
+   `autospace1` 吃掉 6.7 分之后剩 69.1%，剩下的分档见 `artifacts/agent-layout-verify/autospace1/parity/line-delta.md`，
+   大头仍是西文 advance（21 行 / 33.9%）与全角余量（14 行）。
+2. 表格：表题到表格首行我们比 Word 多 8.6pt、段到表题多 6.8pt（第 23 页逐行对读：Word 119.8 / 137.9 /
+   158.4 pt，我们 122 / 146.9 / 176 pt；行距本身两边一致，Word 22.5pt vs 我们 22.65pt）。算噪声，本轮不动。
+3. 行高与页归属：等第 1 条把每页行数对齐 Word 之后再一并算，验收仍是这六条。
+

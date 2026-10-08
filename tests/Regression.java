@@ -132,6 +132,19 @@ public final class Regression {
                 "paragraph inherits distinct East Asian/Latin fonts and the real Normal-style size");
         check(first.format.lineSpacingTwips == 360 && "auto".equals(first.format.lineRule),
                 "paragraph reads 1.5-line auto spacing without converting twips prematurely");
+        // tests/fixture.docx writes no w:autoSpaceDE / w:autoSpaceDN anywhere, and Word treats
+        // the pair as on until something in the file says off (input-liu.docx declares it in
+        // only 105 of 373 paragraphs), so silence must not read as disabled.
+        check(first.format.autoSpaceDe && first.format.autoSpaceDn
+                        && !first.format.autoSpaceDeSet && !first.format.autoSpaceDnSet,
+                "autoSpaceDE/autoSpaceDN stay on when the file says nothing");
+        DocxDocument.ParagraphFormat declaredOff = new DocxDocument.ParagraphFormat();
+        declaredOff.autoSpaceDe = false; declaredOff.autoSpaceDeSet = true;
+        declaredOff.autoSpaceDn = false; declaredOff.autoSpaceDnSet = true;
+        DocxDocument.ParagraphFormat inherits = new DocxDocument.ParagraphFormat();
+        inherits.merge(declaredOff);
+        check(!inherits.autoSpaceDe && !inherits.autoSpaceDn,
+                "a declared w:autoSpaceDE w:val=0 wins over the default-on");
         DocxDocument.ParagraphBlock fields = d.paragraphs.get(1);
         check(fields.fields.size() == 3, "duplicate PAGE fields and fldSimple are not deduplicated");
         check(fields.fields.get(0).start == 8 && fields.fields.get(1).start == 14 && fields.fields.get(2).start == 24,

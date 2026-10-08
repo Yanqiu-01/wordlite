@@ -13,9 +13,20 @@
 
 
 
+## 未发布（排版对账：`w:autoSpaceDE` / `w:autoSpaceDN` 的缺省按 Word 当"开"）
+
+**一句话：373 段里只有 105 段写了这对属性，旧解析器把"没写"当成"关"，另外 268 段中西文之间少了 1/4 em 的自动空隙；改成缺省开之后，逐行换行点一致率 103/165 = 62.4% 涨到 114/165 = 69.1%（多对 11 行），其余五条一字不差——页归属仍是 7 段错页、`pages.tsv` 的 sha 未变，右边界仍 0/32。**
+
+- 量法与证据：`tests/samples/input-liu.docx` 解包后数 `word/document.xml`——`autoSpaceDE` 105 处、`autoSpaceDN` 105 处、显式 `w:val="0"` 0 处，`word/styles.xml`（含 docDefaults）与 `word/settings.xml` 里一次都没出现；这三件事由新增的 `tests/OriginalDocxRegression.java` 断言钉住（105 声明 + 268 沉默 + 0 关掉）。
+- 改动只有一处：`DocxDocument.ParagraphFormat.autoSpaceDe/autoSpaceDn` 字段默认值 false → true；`autoSpaceDeSet/autoSpaceDnSet` 仍只记录文件真正写过的值，`DocxWriter` 回写口径不变（没写过就还是不写，交给同一个缺省）。断言：`tests/Regression.java` 72 → 74 条（沉默=开、显式 `w:val="0"` 仍然关、样式链覆盖），`tests/OriginalDocxRegression.java` 19 条，Robolectric `AutoSpaceTest` 拆成"显式关掉"与"沉默走缺省"两条。主机测试：Regression 74、OriginalDocx 19、WordLineHeight 63、Script 65、TableGeometry 31、Preservation 11、TextCorpus 209 全过，app 侧 `javac` 82 个文件通过。
+- 复采：`pwsh tools/parity-six.ps1 -Serial EAMUT20528011355 -Tag autospace1`（engine head_sha `bdd2e6a`；`lines-all.tsv` sha `D9822E2C3396D6EC` → `AC44D355853F4616`，`pages.tsv` sha `921A8FAB4D3D09F8` 未变，字体表指纹 `E751F0AFAC19`）。第 1/2/3/4/6 条分别是 7 段错页 / -0.767px / 2.533px / 0.79 行 / 0 超，全部与改前相同；没有退步项。
+- 新增两个量台：`tools/pdf-line-truth.py`（Word 自己导出的 PDF → 每行基线，sha 与 PyMuPDF 版本进文件头）与 `tools/page-fill-ledger.ps1`（每页 A 首行基线到页顶 / B 首末基线差 / C 末行基线到页底，三条相加等于页高，自检 0.00px）。配套给手机探针加了 `lines-geo.tsv`（每行盒顶/基线/盒底，含表格单元格行）与 `page-geo.tsv`，加完复采 sha 不变，证明是惰性 dump。
+- 顺手量死一条假设（写清楚免得再有人去追）："行高之外每页还多收 40~60px"不成立：全篇 Word 正文 749 行 / 我们 766 行（多 17 行 ≈ +435px），每行基线间距 Word 26.78px / 我们 25.61px（-1.17px，全篇 -844px），页尾剩余中位 Word 155.0px / 我们 162.4px，每页差的中位只有 9.4px。第 13 页那种"页尾只剩一行"的卡法是 Word 的半行溢出 + 悬挂标点造成的，不抄它，也不去把那一页的余量填平。
+
+## 未发布（排版对账：按 Word 实测 em 抬行高这一族，量死之后改回原状）
 ## 未发布（排版对账：按 Word 实测 em 抬行高这一族，量死之后改回原状）
 
-**一句话：按 Word 实测 em 抬行高，逐行行高的 p90 确实从 2.533px 降到 0.934px，可段落页归属从 7 段错页涨到 70 段、页数 28 变 29；这一轮又把它收到只剩量过的那 140 行，照样 68 段错页、29 页——第一个兜不住的是第 13 页（余量 11.0px，那一页要吃 45.7px）。钱不是多花了，是我们别处每页多占把余量吃光了，所以 app/src 里这套抬法整个改回原状，不留关掉的开关。**
+**一句话：按 Word 实测 em 抬行高，逐行行高的 p90 确实从 2.533px 降到 0.934px，可段落页归属从 7 段错页涨到 70 段、页数 28 变 29；这一轮又把它收到只剩量过的那 140 行，照样 68 段错页、29 页——第一个兜不住的是第 13 页（余量 11.0px，那一页要吃 45.7px）。钱不是多花了：第 20 节用逐页账本量过，我们对 Word 的每页差中位只有 9.4px，不存在"每页多收 40~60px"；真正多出来的是排错行——全篇比 Word 多排 17 行（≈ +435px），而 Word 第 13 页页尾本来就有半行溢出加悬挂标点，那是它自己的例外机制，我们不抄。所以 app/src 里这套抬法整个改回原状，不留关掉的开关，行高等断行收敛之后再一并算。**
 
 - 新增 `tools/parity-six.ps1`：第 0 节那六条一次跑完（真机采样、行高探针、页归属、换行点、右边界、逐行行高），只调已有脚本不重新定义量法；Word 真值走缓存，不重开 Word 会话（Word 只允许一个会话）。每一轮的输出带 `head_sha` 与 `lines-all.tsv` 的 sha，对不上就作废。
 - 上一轮（tag `lh-family1`）那一族抬的是"带 `w:line` + `lineRule=auto` + `snapToGrid=false` 就抬"：真机两份逐行账单相减，抬了 283 行 / +624.4px = 0.72 个版心页。目标队列只占其中 140 行 +457.4px 与纯西文 68 行 +36.2px，剩下 75 行 / +130.8px 落在从没量过 Word 行距的格子（10.5pt、14pt、15pt、`w:line=276/280/288`）——那部分是外推，本轮不再要它。

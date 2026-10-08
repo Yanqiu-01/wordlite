@@ -34,10 +34,25 @@ public class AutoSpaceTest {
         return p;
     }
 
-    @Test public void absentOrDisabledAutoSpaceDoesNotTouchPlainText() {
+    @Test public void declaredOffAutoSpaceDoesNotTouchPlainText() {
+        // w:autoSpaceDE/@w:val="0" written out is the only thing that removes the gap.
         DocxDocument.ParagraphBlock p = paragraph(false, false);
         Spanned text = (Spanned) DocxTextLayout.measure(p, 400).layout.getText();
         assertEquals(0, text.getSpans(0, text.length(), ReplacementSpan.class).length);
+    }
+
+    @Test public void silentAutoSpaceKeepsTheWordDefaultGap() {
+        // OOXML leaves the pair on unless the file declares it off. 268 of the 373 paragraphs
+        // in tests/samples/input-liu.docx never mention it, and Word still spaces CJK against
+        // Latin there, so a paragraph that says nothing must draw the same gaps as one that
+        // declares the pair on.
+        DocxDocument.ParagraphBlock p = paragraph(true, true);
+        p.format.autoSpaceDeSet = false;
+        p.format.autoSpaceDnSet = false;
+        Spanned text = (Spanned) DocxTextLayout.measure(p, 400).layout.getText();
+        assertEquals(0, text.getSpans(4, 5, ReplacementSpan.class).length);
+        assertTrue(text.getSpans(0, 1, ReplacementSpan.class).length > 0);
+        assertTrue(text.getSpans(3, 4, ReplacementSpan.class).length > 0);
     }
 
     @Test public void cjkPunctuationEdgesGetNoAutoGap() {
