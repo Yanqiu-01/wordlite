@@ -142,16 +142,22 @@ public final class CandidateRanker {
      * 配额挑选：先去重再排序，然后按名次给出检索循环该走的路径。
      * budget 是本次检测允许的开放获取全文抓取次数（对应 DuplicateEngine.MAX_FULL_TEXTS 那种预算），
      * perSourceCap 是单个检索源最多贡献几条（<=0 表示不限）。
-     * 两点讲究：一是只有真挂了 fullTextUrl 的候选才吃 budget，没全文链接的高分名不白占额度；
-     * 二是 perSourceCap 卡在入库名额上，某一个引擎返回得再多也挤不掉别人的位置。
+     *
+     * <p>入库名次按 BM25 相似度走，全文额度按"相似度 × 这条链接真能带回正文的分量"另排一队
+     * （见 quotaOrder()）。2.3.0 之前两队是同一队、且只看"有没有挂链接"，于是出过两笔亏：
+     * ① 挂 doi.org 跳转壳的候选占了额度，抓回来是 2,733 B 的跳转页、0 字；
+     * ② 零分候选也先占一个额度名额，回到 DuplicateEngine 又被零分闸门丢掉、根本没发请求——
+     * 额度就这么无声无息地烧掉了（真机那轮 10 次额度只发出 6 次抓取）。
+     * <p>perSourceCap 卡在入库名额上，某一个引擎返回得再多也挤不掉别人的位置。
      * 顺序确定性同上，两次运行逐条一致。
      */
     public static ArrayList<Selection> plan(String query, ArrayList<PaperSources.Candidate> pool,
                                            int budget, int perSourceCap) {
         ArrayList<Selection> out = new ArrayList<Selection>();
         ArrayList<Scored> ranked = rank(query, unique(pool));
+        ArrayList<PaperSources.Candidate> quota = quotaOrder(ranked, budget);
         LinkedHashMap<String, Integer> taken = new LinkedHashMap<String, Integer>();
-        int fetches = 0, rank = 0;
+        int rank = 0;
         for (int i = 0; i < ranked.size(); i++) {
             Scored scored = ranked.get(i);
             String source = sourceKey(scored.candidate);
@@ -159,10 +165,63 @@ public final class CandidateRanker {
             if (perSourceCap > 0 && used >= perSourceCap) continue;
             taken.put(source, Integer.valueOf(used + 1));
             rank++;
-            boolean fetch = budget > 0 && fetches < budget && hasFullText(scored.candidate);
-            if (fetch) fetches++;
-            out.add(new Selection(scored.candidate, scored.score, rank, fetch));
+            out.add(new Selection(scored.candidate, scored.score, rank, quota.contains(scored.candidate)));
         }
+        return out;
+    }
+
+    /** 排队花全文额度的候选：先比"相似度 × 链接分量"，平局按 source id / 题名 / 引擎 / 池内位置。 */
+    private static final class Quota {
+        final PaperSources.Candidate candidate;
+        final double weight;
+        final int position;
+        Quota(PaperSources.Candidate candidate, double weight, int position) {
+            this.candidate = candidate;
+            this.weight = weight;
+            this.position = position;
+        }
+    }
+
+    private static final Comparator<Quota> QUOTA_ORDER = new Comparator<Quota>() {
+        public int compare(Quota left, Quota right) {
+            int byWeight = Double.compare(right.weight, left.weight);
+            if (byWeight != 0) return byWeight;
+            int byId = safe(left.candidate.source.id).compareTo(safe(right.candidate.source.id));
+            if (byId != 0) return byId;
+            int byTitle = safe(left.candidate.source.title).compareTo(safe(right.candidate.source.title));
+            if (byTitle != 0) return byTitle;
+            int byEngine = sourceKey(left.candidate).compareTo(sourceKey(right.candidate));
+            if (byEngine != 0) return byEngine;
+            return left.position - right.position;
+        }
+    };
+
+    /**
+     * 这一名值不值得花掉一次全文抓取：零分的不算（回检索循环会被零分闸门丢掉，占了额度却不发请求），
+     * 挂 doi.org 跳转壳的不算（抓回来是跳转页、0 字），其余按 PaperSources.pdfUrlRank 给分量——
+     * 白名单期刊官网 1.0、其它 https 直链 0.9、其它 http 0.7、跳转壳与没链接 0。
+     */
+    static double fetchWeight(PaperSources.Candidate candidate) {
+        if (!hasFullText(candidate)) return 0d;
+        int rank = PaperSources.pdfUrlRank(safe(candidate.fullTextUrl).trim());
+        if (rank >= 3) return 0d;
+        return rank == 0 ? 1d : rank == 1 ? 0.9d : 0.7d;
+    }
+
+    /** 排出花全文额度的那一队，取前 budget 条。budget <= 0 一律不抓。 */
+    static ArrayList<PaperSources.Candidate> quotaOrder(ArrayList<Scored> ranked, int budget) {
+        ArrayList<PaperSources.Candidate> out = new ArrayList<PaperSources.Candidate>();
+        if (ranked == null || budget <= 0) return out;
+        ArrayList<Quota> queue = new ArrayList<Quota>();
+        for (int i = 0; i < ranked.size(); i++) {
+            Scored scored = ranked.get(i);
+            if (scored == null || scored.score <= 0d) continue;
+            double weight = fetchWeight(scored.candidate);
+            if (weight <= 0d) continue;
+            queue.add(new Quota(scored.candidate, scored.score * weight, i));
+        }
+        Collections.sort(queue, QUOTA_ORDER);
+        for (int i = 0; i < queue.size() && i < budget; i++) out.add(queue.get(i).candidate);
         return out;
     }
     // ---- 打分内部件 ----

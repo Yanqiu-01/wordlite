@@ -107,6 +107,7 @@ public final class CandidateRankerRegression {
         boilerplate();
         merging();
         quota();
+        quotaOrder();
         determinism();
         edges();
         System.out.println("SUMMARY " + count + " assertions passed"
@@ -398,6 +399,97 @@ public final class CandidateRankerRegression {
         ArrayList<CandidateRanker.Selection> deduped = CandidateRanker.plan(QUERY, doubled, 3, 2);
         check(deduped.size() == plan.size() && fetches(deduped) == fetches(plan),
                 "挑选先去重：同一篇从第四个引擎再回来一次，也不会多花一次全文额度");
+    }
+
+    /**
+     * 全文额度那一队单独断言：额度只花在"与稿件对题 + 这条链接真能带回正文"的候选上，
+     * 入库名次一个字都不动。两个反面都是 2.3.0 真跑出来的亏——doi.org 跳转壳吃掉一次额度换回 0 字、
+     * 零分候选占了额度名额却被检索循环的零分闸门丢掉，那一轮 10 次额度只发出 6 次抓取。
+     */
+    private static void quotaOrder() {
+        PaperSources.Candidate shell = candidate("openalex", "S1", "深度学习在医学影像分割中的应用",
+                longSummary(), "10.1000/s1", "https://doi.org/10.1000/s1");
+        PaperSources.Candidate journal = candidate("openalex", "J1", "深度学习用于医学影像的分割方法",
+                longSummary(), "10.1000/j1",
+                "http://www.cjmenet.com.cn/CN/article/downloadArticleFile.do?attachType=PDF&id=27657");
+        PaperSources.Candidate plainHttps = candidate("crossref", "H1", "医学影像的分割方法评测", TOPIC[0],
+                "10.1000/h1", "https://repo.example.org/h1.pdf");
+        PaperSources.Candidate plainHttp = candidate("crossref", "P1", "医学影像分割的体积测量", TOPIC[1],
+                "10.1000/p1", "http://repo.example.org/p1.pdf");
+        PaperSources.Candidate offTopic = candidate("openalex", "X1", "档案信息化管理", OFF_TOPIC,
+                "10.1000/x1", "http://www.cjmenet.com.cn/CN/x.do?attachType=PDF&id=2");
+
+        check(CandidateRanker.fetchWeight(shell) == 0d && CandidateRanker.fetchWeight(journal) == 1d
+                        && CandidateRanker.fetchWeight(plainHttps) == 0.9d
+                        && CandidateRanker.fetchWeight(plainHttp) == 0.7d
+                        && CandidateRanker.fetchWeight(candidate("cnki", "U1", "标题", TOPIC[0], "l", "")) == 0d,
+                "链接分量：白名单期刊官网 1.0、其它 https 0.9、其它 http 0.7、doi.org 跳转壳与没链接 0");
+
+        /* 池子里只有一个真正能花额度的候选时，那一次必须落在它身上，而不是落在排它前面的跳转壳或零分条目上。 */
+        ArrayList<CandidateRanker.Selection> one = CandidateRanker.plan(QUERY,
+                poolOf(shell, offTopic, journal), 1, 0);
+        check(fetches(one) == 1 && "J1".equals(picked(one)),
+                "一次额度只给对题又真能下到文件的那条：跳转壳与零分条目都不占名额（实取 " + picked(one) + "）");
+
+        ArrayList<CandidateRanker.Selection> two = CandidateRanker.plan(QUERY,
+                poolOf(shell, offTopic, journal, plainHttps, plainHttp), 2, 0);
+        String fetchedTwo = sortedIds(fetchedIds(two));
+        check("H1,J1".equals(fetchedTwo),
+                "两次额度给两条真能带回正文的对题候选（" + fetchedTwo + "），跳转壳与零分条目一个也不给");
+        check(fetches(two) == 2, "额度不会因为排在前面的是零分条目就被无声烧掉一次");
+
+        /* 入库名次只看相似度：把全池的链接抹掉，名次序列必须一字不变。 */
+        ArrayList<PaperSources.Candidate> bare = new ArrayList<PaperSources.Candidate>();
+        ArrayList<PaperSources.Candidate> wired = poolOf(shell, journal, plainHttps, plainHttp, offTopic);
+        for (int i = 0; i < wired.size(); i++) {
+            PaperSources.Candidate source = wired.get(i);
+            bare.add(candidate(source.source.engine, source.source.id, source.source.title,
+                    source.abstractText, source.source.locator, ""));
+        }
+        StringBuilder withUrl = new StringBuilder(), withoutUrl = new StringBuilder();
+        ArrayList<CandidateRanker.Selection> wiredPlan = CandidateRanker.plan(QUERY, wired, 9, 0);
+        ArrayList<CandidateRanker.Selection> barePlan = CandidateRanker.plan(QUERY, bare, 9, 0);
+        for (int i = 0; i < wiredPlan.size(); i++) withUrl.append(wiredPlan.get(i).candidate.source.id).append(',');
+        for (int i = 0; i < barePlan.size(); i++) withoutUrl.append(barePlan.get(i).candidate.source.id).append(',');
+        check(withUrl.toString().equals(withoutUrl.toString()) && withUrl.length() > 0,
+                "链接分量只改全文额度的分配，不改入库名次：" + withUrl);
+
+        ArrayList<PaperSources.Candidate> reversed = poolOf(offTopic, plainHttp, plainHttps, journal, shell);
+        check(sortedIds(fetchedIds(CandidateRanker.plan(QUERY, reversed, 2, 0))).equals(fetchedTwo),
+                "同一批候选倒着进来，拿到额度的还是同一批：" + sortedIds(fetchedIds(
+                        CandidateRanker.plan(QUERY, reversed, 2, 0))));
+    }
+
+    /** 计划里唯一一条拿到额度的候选编号；不是恰好一条就交空串，让断言自己失败。 */
+    private static String picked(ArrayList<CandidateRanker.Selection> plan) {
+        String id = "";
+        int n = 0;
+        for (int i = 0; i < plan.size(); i++) if (plan.get(i).fetchFullText) { id = plan.get(i).candidate.source.id; n++; }
+        return n == 1 ? id : "";
+    }
+
+    /** 逗号串里的编号排序，好让"同一批"这种断言不受名次先后影响。 */
+    private static String sortedIds(String joined) {
+        ArrayList<String> ids = new ArrayList<String>();
+        for (String id : joined.split(",")) if (id.trim().length() > 0) ids.add(id.trim());
+        java.util.Collections.sort(ids);
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < ids.size(); i++) {
+            if (i > 0) out.append(',');
+            out.append(ids.get(i));
+        }
+        return out.toString();
+    }
+
+    /** 拿到全文额度的候选编号，按池内名次串起来。 */
+    private static String fetchedIds(ArrayList<CandidateRanker.Selection> plan) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < plan.size(); i++) {
+            if (!plan.get(i).fetchFullText) continue;
+            if (out.length() > 0) out.append(',');
+            out.append(plan.get(i).candidate.source.id);
+        }
+        return out.toString();
     }
 
     private static void determinism() {
