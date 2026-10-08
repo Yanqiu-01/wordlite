@@ -83,6 +83,8 @@ public final class DuplicateEngine {
         public int comparedChars, duplicateChars, citedDuplicateChars;
         /** 按论文结构排除在比对之外的字数（参考文献表、致谢、附录、目录）。 */
         public int excludedChars;
+        /** 上面那些字数对应的区间。来源榜按篇数字必须扣同一批区间，否则两边分子分母不是一把尺。 */
+        public int[] structureSpans = new int[0];
         /** 本次真正拿来比对的语料（自建库加检索到的候选），改写效果要用同一份基线。 */
         public TextCorpus baseline;
         public long elapsedMillis;
@@ -391,6 +393,7 @@ public final class DuplicateEngine {
         report.duplicateChars = balance.duplicateChars;
         report.citedDuplicateChars = balance.citedDuplicateChars;
         report.excludedChars = balance.excludedChars;
+        report.structureSpans = structureSpans == null ? new int[0] : structureSpans.clone();
         report.overallRate = balance.overallRate;
         report.excludingCitationsRate = balance.excludingCitationsRate;
         report.selfWrittenRate = balance.selfWrittenRate;

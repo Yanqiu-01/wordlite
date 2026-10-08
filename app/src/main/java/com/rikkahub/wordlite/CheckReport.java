@@ -141,7 +141,7 @@ public final class CheckReport {
     private static void sourcesLedger(StringBuilder out, DuplicateEngine.Report report) {
         if (report == null || report.sourceText == null || report.sourceText.isEmpty()) return;
         SourceLedger ledger = SourceLedger.aggregate(report.hits, TextCorpus.normalize(report.sourceText),
-                report.comparedChars);
+                report.comparedChars, report.structureSpans);
         if (ledger.rows.isEmpty()) {
             // 什么都没比对成：头部已经是"未完成查重"，再排一张空来源榜会被读成"这篇很干净"。
             if (report.retrievalIncomplete) return;

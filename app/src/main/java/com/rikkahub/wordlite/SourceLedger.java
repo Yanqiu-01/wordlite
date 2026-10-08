@@ -45,10 +45,16 @@ public final class SourceLedger {
         /** others 那一行折掉了几个 Source 桶。 */
         public int othersCount;
 
-        /** 该篇重复率 = 该篇重复字符 / 整篇有效字数。分母统一，各行相加才等于总相似度比。 */
+        /**
+         * 该篇重复率 = 该篇重复字符 / 整篇有效字数。分母统一，各行相加才等于总相似度比。
+         * 超过 100 一律按 100 显示：2.3.1 之前的存档记录里，分子还没扣掉结构性文本，
+         * 那一格会算出 114.49% 这种在算术上不可能成立的比率；新数据走 aggregate 的排除区，
+         * 这里只是不让一个坏数出现在界面上。
+         */
         public double share(int total) {
             if (total <= 0 || duplicateChars <= 0) return 0d;
-            return duplicateChars * 100d / total;
+            double value = duplicateChars * 100d / total;
+            return value > 100d ? 100d : value;
         }
     }
 
@@ -68,11 +74,20 @@ public final class SourceLedger {
         int sources;
     }
 
+    /** 没有排除区的那一版（老调用方，以及只存了命中的老记录）。 */
+    public static SourceLedger aggregate(ArrayList<TextCorpus.Hit> hits, String norm, int comparedChars) {
+        return aggregate(hits, norm, comparedChars, null);
+    }
+
     /**
      * 按篇聚合。norm 必须是 TextCorpus.normalize(被检原文)：有效字符按它数，口径才和分子一致。
+     * excluded 是 CharLedger 从分子与分母一起扣掉的结构性文本（参考文献表、致谢、附录、目录）。
+     * 必须一起扣：整段参考文献撞上某篇候选是查重里最常见的形状，不扣就会让"该篇重复字符"
+     * 超过整篇可比字数，界面上出现 114.49% 这种比率，而账本那边这些字符一个都没算。
      * hits 为 null 或空时返回空账本，不抛。
      */
-    public static SourceLedger aggregate(ArrayList<TextCorpus.Hit> hits, String norm, int comparedChars) {
+    public static SourceLedger aggregate(ArrayList<TextCorpus.Hit> hits, String norm, int comparedChars,
+                                         int[] excluded) {
         SourceLedger ledger = new SourceLedger();
         ledger.comparedChars = comparedChars < 0 ? 0 : comparedChars;
         if (hits == null || hits.isEmpty()) return ledger;
@@ -88,13 +103,16 @@ public final class SourceLedger {
         for (int i = 0; i < hits.size(); i++) {
             TextCorpus.Hit hit = hits.get(i);
             if (hit == null) continue;
+            // 先数字再开桶：整处命中都在被排除的结构段里时，账本没算它，这里连一行都不许开。
+            int valid = outside(folded, hit.start, hit.end, excluded);
+            if (valid <= 0) continue;
             TextCorpus.Source source = hit.source == null ? anonymous : hit.source;
             Bucket bucket = owner.get(source);
             if (bucket == null) {
                 bucket = assign(source, byDoi, byTitle, buckets);
                 owner.put(source, bucket);
             }
-            charge(bucket, source, hit, folded);
+            charge(bucket, source, hit, valid);
         }
         for (int i = 0; i < buckets.size(); i++) {
             Bucket bucket = buckets.get(i);
@@ -169,9 +187,9 @@ public final class SourceLedger {
     }
 
     /** 一条命中记进它自己那篇、它自己那个检索源名下。 */
-    private static void charge(Bucket bucket, TextCorpus.Source source, TextCorpus.Hit hit, String norm) {
+    /** valid 由调用方按排除区扣好再传进来（见 aggregate 里那句 outside）。 */
+    private static void charge(Bucket bucket, TextCorpus.Source source, TextCorpus.Hit hit, int valid) {
         Row row = bucket.row;
-        int valid = TextCorpus.validCount(norm, hit.start, hit.end);
         row.duplicateChars += valid;
         row.hitCount++;
         if (row.firstStart < 0 || hit.start < row.firstStart) row.firstStart = hit.start;
@@ -188,6 +206,18 @@ public final class SourceLedger {
         } else {
             row.engineChars.set(at, Integer.valueOf(row.engineChars.get(at).intValue() + valid));
         }
+    }
+
+    /** 这处命中的有效字符，扣掉落在结构段里的那部分。excluded 先并一次，区间互不重叠，减不会减重。 */
+    private static int outside(String norm, int start, int end, int[] excluded) {
+        int total = TextCorpus.validCount(norm, start, end);
+        if (total <= 0 || excluded == null || excluded.length < 2) return total;
+        int[] merged = TextCorpus.mergeSpans(excluded, norm == null ? 0 : norm.length());
+        for (int i = 0; i + 1 < merged.length; i += 2) {
+            int from = Math.max(start, merged[i]), to = Math.min(end, merged[i + 1]);
+            if (to > from) total -= TextCorpus.validCount(norm, from, to);
+        }
+        return total;
     }
 
     /** 超出上限的篇目折成最后一行；只丢展示，一行字符都不丢。 */

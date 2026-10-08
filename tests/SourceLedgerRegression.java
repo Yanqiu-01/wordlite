@@ -225,6 +225,7 @@ public final class SourceLedgerRegression {
         overlappingHits();
         longSentence();
         reportHtml();
+        excludedStructure();
         System.out.println("SUMMARY " + count + " assertions passed"
                 + " (来源榜只在 host JVM 上跑：检索链路与界面高亮不在本用例范围内).");
     }
@@ -526,6 +527,69 @@ public final class SourceLedgerRegression {
     }
 
     /** 报告的三种写法：有命中排表、没比对成整段不排、比对过但没命中要说清未命中不等于没重复。 */
+    /**
+     * 整段参考文献撞上某篇候选——查重里最常见的一个形状。账本把参考文献表从分子与分母一起剔掉，
+     * 来源榜过去不知道这件事：那一篇的"该篇重复字符"于是超过整篇可比字数，界面上能算出 114.49%
+     * 这种比率（用户 2026-10-09 拍到的就是这个）。这里的数字全是按构造手算的整数。
+     */
+    private static void excludedStructure() {
+        StringBuilder body = new StringBuilder();
+        while (body.length() < 120) body.append("正文比对部分");      // 6 字 × 20 = 120 个有效字符
+        StringBuilder refs = new StringBuilder();
+        while (refs.length() < 400) refs.append("引文条目");          // 4 字 × 100 = 400 个有效字符
+        String text = body.toString() + refs.toString();
+        String norm = TextCorpus.normalize(text);
+        int[] structure = new int[] { body.length(), text.length() };
+
+        TextCorpus.Hit inBody = new TextCorpus.Hit();
+        inBody.start = 0; inBody.end = 60; inBody.score = 0.7f;
+        inBody.source = source("B1", "正文撞上的那一篇", "openalex", "");
+        TextCorpus.Hit inRefs = new TextCorpus.Hit();
+        inRefs.start = body.length(); inRefs.end = text.length(); inRefs.score = 0.8f;
+        inRefs.source = source("R1", "被整段引用的那一篇", "web", "");
+        ArrayList<TextCorpus.Hit> hits = new ArrayList<TextCorpus.Hit>();
+        hits.add(inBody); hits.add(inRefs);
+
+        check(TextCorpus.validCount(norm, 0, text.length()) == 520
+                        && TextCorpus.validCount(norm, 0, body.length()) == 120
+                        && TextCorpus.validCount(norm, body.length(), text.length()) == 400,
+                "夹具自证：整篇 520 个有效字符，正文 120、参考文献表 400");
+        CharLedger.Balance ledger = CharLedger.close(text, structure, new int[0], hits, null);
+        check(ledger.totalChars == 120 && ledger.excludedChars == 400 && ledger.duplicateChars == 60,
+                "账本把参考文献表从分子分母一起剔掉：分母 120、排除 400、分子只剩正文那 60");
+        check(Math.abs(ledger.overallRate - 50d) < 1e-9, "总相似度比就是手算的 60 / 120 = 50.00%");
+
+        SourceLedger before = SourceLedger.aggregate(hits, norm, ledger.totalChars);
+        check(before.rows.size() == 2 && sum(before) == 460
+                        && before.rows.get(0).duplicateChars == 400
+                        && before.rows.get(0).title.equals("被整段引用的那一篇"),
+                "不扣排除区就是改前的样子：多出一行 400 字，Σ 各行 460 而账本只认 60");
+        check(before.rows.get(0).duplicateChars * 100d / ledger.totalChars > 300d
+                        && before.rows.get(0).share(ledger.totalChars) == 100d,
+                "那一行本该是 333.33%（400 / 120），老记录的比率一律夹到 100，界面上不许再出现超 100% 的比率");
+
+        SourceLedger after = SourceLedger.aggregate(hits, norm, ledger.totalChars, structure);
+        check(after.rows.size() == 1 && sum(after) == 60 && sum(after) == ledger.duplicateChars,
+                "扣掉排除区之后那行假命中整个消失：只剩正文那一篇，Σ 各行 == 账本分子 == 60");
+        double rows = 0d;
+        for (int i = 0; i < after.rows.size(); i++) rows += after.rows.get(i).share(ledger.totalChars);
+        check(Math.abs(rows - ledger.overallRate) < 1e-9 && after.rows.get(0).share(ledger.totalChars) == 50d,
+                "各行该篇重复率相加 == 总相似度比（50.00%），来源榜与账本同一把尺");
+
+        DuplicateEngine.Report report = new DuplicateEngine.Report();
+        report.sourceText = text;
+        report.comparedChars = ledger.totalChars;
+        report.duplicateChars = ledger.duplicateChars;
+        report.structureSpans = structure;
+        report.hits.addAll(hits);
+        String html = CheckReport.html("论文.docx", report);
+        int from = html.indexOf("<h2>来源榜"), to = html.indexOf("<h2", from + 5);
+        String section = from < 0 ? "" : html.substring(from, to < 0 ? html.length() : to);
+        check(!section.contains("被整段引用的那一篇") && !section.contains("333.33")
+                        && !section.contains("100.00%"),
+                "导出的来源榜里不再有那篇只在参考文献表里命中的文献，也没有越过 100% 的比率");
+    }
+
     private static void reportHtml() {
         DuplicateEngine.Report hit = new DuplicateEngine.Report();
         hit.sourceText = "他说“重复率偏高”，随后重写了这一段正文。";

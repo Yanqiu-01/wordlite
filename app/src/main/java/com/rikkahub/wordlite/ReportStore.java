@@ -886,7 +886,8 @@ public final class ReportStore {
             record.engines.add(row);
         }
         String norm = TextCorpus.normalize(report.sourceText);
-        SourceLedger ledger = SourceLedger.aggregate(report.hits, norm, record.comparedChars);
+        SourceLedger ledger = SourceLedger.aggregate(report.hits, norm, record.comparedChars,
+                report.structureSpans);
         record.sourcesTotal = ledger.rows.size();
         for (int i = 0; i < ledger.rows.size() && i < MAX_SOURCE_ROWS; i++) {
             SourceLedger.Row source = ledger.rows.get(i);
