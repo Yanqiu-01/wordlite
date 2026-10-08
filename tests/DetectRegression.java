@@ -68,6 +68,8 @@ public final class DetectRegression {
     }
 
     private static final String EMPTY_CROSSREF = "{\"message\":{\"items\":[],\"total-results\":0}}";
+    /** 收敛式（带 language:zh）空手而归、宽式有货的那一家：量"补问一次宽式"这条分支用。 */
+    private static final String EMPTY_OPENALEX = "{\"meta\":{\"count\":0},\"results\":[]}";
     private static final String OPENALEX = "{\"meta\":{\"count\":1},\"results\":[{\"id\":\"https://openalex.org/W301\","
             + "\"doi\":\"https://doi.org/10.1000/abc\",\"title\":\"Brazing of SiC ceramic with Ag-Cu-Ti filler\","
             + "\"authorships\":[{\"author\":{\"display_name\":\"L. Zhang\"}},{\"author\":{\"display_name\":\"M. Kumar\"}}],"
@@ -133,6 +135,17 @@ public final class DetectRegression {
         final byte[] refusedFrame = grpcFrame(refused.toByteArray());
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/openalex", exchange -> { record("/openalex", queryOf(exchange)); respond(exchange, 200, OPENALEX); });
+        /* 收敛式空手、宽式有货：请求串里带 language%3Azh 就当收敛式，回空表。 */
+        server.createContext("/openalex-converged-empty", exchange -> {
+            record("/openalex-converged-empty", queryOf(exchange));
+            String raw = exchange.getRequestURI().getRawQuery();
+            respond(exchange, 200, raw != null && raw.contains("language%3Azh") ? EMPTY_OPENALEX : OPENALEX);
+        });
+        /* 收敛式自己就有货：这一路一次问完，一次请求都不许多花。 */
+        server.createContext("/openalex-converged-hit", exchange -> {
+            record("/openalex-converged-hit", queryOf(exchange));
+            respond(exchange, 200, OPENALEX);
+        });
         server.createContext("/crossref", exchange -> { record("/crossref", queryOf(exchange)); respond(exchange, 200, CROSSREF); });
         server.createContext("/semantic-scholar", exchange -> { record("/semantic-scholar", queryOf(exchange)); respond(exchange, 200, SEMANTIC); });
         server.createContext("/europepmc/search", exchange -> { record("/europepmc/search", queryOf(exchange)); respond(exchange, 200, EUROPEPMC); });
@@ -592,6 +605,42 @@ public final class DetectRegression {
                 "开放检索只问 OA 条目并带落款；拉丁文仍问满五个词");
         check(PaperSources.openAlexTerm("\u591a\u5b54\u94dc\u7684\u5236\u5907\u4e0e\u7ed3\u6784\u8c03\u63a7").length() <= 16,
                 "中文检索式砍到 16 字以内：OpenAlex 把每个词都当必须命中，长串一命中就是 0 条");
+        /* 中文稿的 OpenAlex 检索式必须收敛到"更可能带正文"的那一批；拉丁文稿一个字都不许多加。
+           收敛条件与它值多少的实测账，写在 PaperSources.OPENALEX_BODY_FILTERS 上面那段。 */
+        String zhFilter = PaperSources.openAlexFilter("\u591a\u5b54\u94dc\u7684\u5236\u5907\u4e0e\u7ed3\u6784\u8c03\u63a7");
+        check(zhFilter.contains("open_access.is_oa:true") && zhFilter.contains("language:zh")
+                        && zhFilter.contains("primary_location.source.has_issn:true"),
+                "中文稿的 OpenAlex 式子收敛到中文条目 + 有 ISSN 的正式出版物：" + zhFilter);
+        check(PaperSources.openAlexFilter("porous copper transient liquid phase bonding")
+                        .equals(PaperSources.openAlexBroadFilter("porous copper transient liquid phase bonding"))
+                        && !PaperSources.openAlexFilter("porous copper bonding").contains("language:zh"),
+                "拉丁文稿不收敛：走的还是 2.3.0 那条只要求开放获取的式子");
+        check(PaperSources.openAlexBroadFilter("\u591a\u5b54\u94dc").endsWith(",open_access.is_oa:true")
+                        && !PaperSources.openAlexBroadFilter("\u591a\u5b54\u94dc").contains("language"),
+                "补问那一路的宽式与出厂那条一模一样，没被收敛条件污染");
+
+        /* 收敛式空手 → 补问一次宽式，并把宽式那一条拿回来；两次提问各落一行留档。 */
+        PaperSources.setEndpoint("openalex", base + "/openalex-converged-empty");
+        final ArrayList<PaperSources.ShapeRow> tierRows = new ArrayList<PaperSources.ShapeRow>();
+        PaperSources.Limits tierLimits = limits();
+        tierLimits.shapes = tierRows::add;
+        int beforeEmpty = hits("/openalex-converged-empty");
+        ArrayList<PaperSources.Candidate> rescued = PaperSources.search("openalex",
+                "\u591a\u5b54\u94dc\u7684\u5236\u5907\u4e0e\u7ed3\u6784\u8c03\u63a7", tierLimits, null);
+        check(hits("/openalex-converged-empty") == beforeEmpty + 2 && rescued.size() == 1
+                        && rescued.get(0).source.title.contains("Brazing"),
+                "收敛式一条都没回来 → 补问一次宽式并把那一条拿回来（这一扇共两次提问）");
+        check(tierRows.size() == 2 && !tierRows.get(0).probe.contains(PaperSources.OPENALEX_BROAD_NOTE)
+                        && tierRows.get(1).probe.endsWith(PaperSources.OPENALEX_BROAD_NOTE)
+                        && tierRows.get(1).entries == 1,
+                "两次提问各留一行留档，第二行标着宽式补问：" + tierRows.size() + " 行");
+
+        /* 收敛式自己就有货 → 一次问完。多花一次提问就等于多占一轮的提问配额。 */
+        PaperSources.setEndpoint("openalex", base + "/openalex-converged-hit");
+        int beforeHit = hits("/openalex-converged-hit");
+        PaperSources.search("openalex", "\u591a\u5b54\u94dc\u7684\u5236\u5907\u4e0e\u7ed3\u6784\u8c03\u63a7", limits(), null);
+        check(hits("/openalex-converged-hit") == beforeHit + 1, "收敛式有货就不补问：一扇窗口只花一次提问");
+        loopback(base);
         HttpTransport.Fetched part = HttpTransport.getPdf(base + "/oa-big", null, 20, 1024, null, null, false);
         check(part.bytes.length == 1024 && part.capped && part.status == 200,
                 "PDF 读到上限就收工并把 capped 标出来，不再当成\u201c响应过大\u201d整份丢掉");

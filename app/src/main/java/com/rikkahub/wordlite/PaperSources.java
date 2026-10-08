@@ -291,6 +291,9 @@ public final class PaperSources {
                 throw new IOException("知网检索响应无法解析");
             }
         }
+        /* OpenAlex 这一路单独走：中文稿先按"更可能带正文"的收敛式问一次，一条都没回来才补问一次宽式。 */
+        if (name.equals("openalex"))
+            return searchOpenAlex(phrase, per, safe, headers, cancellation).found;
         ApiClient.Response response = name.equals("ncpssd")
                 ? HttpTransport.post(endpoint(name), formFor(phrase, per), headers,
                         safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation, proxyFor(safe))
@@ -447,12 +450,7 @@ public final class PaperSources {
     static String queryFor(String engine, String phrase, int perEngine) throws IOException {
         String name = key(engine), query = encode(phrase);
         StringBuilder out = new StringBuilder();
-        if (name.equals("openalex")) out.append("filter=").append(encode("title_and_abstract.search:" + openAlexTerm(phrase)))
-                .append(",open_access.is_oa:true")
-                .append("&per-page=").append(perEngine)
-                /* mailto 是 OpenAlex  polite pool 的规矩：不改变返回内容，只是让这批匿名请求有个落款。 */
-                .append("&mailto=").append(encode(POLITE_MAILTO))
-                .append("&select=id,doi,title,language,authorships,publication_year,open_access,best_oa_location,abstract_inverted_index");
+        if (name.equals("openalex")) out.append(openAlexQuery(openAlexFilter(phrase), perEngine));
         else if (name.equals("crossref")) out.append("query.bibliographic=").append(query).append("&rows=").append(perEngine);
         else if (name.equals("semantic-scholar")) out.append("query=").append(query).append("&limit=").append(perEngine)
                 .append("&fields=title,abstract,year,authors,externalIds,openAccessPdf");
@@ -477,6 +475,41 @@ public final class PaperSources {
         if (value.isEmpty()) return "";
         return hasCjk(value) ? narrowing(value, 1, 16) : narrowing(value, 5, 60);
     }
+    /**
+     * 中文稿这一路的收敛条件。两个条件各自管一件事，实测在同一篇 19,967 字可比正文的稿子上
+     * （2026-10-09，前 6 条检索式，per-page=12，经 127.0.0.1:7897，
+     * {@code tools/recall-probe.ps1 -Probe OpenAlexFilterProbe}）：
+     * <p>只勾 open_access.is_oa（旧写法）——回来 45 条，其中 20 条带 pdf_url，只有 6 条的 pdf
+     * 落在自家解得开的白名单期刊官网，平均每篇 0.13 条，响应 1,043,678 字节；
+     * <p>再加 language:zh + primary_location.source.has_issn:true——回来 13 条，10 条带 pdf_url，
+     * 其中 9 条是白名单期刊官网（每篇 0.69 条，是旧写法的 5.3 倍），响应 75,611 字节（旧写法的 1/14）。
+     * <p>代价写在上面：条目数从 45 掉到 13。OpenAlex 这一路在整机里的职责是"把可能带正文的中文条目
+     * 问回来"，摘要级的广度仍由知网/万方/维普那几路负责。收敛式一条都没问回来的窗口补问一次宽式，
+     * 那种窗口占实测 6 扇里的 3 扇。
+     */
+    static final String OPENALEX_BODY_FILTERS = ",language:zh,primary_location.source.has_issn:true";
+    /** 补问那一遍的检索式挂的这个尾巴，只用于在留档里认出"这一行是补问"。 */
+    static final String OPENALEX_BROAD_NOTE = "（宽式补问）";
+
+    /** 这一扇窗口该用哪条 filter：中文稿走收敛式，拉丁文稿照旧只要求开放获取。 */
+    static String openAlexFilter(String phrase) {
+        String base = "title_and_abstract.search:" + openAlexTerm(phrase) + ",open_access.is_oa:true";
+        return hasCjk(phrase) ? base + OPENALEX_BODY_FILTERS : base;
+    }
+
+    /** 补问用的宽式：与 2.3.0 出厂时那条完全一致，一个字都没动。 */
+    static String openAlexBroadFilter(String phrase) {
+        return "title_and_abstract.search:" + openAlexTerm(phrase) + ",open_access.is_oa:true";
+    }
+
+    /** 把 filter 拼成一次 GET 的查询串。mailto 是 OpenAlex polite pool 的规矩：不改返回内容，只是落款。 */
+    static String openAlexQuery(String filter, int perEngine) throws IOException {
+        return "filter=" + encode(filter) + "&per-page=" + perEngine
+                + "&mailto=" + encode(POLITE_MAILTO)
+                + "&select=id,doi,title,language,authorships,publication_year,open_access,"
+                + "best_oa_location,abstract_inverted_index";
+    }
+
     private static boolean hasCjk(String value) {
         for (int i = 0; i < value.length(); i++) {
             char c = value.charAt(i);
@@ -1034,6 +1067,89 @@ public final class PaperSources {
             out.append(value);
         }
         return out.toString();
+    }
+
+    /** 一次 OpenAlex 提问的结果：解出的条目、源声称的总数、这一行是不是补问那一遍。 */
+    private static final class OpenAlexRound {
+        final ArrayList<Candidate> found = new ArrayList<Candidate>();
+        long declared = -1L;
+        boolean broad;
+    }
+
+    /**
+     * OpenAlex 的取数：一次收敛式，收敛式空手而归时补问一次宽式，两次之间按 URL/题名去重。
+     *
+     * <p>为什么不是"每次问两遍"：一次整轮检索共享 MAX_REQUESTS=120 次提问，实测这一轮本就顶到上限
+     * （2026-10-09 真跑：120 次问满，还剩 2 扇窗口没问）。补问只留给"收敛式一条都没回来"的窗口——
+     * 那种窗口不补就是零覆盖，补一次最多花掉一次请求。
+     * <p>为什么补问排在后面而不是替换：收敛式回来的条目带白名单期刊直链的比例是宽式的 5.3 倍
+     * （见 OPENALEX_BODY_FILTERS 上面那笔账），两遍的条目都进候选池，谁先花全文额度由
+     * CandidateRanker 按相似度与链接可下载性定，不在这里定。
+     */
+    private static OpenAlexRound searchOpenAlex(String phrase, int per, Limits safe,
+                                                Map<String, String> headers,
+                                                ApiClient.Cancellation cancellation) throws IOException {
+        OpenAlexRound first = askOpenAlex(openAlexFilter(phrase), phrase, per, safe, headers, cancellation, false);
+        if (!hasCjk(phrase) || !first.found.isEmpty()) return first;
+        OpenAlexRound broad;
+        try {
+            broad = askOpenAlex(openAlexBroadFilter(phrase), phrase + OPENALEX_BROAD_NOTE,
+                    per, safe, headers, cancellation, true);
+        } catch (IOException error) {
+            /* 补问那一路挂了不许把收敛式已经问回来的东西一起拖走：那几条是这一扇窗口唯一有的货。
+               失败本身照样落一行，否则留档里只剩"这一式回来 1 条"，看不出还欠一次补问。 */
+            recordShape(safe, "openalex", phrase + OPENALEX_BROAD_NOTE, null, 0, -1L, "fetch-failed",
+                    clipLine(error.getMessage(), 60), true);
+            return first;
+        } catch (RuntimeException error) {
+            recordShape(safe, "openalex", phrase + OPENALEX_BROAD_NOTE, null, 0, -1L, "fetch-failed",
+                    clipLine(error.getMessage(), 60), true);
+            return first;
+        }
+        /* 合并成一份新结果：往 broad.found 里加会把宽式那一批数两遍（真跑过一次就露馅）。 */
+        OpenAlexRound merged = new OpenAlexRound();
+        merged.broad = true;
+        merged.found.addAll(dedupInto(first.found, broad.found));
+        merged.declared = first.declared < 0L ? broad.declared
+                : (broad.declared < 0L ? first.declared : Math.max(first.declared, broad.declared));
+        return merged;
+    }
+
+    /** 把补问那一批并进收敛式那一批，同一条（URL 优先、空则题名）只留收敛式那一份。 */
+    private static ArrayList<Candidate> dedupInto(ArrayList<Candidate> kept, ArrayList<Candidate> extra) {
+        LinkedHashMap<String, Boolean> seen = new LinkedHashMap<String, Boolean>();
+        ArrayList<Candidate> out = new ArrayList<Candidate>(kept);
+        for (int i = 0; i < kept.size(); i++) keep(seen, kept.get(i));
+        for (int i = 0; i < extra.size(); i++) if (keep(seen, extra.get(i))) out.add(extra.get(i));
+        return out;
+    }
+
+    /** 一次提问：发出去、解条目、落一行留档。响应格式解不动照旧抛 IOException，让上层记这个源不可用。 */
+    private static OpenAlexRound askOpenAlex(String filter, String probe, int per, Limits safe,
+                                             Map<String, String> headers,
+                                             ApiClient.Cancellation cancellation,
+                                             boolean broad) throws IOException {
+        OpenAlexRound round = new OpenAlexRound();
+        round.broad = broad;
+        ApiClient.Response response = HttpTransport.get(endpoint("openalex") + "?" + openAlexQuery(filter, per),
+                headers, safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation, proxyFor(safe));
+        Object root;
+        try { root = ApiJson.parse(response.body); }
+        catch (RuntimeException error) {
+            recordShape(safe, "openalex", probe, response, 0, -1L,
+                    shapeOf(response.body, 0, -1L), "检索响应格式无效", true);
+            throw new IOException("检索响应格式无效");
+        }
+        round.declared = declaredTotal("openalex", root);
+        try { round.found.addAll(parseOpenAlex(root, per)); }
+        catch (RuntimeException error) {
+            recordShape(safe, "openalex", probe, response, 0, round.declared,
+                    shapeOf(response.body, 0, round.declared), "检索响应格式无效", true);
+            throw new IOException("检索响应格式无效");
+        }
+        recordShape(safe, "openalex", probe, response, round.found.size(), round.declared,
+                shapeOf(response.body, round.found.size(), round.declared), "", false);
+        return round;
     }
 
     private static ArrayList<Candidate> parseOpenAlex(Object root, int limit) {
