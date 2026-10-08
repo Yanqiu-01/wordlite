@@ -98,6 +98,7 @@
 1. 先写回归断言，再写实现。
 2. `pwsh tools/test-host.ps1` 全绿；动到界面或渲染的版本再跑 Robolectric。
 3. `pwsh tools/build-host.ps1` 出 APK，`pwsh tools/release-version.ps1 -Version x.y.z` 一次完成升版本、提交、打 tag、开 release 并附上可安装 APK。
+4. **每一版都要与微软原生 Word 再对一次版**（常驻职责，不许攒到"以后统一对"）：`pwsh tools/capture-device.ps1` 采手机侧真值 -> `pwsh tools/word-parity.ps1`（分页归属）、`pwsh tools/edge-parity.ps1 -Impl new`（两端对齐右边界）、`pwsh tools/line-break-delta.ps1`（逐行换行点），上标/下标对行高与分页的影响单列一行数字；结果与 `docs/edge-parity-baseline.md` 的基线逐条对比，进步退步都写进去。真值来自桌面 Word 16.0 的 COM 扫描（`tools/word-line-breaks.ps1`、`tools/word-justify-truth.ps1`），手机版微软 Word 的包是仓库根的 `base.apk.1`（`base.apk (1).1` 是 Word Lite 自己的包，别搞混）。
 
 ---
 
@@ -113,8 +114,8 @@
 | --- | --- | --- |
 | 1.1.4 | 已交付：D2 落地——字符袋 Dice 成为第三条 OR 判据，地板 0.72 是负例天花板 0.577 + 0.14 量出来的；虚词二元组那条按实测天花板 1.0 作废，实现留在实测台里当反证尺 | `sub-char-25` 26.4% → 53.8%，17 档噪声仍为 0；`TextCorpusRegression` 183 → 200、`RewriteRobustnessRegression` 69 → 81，全量 24 套件 2456 → 2496；天花板表在 `docs/rewrite-robustness.md` 的 1.1.4 一节 |
 | 1.1.5 | 短句碎片进比对（D4，即上一轮的 1.1.5）：`TextCorpus.MIN_SENTENCE_CHARS` 12 → 10，同时把短句桶的共享三元组地板 3 → 5。两档一起动，不许只放门槛 | **对账：本行内容实测否掉，判据一个字没改。** 新加 `chopped` 口径（抄来的段落每十字补一个逗号）专门量这一档，`-Drrd4=1` 把门扫到 12/11/10/9：`verbatim`、`split-commas`、`chopped`、`pruned`、`sub-char-25` 五列与嵌入档逐位不动，噪声四行全 0；短句桶地板 3 与 5 同样逐位相同，那条通道扫完就删了。原因：短的逐字碎片由指纹带接住（`Fingerprints.tokens()` 跳标点，补的逗号打不断 token 流），句长门只管逐句那一条路。表在 `docs/rewrite-robustness.md` 的 1.1.5 一节；`RewriteRobustnessRegression` 81 → 84（`chopped` + `-Drrd4`）、`TextCorpusRegression` 200 → 203 |
-| 1.1.6 | 裁后区间自己把分值说清楚（上一轮的 1.1.6）：`hit.score` 现在是一对片段的加权 Dice，一条窄命中报的是整个片段的相似度；改成按裁后区间重算，并把 `MIN_SHARED_BLOCK = 5` 与 `MAX_SHARED_BLOCKS = 16` 拿到真文档标定台上各扫一遍（这两档至今只在宿主用例上定过） | `DetectRegression` 的分值档全部重扫并给出改前改后两个数；`tools/detect-calibration.ps1` 换一档常数要说清召回与误报各动多少，表落 `docs/detection-calibration.md` |
-| 1.1.7 | 拼接片段不许只认半句（上一轮的 1.1.7）：1.1.1 的守卫是"多候选片段整段报"，代价是 `merge-pairs` −4 字；正确做法是对过线的前 N 个候选各裁一次再取并集 | `merge-pairs` / `spliced` 回到 99.7% / 99.5% 以上，而 `embedding` 的 0 字连带标红不许回去（`RewriteRobustnessRegression` 的多报天花板每句 ≤ 4 字仍绿） |
+| 1.1.6 | 交付两件事：**(a) 袋口径的分值不再打零分**——`score = max(字面 Dice, 袋 Dice x 0.8)`，因为候选一旦由字符袋倒排补进来，字面三元组可以是零，证据表上会出现"相似度 0.0%"配一段红字；**(b) 取候选这一步脱离三元组**——字符袋倒排 + 最稀字播种，把原排在 1.2.4 的那条提前做掉（种子只决定验证谁，判据仍是精确袋 Dice） | 已实测：18 档召回、噪声、归属、嵌入档、标定台 `ENGINE CURRENT` **逐位不动**（`sub-char-50` 均匀替换后袋 Dice 自己就掉到 0.5 上下，够不到 0.72；过线那 14.5% 多半还留着三枚三元组，1.1.4 已接住）。买到的用机制断言钉住：整句倒过来写（袋 1.0 / 三元组 0.0）改前一条不报、现在报一条，地板抬到 1 以上那条路整条空转；`TextCorpusRegression` 203 → 206。开销：9242 字稿子多精算 2018 个候选。表与理由在 `docs/rewrite-robustness.md` 的 1.1.6 一节。**本行原写的"按裁后区间重算 Dice"与 `MIN_SHARED_BLOCK`/`MAX_SHARED_BLOCKS` 上标定台未做，挪到 1.1.7** |
+| 1.1.7 | 两条并进来做：**(a)** 1.1.6 挪下来的"裁后区间自己把分值说清楚"（`hit.score` 按裁后区间重算）+ `MIN_SHARED_BLOCK = 5`、`MAX_SHARED_BLOCKS = 16` 上真文档标定台各扫一遍；**(b)** 拼接片段不许只认半句（上一轮的 1.1.7）：对过线的前 N 个候选各裁一次再取并集 | (a) `DetectRegression` 的分值档全部重扫并给改前改后两个数，标定台换一档常数要说清召回与误报各动多少，表落 `docs/detection-calibration.md`；(b) `merge-pairs` / `spliced` 回到 99.7% / 99.5% 以上，而 `embedding` 的 0 字连带标红不许回去（多报天花板每句 ≤ 4 字仍绿） |
 
 ### 1.2.x 报告能说的话：证据形状与导出（4 版）
 
@@ -122,8 +123,8 @@
 | --- | --- | --- |
 | 1.2.1 | 袋口径的天花板随句长分桶：0.577 这个天花板是整批句子一个数，而三元组那边的经验是长句桶天花板最高（0.358 出现在 50-80 字桶）。把袋天花板按短/中/长三桶分别量一遍，必要时把 `SIMILAR_BAG_DICE` 换成分档表 | `RewriteRobustnessRegression.bagStudy` 出三桶分表 + 反证（把地板压到各自天花板之下必须各撞出误标）；分档表与两张表（各桶召回、各桶误报）落 `docs/paraphrase-robustness.md`；召回不升就只做度量、产品值不动，并把"不落地"写进那条 |
 | 1.2.2 | 报告里那句"相似率是下限"给一个可算的下界：`TextCorpus.Report` 已经记着覆盖窗口数与入库篇数，把它和 `windowsAsked` 一起换算成"已读 / 应收"两栏并进指标卡（`ReportCenterUI.summaryHtml`），而不是只在说明里写一句话 | `ReportStoreRegression` 加断言：覆盖率随 `windowsAsked` 单调、缺数据时那一格显示"未量到"而不是 100%；HTML 那一格只出现一次（与 `flaggedChars` 同一类断言） |
-| 1.2.3 | 逐句可疑区间与 `flaggedChars` 进报告，不再只印一个字符加权句分：`AigcDetector.Sentence.flaggedChars` 在 `AigcRegression` 里有断言，但报告面板与 HTML 一个字都没读它（0.7.0 对账承认"只做到一半"，一直拖到现在）。五档置信与可疑字数一起进指标卡，重复/改写/AI/疑似 AI 四个数与 `CharLedger` 同口径 | `ReportStoreRegression` + `CharLedgerRegression` 加断言：四个数加和 ≤ 100%，档位边界与 `AigcDetector` 五档一致；Robolectric `ReportCenterTest` 断言那一格在深色/浅色两套配色下都渲染 |
-| 1.2.4 | **袋口径的候选生成脱离三元组倒排**（本轮精度遗留里最要紧的一条，1.1.4 的 CHANGELOG 已经把它单独列成"没修的那一半"）：`TextCorpus.bestMatch` 的候选仍来自三元组倒排并要过 `shared >= 3`，改写重到不剩三枚首尾相接三元组的句子根本进不了打分——这才是 `sub-char-50` 停在 7.6% 的原因（句级过线率本来是 14.5%）。换成字符袋倒排 + PPJoin 式前缀过滤：按字频取最稀的几枚字做种子，前缀按 df 升序排，长度不够的候选在比对之前按袋长度上界剪掉 | `RewriteRobustnessRegression` 加一列"进候选率"（目标句是否出现在打分候选里），`sub-char-50` 的段级召回从 7.6% 起报改前改后两个数（目标值待实测，不预设）；`tools/full-scan-probe.ps1` 的 RATES 段不许变差；每篇候选的前缀长度与倒排条目数打印出来，倒排体积上限进 `TextCorpusRegression` 的开销断言 |
+| 1.2.3 | **前提待核**：本行原写"报告面板与 HTML 一个字都没读 `flaggedChars`"，与 1.1.6 时读的代码不符——`CheckReport` 第四格与 `ReportCenterUI` 已经在打档位 + 可疑字数（见 `CheckReport.java` 第四格那段注释与 0.7.1 口径）。动这一版之前先重新对一遍现状，只剩"面板展开明细"与"每句区间的落点跳转"就照剩下的做，不许照本行原样重做一遍已经存在的东西 | 重新核对后给出现状清单（哪几项已经在报告里、哪几项缺）；缺的部分按 `ReportStoreRegression` + `CharLedgerRegression` 断言：四个数加和 <= 100%、档位边界与 `AigcDetector` 五档一致；Robolectric 断言渲染 |
+| 1.2.4 | ~~袋口径的候选生成脱离三元组倒排~~ **已提前交付于 1.1.6**：字符袋倒排 + 最稀字播种补候选，种子只决定验证谁，判据仍是精确袋 Dice，开销三档封顶 | 对账见 1.1.6 行（18 档召回与标定台逐位不动，买到的能力用"整句倒过来写"那条机制断言钉住）。本行原来还要求"把每篇候选的前缀长度与倒排条目数打印出来"——那半句挪进 1.1.7(a) 的真文档标定台一起做（待实测） |
 
 ### 1.3.x 编辑与自建库的边角（4 版）
 
@@ -198,3 +199,4 @@
 1. 先写回归断言，再写实现。
 2. `pwsh tools/test-host.ps1` 全绿；动到界面或渲染的版本再跑 Robolectric（`sh tools/build.sh && sh tools/test.sh`）。
 3. `pwsh tools/build-host.ps1` 出 APK，`pwsh tools/release-version.ps1 -Version x.y.z` 一次完成升版本、提交、打 tag、开 release 并附上可安装 APK。
+4. **每一版都要与微软原生 Word 再对一次版**（常驻职责，不许攒到"以后统一对"）：`pwsh tools/capture-device.ps1` 采手机侧真值 -> `pwsh tools/word-parity.ps1`（分页归属）、`pwsh tools/edge-parity.ps1 -Impl new`（两端对齐右边界）、`pwsh tools/line-break-delta.ps1`（逐行换行点），上标/下标对行高与分页的影响单列一行数字；结果与 `docs/edge-parity-baseline.md` 的基线逐条对比，进步退步都写进去。真值来自桌面 Word 16.0 的 COM 扫描（`tools/word-line-breaks.ps1`、`tools/word-justify-truth.ps1`），手机版微软 Word 的包是仓库根的 `base.apk.1`（`base.apk (1).1` 是 Word Lite 自己的包，别搞混）。

@@ -254,8 +254,11 @@ public final class TextCorpusRegression {
         TextCorpus.Hit hit = null;
         for (int i = 0; i < on.hits.size(); i++) if (on.hits.get(i).source == paper) hit = on.hits.get(i);
         check(hit != null, "袋口径的命中要署得出来源");
-        check(hit != null && hit.score < TextCorpus.SIMILAR_DICE,
-                "这条命中的分值仍是字面 Dice（" + (hit == null ? 0f : hit.score) + "），不许拿袋口径的分顶上去");
+        // 1.1.6 起袋口径的打分管径改成 max(字面 Dice, 袋 Dice x 0.8)：字面三元组可以是零，
+        // 报"相似度 0.0%"配一段红字就是用户眼里的 bug。八折沿用包含率那条通道的系数。
+        check(hit != null && Math.abs(hit.score - Math.max(gram, bag * 0.8f)) < 0.02f,
+                "袋口径的命中分值 = max(字面 Dice, 袋 Dice 的八折)，实测 " + (hit == null ? 0f : hit.score)
+                        + "，字面 " + gram + "，袋 " + bag);
         TextCorpus.overrideBagFloor(1.01f);
         TextCorpus.Report off;
         try {
@@ -284,11 +287,71 @@ public final class TextCorpusRegression {
         check(flagged.length() <= swapped.length() - 18,
                 "整句 " + swapped.length() + " 字最多只许红 " + (swapped.length() - 18) + " 字，实测 "
                         + flagged.length() + " 字：自己写的与改写掉的字必须留在红区之外");
+        // 机制：把整句倒过来写——字符袋一个字不差，三元组一枚不剩（Dice 实测 0.0）。以前候选只来自
+        // 三元组倒排，这种句子连被袋口径看一眼的机会都没有；现在由字符袋倒排补进候选。这一档不是
+        // 为了抓"倒着抄"，是为了钉住"取候选这一步已经脱离三元组"这件事：把它改回只认三元组倒排，
+        // 这两条断言当场失败。
+        String reversed = new StringBuilder(base).reverse().toString();
+        TextCorpus res = new TextCorpus();
+        TextCorpus.Source rescueSource = source("bag-3", "倒排取候选", "wanfang");
+        res.add(rescueSource, base);
+        String reversedQuery = "前言部分占位文字若干字，用来把偏移推开一点。" + reversed;
+        TextCorpus.Report onRescue = res.match(reversedQuery, null);
+        boolean sawReversed = false;
+        for (int i = 0; i < onRescue.hits.size(); i++) {
+            if (onRescue.hits.get(i).source == rescueSource) sawReversed = true;
+        }
+        check(sawReversed, "字面三元组为零、字符袋全等的改写句必须查得出来（袋口径的字符袋倒排取候选）");
+        check(res.bagProbes() > 0, "这一枪必须真的走过字符袋倒排的精算，实测精算 " + res.bagProbes() + " 个候选");
+        TextCorpus offRes = new TextCorpus();
+        offRes.add(rescueSource, base);
+        TextCorpus.overrideBagFloor(1.01f);
+        TextCorpus.Report offRescue;
+        try {
+            offRescue = offRes.match(reversedQuery, null);
+        } finally {
+            TextCorpus.restoreBagFloor();
+        }
+        check(offRescue.hits.isEmpty() && offRes.bagProbes() == 0,
+                "地板抬到 1 以上时字符袋那条取候选的路必须整条空转：命中 " + offRescue.hits.size()
+                        + " 条、精算 " + offRes.bagProbes() + " 个候选");
         // 负例：同领域、同一套术语、说的是另一件事——三元组与袋都不许过线。
         TextCorpus negative = new TextCorpus();
         negative.add(source("bag-2", "另一篇交通论文", "wanfang"), base);
         check(negative.match("城区路网的投资强度在过去十年里持续上升，公共交通的客运分担率却停滞不前，"
                 + "这两条曲线背后的政策逻辑完全不同。", null).hits.isEmpty(), "同领域另一件事不许被袋口径撞车");
+        /* 字族门（TextCorpus.BAG_LATIN_CEILING）：字符袋在拉丁字母表上没有意义——二十六个字母加数字，
+           同一个子领域的两个英文题名、两条参考文献，字符袋天然互相包含。真人语料实测：袋口径过线的
+           406 对全部落在拉丁占比 >= 0.5 那一桶，最靠近门的一对是 0.743，0.5 以下 0 对（复现
+           pwsh tools/bag-false-positive-probe.ps1）。下面三条钉住：拉丁文本不许走袋口径；把门抬到 0.95
+           把门拆掉它就报出来（证明拒它的是这道门，不是别的环节）；而中文句子里夹几个英文术语不受影响——
+           那条断言就是上面 bag-1 那一枪，它的拉丁占比实测在下面打印。 */
+        String latinA = "Review of die attached silver sintering technology for high temperature electronics packaging";
+        String latinB = "Recent progress in transient liquid phase bonding of silicon carbide devices at high temperature";
+        float latinBag = TextCorpus.bagDice(latinA, latinB);
+        System.out.println("LATIN GATE 两条英文题名的袋 Dice=" + latinBag + "，拉丁占比 "
+                + AigcFamily.latinRatio(TextCorpus.compactOf(latinB)) + "（门 " + AigcFamily.LATIN_RATIO + "）");
+        check(latinBag >= TextCorpus.SIMILAR_BAG_DICE,
+                "这两条英文题名必须过袋口径的地板——拉丁袋谁都过线，实测 " + latinBag);
+        TextCorpus latin = new TextCorpus();
+        TextCorpus.Source latinSource = source("bag-4", "英文题名", "cnki");
+        latin.add(latinSource, latinA);
+        boolean latinSaw = saw(latin.match(latinB, null), latinSource);
+        check(!latinSaw, "拉丁文本不许走袋口径：两条英文题名撞袋是常态，报出来就是误报");
+        TextCorpus.Report gateLifted;
+        TextCorpus.overrideBagLatinCeiling(1.01d);
+        try {
+            gateLifted = latin.match(latinB, null);
+        } finally {
+            TextCorpus.restoreBagLatinCeiling();
+        }
+        check(saw(gateLifted, latinSource), "把字族门抬到 1.01（等于不设门）这一对就得报出来——证明上一条拒它的是这道门");
+    }
+
+    /** 命中里有没有署给某个来源的。 */
+    private static boolean saw(TextCorpus.Report report, TextCorpus.Source source) {
+        for (int i = 0; i < report.hits.size(); i++) if (report.hits.get(i).source == source) return true;
+        return false;
     }
 
     /**

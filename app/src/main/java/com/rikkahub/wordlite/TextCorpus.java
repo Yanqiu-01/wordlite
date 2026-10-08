@@ -173,11 +173,58 @@ public final class TextCorpus {
      * 只报两边实际共享的那几段（clipToSharedBlocks），改写过的字不许跟着红。
      */
     public static final float SIMILAR_BAG_DICE = 0.72f;
+    /**
+     * 字符袋倒排的 df 上限：装过某个字的条目数超过这个数，这个字谁都装，做不了种子，整条不进索引。
+     * 有了这一档，倒排体积的上限就是「不同字数 x 64 个条目号」，不会跟着语料一起长到天边去。
+     */
+    private static final int BAG_DF_CAP = 64;
+    /** 一个片段最多拿几枚最稀的字去查倒排。种子只决定"去验证谁"，判据仍是精确袋 Dice。 */
+    private static final int BAG_SEED_CHARS = 4;
+    /** 单枚种子的 posting 扫描上限与一个片段最多精算几个候选：把最坏开销钉成常数。 */
+    private static final int BAG_POSTING_SCAN_CAP = 256, BAG_VERIFY_CAP = 64;
+    /**
+     * 袋口径只管"大字母表"上的文本——这一档是实测出来的门（1.1.6），不是判据的松紧。袋是"出现过哪些字"
+     * 的集合，所以它的误报率由可用字有多少决定：汉字可用字上千，两句不相关的中文撞不到七成五；拉丁字母
+     * 折成小写只剩二十六个加十个数字，同一个子领域的两个英文标题、两条参考文献，字符袋天然互相包含。
+     * 拿 tests/corpus/real-prose.txt 的真人语料跨条目两两配对实测（125 条、880 个不同字）：袋 Dice 过
+     * 0.72 的配对共 406 对，**全部**落在拉丁占比 >= 0.5 那一桶，最高到 1.000，而它们共享的稀字
+     * （df <= 8）是 0 个；拉丁占比低于 0.15 的配对过线 **0** 对。复现：pwsh tools/bag-false-positive-probe.ps1
+     *
+     * 门借 AigcFamily.LATIN_RATIO（0.50，"这一段算拉丁族"那档，0.5.4 起就在用）：两边都不是拉丁族，才让
+     * 袋口径参与判定。为什么不放在混排那一档（0.15）——量过了：放在 0.15 会把含化学式与英文术语的中文
+     * 句子一起请出去（sub-char-25 召回 53.8% → 51.6%、sub-char-50 7.6% → 2.5%），而 0.15 到 0.5 这一桶
+     * 里过线负例是 0 对，一分钱噪声都换不掉。它不改任何一条判据的数值，只把"字符袋在这个字母表上毫无
+     * 意义"的那批文本请出这条通道——三元组 Dice 与包含率那两条照旧管拉丁文本，逐字抄的英文照样报。
+     * 代价也写死：英文整句改写（换了词、剩下同一批字母）这一版起不由袋口径接住，那要的是词级袋而不是字符袋。
+     */
+    private static final double BAG_LATIN_CEILING = AigcFamily.LATIN_RATIO;
     /** 抗改写实测台（RewriteRobustnessRegression -Drrbag）扫这一档用的活值，产品路径一次也不碰。 */
     private static float bagDiceFloor = SIMILAR_BAG_DICE;
+    /** 同上：扫字族门用的活值。 */
+    private static double bagLatinCeiling = BAG_LATIN_CEILING;
 
     static void overrideBagFloor(float dice) {
         bagDiceFloor = dice;
+    }
+
+    static void overrideBagLatinCeiling(double ceiling) {
+        bagLatinCeiling = ceiling;
+    }
+
+    static void restoreBagLatinCeiling() {
+        bagLatinCeiling = BAG_LATIN_CEILING;
+    }
+
+    /* 资格算的是"这一段拉丁占比多少"，门单独比：缓存里存的是比值而不是判定结果，实测台把门抬起抬起放下
+       都不会读到过期判定。-1 是还没算过。 */
+    private static boolean bagEligible(Frag frag) {
+        if (frag.latinRatio < 0d) frag.latinRatio = AigcFamily.latinRatio(frag.key);
+        return frag.latinRatio < bagLatinCeiling;
+    }
+
+    private static boolean bagEligible(Entry entry) {
+        if (entry.latinRatio < 0d) entry.latinRatio = AigcFamily.latinRatio(entry.key);
+        return entry.latinRatio < bagLatinCeiling;
     }
 
     static void restoreBagFloor() {
@@ -238,6 +285,8 @@ public final class TextCorpus {
         final int chars;
         /** 字符袋，第一次被袋口径问到才算（见 bestMatch）。一篇文献进来未必会被问到，不必都算。 */
         char[] bag;
+        /** 拉丁字母占比，-1 未算；袋口径的字族门拿它现比，见 BAG_LATIN_CEILING。 */
+        double latinRatio = -1d;
         Entry(String key, long[] grams, long[] signature, int sourceIndex, int chars) {
             this.key = key;
             this.grams = grams;
@@ -255,6 +304,8 @@ public final class TextCorpus {
         long[] signature;
         /** 同上：袋口径用到才算一次。 */
         char[] bag;
+        /** 同上：片段的拉丁字母占比，-1 未算。 */
+        double latinRatio = -1d;
         int chars;
         int start, end;
     }
@@ -283,6 +334,17 @@ public final class TextCorpus {
     private final GramIndex index = new GramIndex();
     /** 原文窗口折叠串 -> 句子 id：逐字相同的抄袭不依赖倒排，重复度极高的文本也不会漏报。 */
     private final HashMap<String, Integer> exact = new HashMap<String, Integer>();
+    /**
+     * 字 -> 装过这个字的条目号。三元组倒排捞不到的改写句由它补候选（见 bestMatch 里"袋口径取候选"那段），
+     * df 超过 BAG_DF_CAP 的字整条作废：那类字谁都装，拿它当种子只是白扫一遍。
+     */
+    private final HashMap<Character, BagPosting> bagIndex = new HashMap<Character, BagPosting>();
+    private int[] bagStamps = new int[0];
+    private int bagStamp;
+    private final char[] bagSeeds = new char[BAG_SEED_CHARS];
+    private final int[] bagSeedCounts = new int[BAG_SEED_CHARS];
+    /** 上一次 match() 里袋口径倒排多精算了几个候选：只给实测台与注记看，不参与判据、不进任何比率。 */
+    private int bagProbes;
     private int skippedSentences;
     /**
      * 上一次 match() 里同一段字符被两篇以上文献命中的字符数（有效字符口径：把所有"被别篇先占走"的区间
@@ -314,6 +376,7 @@ public final class TextCorpus {
                 int entryId = entries.size();
                 entries.add(entry);
                 index.add(entry.grams, entryId);
+                indexBag(entryId);
                 if (!exact.containsKey(frag.key)) exact.put(frag.key, Integer.valueOf(entryId));
             }
         }
@@ -481,6 +544,8 @@ public final class TextCorpus {
         entries.clear();
         index.clear();
         exact.clear();
+        bagIndex.clear();
+        bagProbes = 0;
         docNorms.clear();
         docTokens.clear();
         docSource.clear();
@@ -790,6 +855,100 @@ public final class TextCorpus {
         map.put(key, Integer.valueOf(previous == null ? delta : previous.intValue() + delta));
     }
 
+    /** 一条句子的字进字符袋倒排。袋子已经在懒算时算好，这里只登记条目号。 */
+    private void indexBag(int entryId) {
+        Entry entry = entries.get(entryId);
+        if (entry.bag == null) entry.bag = bagOfKey(entry.key);
+        char[] bag = entry.bag;
+        for (int i = 0; i < bag.length; i++) {
+            Character key = Character.valueOf(bag[i]);
+            BagPosting posting = bagIndex.get(key);
+            if (posting == null) {
+                posting = new BagPosting();
+                bagIndex.put(key, posting);
+            }
+            if (posting.dead) continue;
+            if (posting.count >= BAG_DF_CAP) {
+                posting.dead = true;
+                posting.ids = null;
+                continue;
+            }
+            if (posting.count == posting.ids.length) posting.ids = Arrays.copyOf(posting.ids, posting.count * 2);
+            posting.ids[posting.count++] = entryId;
+        }
+    }
+
+    /**
+     * 片段里最稀的几枚字：填进 bagSeeds，返回实际枚数。df 大到进了 dead 的字不当种子——那类字谁都装，
+     * 扫它只是白花一次精算。袋口径的地板要求两边共享七成五的字，稀有字恰恰是最能区分候选的那几枚。
+     */
+    private int pickRareSeeds(char[] bag) {
+        int picked = 0;
+        for (int i = 0; i < bag.length; i++) {
+            BagPosting posting = bagIndex.get(Character.valueOf(bag[i]));
+            if (posting == null || posting.dead || posting.count == 0) continue;
+            int rank = picked;
+            for (int s = 0; s < picked; s++) {
+                if (posting.count < bagSeedCounts[s]) { rank = s; break; }
+            }
+            if (rank >= BAG_SEED_CHARS) continue;
+            for (int s = Math.min(picked, BAG_SEED_CHARS - 1); s > rank; s--) {
+                bagSeeds[s] = bagSeeds[s - 1];
+                bagSeedCounts[s] = bagSeedCounts[s - 1];
+            }
+            bagSeeds[rank] = bag[i];
+            bagSeedCounts[rank] = posting.count;
+            if (picked < BAG_SEED_CHARS) picked++;
+        }
+        return picked;
+    }
+
+    /**
+     * 三元组倒排捞不到的句子，由字符袋倒排补候选（1.2.0）。这一路存在的理由写在 docs 里：候选过去只
+     * 来自三元组倒排并要过 shared >= 3，改写重到不剩三枚首尾相接三元组的句子根本进不了打分，袋 Dice
+     * 再高也没人生效——sub-char-50 停在 7.6% 而同一批句子袋口径过线率是 14.5%，差的全是"没进候选"。
+     *
+     * 种子只决定"去验证谁"，判据一个字节都没动：过线仍然是精确袋 Dice >= SIMILAR_BAG_DICE，所以种子
+     * 取得松或紧不会让任何一句话改变判定，只会让它被多验或漏验。开销三档封顶（种子枚数、单枚 posting
+     * 扫描、每片段精算个数）。地板被实测台抬到 1 以上时这一路自动整条空转，与关掉这条通道等价。
+     */
+    private int bagRescue(Frag frag, char[] queryBag, float[] bestOut) {
+        if (bagIndex.isEmpty() || bagDiceFloor > 1f) return -1;
+        if (!bagEligible(frag)) return -1;
+        int picked = pickRareSeeds(queryBag);
+        if (picked == 0) return -1;
+        if (bagStamps.length < entries.size()) bagStamps = new int[entries.size() * 2 + 64];
+        bagStamp++;
+        int verified = 0, chosen = -1;
+        float bestBag = 0f;
+        for (int s = 0; s < picked && verified < BAG_VERIFY_CAP; s++) {
+            BagPosting posting = bagIndex.get(Character.valueOf(bagSeeds[s]));
+            if (posting == null || posting.dead) continue;
+            int limit = Math.min(posting.count, BAG_POSTING_SCAN_CAP);
+            for (int i = 0; i < limit && verified < BAG_VERIFY_CAP; i++) {
+                int entryId = posting.ids[i];
+                if (entryId < 0 || entryId >= entries.size()) continue;
+                if (bagStamps[entryId] == bagStamp) continue;
+                bagStamps[entryId] = bagStamp;
+                Entry candidate = entries.get(entryId);
+                verified++;
+                if (!bagEligible(candidate)) continue;
+                if (candidate.bag == null) candidate.bag = bagOfKey(candidate.key);
+                bagProbes++;
+                if (bagReach(queryBag, candidate.bag) < bagDiceFloor) continue;
+                float value = bagDiceOf(queryBag, candidate.bag);
+                if (value < bagDiceFloor || value <= bestBag) continue;
+                bestBag = value;
+                chosen = entryId;
+            }
+        }
+        bestOut[0] = bestBag;
+        return chosen;
+    }
+
+    /** 上一次 match() 里袋口径倒排多精算了几个候选，供实测台与注记读，不参与判据。 */
+    int bagProbes() { return bagProbes; }
+
     /** 倒排取候选，按命中数降序取前 MAX_CANDIDATES 个做精确 Dice。 */
     private boolean bestMatch(Frag frag, Counter counter, int[] postings, long[] scratch,
                                        SharedBlocks blocks, Match out) {
@@ -812,7 +971,8 @@ public final class TextCorpus {
             scanned = index.accumulate(grams[i], postings, counter, scanned);
         }
         int found = counter.collect(scratch, entries, frag.signature);
-        if (found == 0) return false;
+        /* found == 0 不再当场 return：一枚三元组都不共享正是"改写重到进不了候选"那种句子，以前它连被
+           袋口径看一眼的机会都没有。下面那个循环在 found == 0 时自然一次都不走，代价只有两次空操作。 */
         Arrays.sort(scratch, 0, found);
         int queryLength = grams.length;
         float bestScore = 0f;
@@ -820,6 +980,7 @@ public final class TextCorpus {
         boolean bestExact = false;
         boolean bestViaContainment = false;
         boolean bestViaBag = false;
+        float bestBagValue = 0f;
         int evaluated = 0, passed = 0;
         /* 袋口径的查询侧袋子：一个片段算一次，压在下面那个循环里就不会变成 400 次排序。 */
         char[] queryBag = null;
@@ -868,13 +1029,20 @@ public final class TextCorpus {
                分值不抬——这一档报出去的仍是字面三元组的 Dice，改写越重报出的分越低，因为分值不许
                超过字面证据。落点跟着走 clipToSharedBlocks：只红两边真重合的那几段。 */
             boolean viaBag = false;
-            if (!similar) {
+            float viaBagValue = 0f;
+            /* 字族门（BAG_LATIN_CEILING）：两边有一段是拉丁文本，这一条通道就不问——拉丁袋的 0.72 实测
+               是"两句毫无关系也能过线"，与它商量阈值没有意义，只能不问。 */
+            if (!similar && bagEligible(frag) && bagEligible(candidate)) {
                 if (queryBag == null) queryBag = frag.bag = bagOfKey(frag.key);
                 if (candidate.bag == null) candidate.bag = bagOfKey(candidate.key);
-                if (bagReach(queryBag, candidate.bag) >= bagDiceFloor
-                        && bagDiceOf(queryBag, candidate.bag) >= bagDiceFloor) {
-                    viaBag = true;
-                    similar = true;
+                if (bagReach(queryBag, candidate.bag) >= bagDiceFloor) {
+                    viaBagValue = bagDiceOf(queryBag, candidate.bag);
+                    if (viaBagValue >= bagDiceFloor) {
+                        viaBag = true;
+                        similar = true;
+                    } else {
+                        viaBagValue = 0f;
+                    }
                 }
             }
             if (!similar) continue;
@@ -886,7 +1054,24 @@ public final class TextCorpus {
             bestExact = exact;
             bestViaContainment = viaContainment;
             bestViaBag = viaBag;
+            bestBagValue = viaBagValue;
             if (bestScore >= 0.999f) break;
+        }
+        /* 三元组这一圈什么都没捞到，才让字符袋倒排去补候选，理由与开销上限都写在 bagRescue 上。
+           补上之后走的是同一条落点与分值口径：只报两边实际共享的那几段，分值仍是字面三元组 Dice，
+           改写越重报出的分越低——分值不许超过字面证据。 */
+        if (bestId < 0) {
+            if (queryBag == null) queryBag = frag.bag = bagOfKey(frag.key);
+            float[] rescuedBag = new float[1];
+            int rescued = bagRescue(frag, queryBag, rescuedBag);
+            if (rescued >= 0) {
+                bestId = rescued;
+                bestExact = false;
+                bestViaContainment = false;
+                bestViaBag = true;
+                bestBagValue = rescuedBag[0];
+                passed++;
+            }
         }
         if (bestId < 0) return false;
         if (!bestExact) {
@@ -894,6 +1079,12 @@ public final class TextCorpus {
             Entry chosen = entries.get(bestId);
             bestScore = 2f * intersectCount(grams, chosen.grams) / (queryLength + chosen.grams.length);
         }
+        /* 袋口径那两条路的分值：取 max(字面 Dice, 袋 Dice 的八折)。1.1.4 原本定的是"分值不抬、仍打
+           字面三元组 Dice"，那句在袋口径只可能带三枚以上共享三元组的时候还讲得通；一旦候选由字符袋
+           倒排补进来，字面三元组可以是零，报出去的"相似度 0.0%"配上一段红字就是用户眼里的 bug。八折
+           这个系数沿用包含率那条通道（containment * 0.8f），不是新发明的。相似率的分子是字符数，
+           跟这个分值无关——分值只影响证据表上那一格。 */
+        if (bestViaBag) bestScore = Math.max(bestScore, bestBagValue * 0.8f);
         out.entryId = bestId;
         out.score = bestScore;
         /* 裁到"两边实际共享的那一段"只在一个片段只跟一个候选对得上时才是安全的。同一个片段里有两句
@@ -1906,6 +2097,13 @@ public final class TextCorpus {
     // ---- 原生索引结构（无装箱）----
 
     /** 三元组哈希 -> 句子 id 倒排表，链表式 posting，超过停用词上限后不再存储。 */
+    /** 字符袋倒排的一条 posting：装过某个字的条目号。df 超上限就整条作废，不再往里塞。 */
+    private static final class BagPosting {
+        int[] ids = new int[4];
+        int count;
+        boolean dead;
+    }
+
     private static final class GramIndex {
         private long[] keys = new long[1024];
         private int[] heads = new int[1024];
