@@ -391,8 +391,17 @@ public final class SourceLedgerRegression {
                 report.comparedChars);
         check(report.hits.size() == 2, "甲篇走句级命中、乙篇走指纹带，两条路各出一条命中");
         check(ledger.rows.size() == 2, "两篇各占来源榜一行");
+        StringBuilder seen = new StringBuilder();
+        for (int i = 0; i < report.hits.size(); i++) {
+            TextCorpus.Hit hit = report.hits.get(i);
+            seen.append('[').append(hit.source == null ? "?" : hit.source.id).append(' ')
+                    .append(hit.start).append("..").append(hit.end)
+                    .append(" score=").append(Math.round(hit.score * 1000f) / 1000f).append(']');
+        }
         check(ledger.rows.get(0).duplicateChars == 27 && ledger.rows.get(1).duplicateChars == 24,
-                "甲篇拿整句 27 个字，乙篇只拿没被盖住的 24 个字（带子长 31，重叠那 7 个字归甲篇）");
+                "甲篇拿整句 27 个字，乙篇只拿没被盖住的 24 个字（带子长 31，重叠那 7 个字归甲篇），实测甲="
+                        + ledger.rows.get(0).duplicateChars + " 乙=" + ledger.rows.get(1).duplicateChars
+                        + " 命中=" + seen);
         check(sum(ledger) == report.duplicateChars && sum(ledger) == 51,
                 "重叠的那 7 个字没有在两行里各算一遍：27 + 24 = 51 等于分子");
         check(corpus.disputedChars() == 7, "被两篇同时命中的字符数手算是 7 个：接头强度下降那七个字");

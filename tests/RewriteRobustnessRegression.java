@@ -55,6 +55,82 @@ public final class RewriteRobustnessRegression {
         String run(String text);
     }
 
+    /**
+     * 嵌入改写：把库里某篇的一句短句整块嵌进一句学生自己写的长句里。量两个数：
+     * 嵌进去那段被标没有（该标的要标），以及它**外面**那些字被标了多少字（多报）。
+     * 为什么要单独一档：包含率那条路记的命中区间是整个片段，不是实际共享的那一段，
+     * 于是"抄进去一句 22 字、报出来整句 90 字全红"是它天生的形状。这个数不量出来，
+     * 它就会以"相似率比知网卡出来的高"的形式出现在用户的报告里，而没人知道为什么。
+     */
+    private static void embedding(ArrayList<String> copies, ArrayList<String> fillers,
+                                 ArrayList<TextCorpus.Source> sources, TextCorpus corpus) {
+        StringBuilder draft = new StringBuilder();
+        ArrayList<int[]> phrases = new ArrayList<int[]>();
+        ArrayList<int[]> sentences = new ArrayList<int[]>();
+        for (int i = 0; i < copies.size(); i++) {
+            String shortOne = shortestSentence(copies.get(i));
+            String host = longestSentence(fillers.get(i % fillers.size()));
+            if (shortOne == null || host == null) continue;
+            String body = stripTail(host);
+            int comma = body.indexOf('，');
+            if (comma < 4) continue;
+            int from = draft.length();
+            draft.append(body, 0, comma).append('，').append(stripTail(shortOne)).append('，')
+                    .append(body.substring(comma + 1));
+            int end = draft.length();
+            draft.append('。').append('\n');
+            int phraseStart = from + comma + 1 + 1;
+            phrases.add(new int[] { phraseStart, phraseStart + stripTail(shortOne).length() });
+            sentences.add(new int[] { from, end });
+        }
+        if (phrases.isEmpty()) throw new AssertionError("嵌入夹具一句都没拼出来");
+        String text = draft.toString();
+        String norm = TextCorpus.normalize(text);
+        ArrayList<TextCorpus.Hit> hits = corpus.match(text, null).hits;
+        int phraseChars = 0, phraseFlagged = 0, hostChars = 0, hostFlagged = 0;
+        for (int i = 0; i < phrases.size(); i++) {
+            int[] phrase = phrases.get(i);
+            int[] sentence = sentences.get(i);
+            phraseChars += valid(text.substring(phrase[0], phrase[1]));
+            phraseFlagged += cover(norm, phrase[0], phrase[1], hits, null);
+            hostChars += valid(text.substring(sentence[0], sentence[1])) - valid(text.substring(phrase[0], phrase[1]));
+            hostFlagged += cover(norm, sentence[0], sentence[1], hits, null)
+                    - cover(norm, phrase[0], phrase[1], hits, null);
+        }
+        System.out.println();
+        System.out.println("嵌入改写 " + phrases.size() + " 句：嵌进去的 " + phraseChars + " 字标了 "
+                + phraseFlagged + " 字（" + percent(phraseChars == 0 ? 0d : phraseFlagged * 100d / phraseChars)
+                + "），它外面的 " + hostChars + " 字被连带标了 " + hostFlagged + " 字");
+        check(phraseFlagged * 100d >= 90d * phraseChars,
+                "整句原文嵌进长句也得认出来：实测 " + phraseFlagged + "/" + phraseChars);
+        // 实测每句连带标红 41 字（嵌进去 778 字认回 716 字 = 92.0%，外面 1578 字被带走 688 字 = 43.6%）。
+        // 这是一条已知缺陷的天花板，不是达标线：包含率命中记的是整个片段区间，等命中落到实际共享区间
+        // 那一天（docs/ROADMAP.md 的 1.1.1），这条应该一路掉到个位数。钉在这里只为了它别再加。
+        check(hostFlagged <= 45 * phrases.size(),
+                "多报天花板：平均每句连带标红不许超过 45 字，实测每句 "
+                        + (hostFlagged + phrases.size() - 1) / phrases.size() + " 字");
+    }
+
+    private static String shortestSentence(String paragraph) {
+        return pickSentence(paragraph, true);
+    }
+
+    private static String longestSentence(String paragraph) {
+        return pickSentence(paragraph, false);
+    }
+
+    private static String pickSentence(String paragraph, boolean shortest) {
+        ArrayList<String> list = sentencesOf(paragraph);
+        String best = null;
+        for (int i = 0; i < list.size(); i++) {
+            String s = stripTail(list.get(i));
+            int chars = valid(s);
+            if (chars < TextCorpus.MIN_SENTENCE_CHARS) continue;
+            if (best == null || (shortest ? chars < valid(stripTail(best)) : chars > valid(stripTail(best)))) best = list.get(i);
+        }
+        return best;
+    }
+
     /** 一条改写口径的实测结果。 */
     static final class Score {
         final String name;
@@ -119,9 +195,15 @@ public final class RewriteRobustnessRegression {
             measure("spliced", copies, fillers, sources, corpus, mutator("spliced")),
         };
         printTable(scores);
+        // 诊断模式（-Drrs / -Drrroc）不跑地板：这两台是拿来查明原因的，
+        // 让一条地板断言半路把进程掐掉，就永远看不到后面的分布表了。
+        if (SWEEP || ROC) {
+            if (SWEEP) sweep(copies, fillers, sources, corpus);
+            if (ROC) roc(copies, fillers, sources, corpus);
+            return;
+        }
+        embedding(copies, fillers, sources, corpus);
         floors(scores, copies, fillers, sources, corpus);
-        if (SWEEP) sweep(copies, fillers, sources, corpus);
-        if (ROC) roc(copies, fillers, sources, corpus);
         System.out.println("RewriteRobustnessRegression OK: " + count + " assertions"
                 + " (copies=" + copies.size() + ", corpusChars=" + corpusChars
                 + ", droppedCitationLines=" + droppedCitations + ")");
@@ -242,7 +324,7 @@ public final class RewriteRobustnessRegression {
         recall(scores, "drop-20pct", 99d);
         recall(scores, "stacked", 99d);
         recall(scores, "pruned", 97d);
-        recall(scores, "split-commas", 98d);
+        recall(scores, "split-commas", 99d);   // 0.55->0.50 之后 98.1，带子分块修复之后 99.4
         recall(scores, "merge-pairs", 99d);
         recall(scores, "sub-char-10", 99d);
         recall(scores, "sub-char-25", 26d);

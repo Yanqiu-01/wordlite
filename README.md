@@ -188,7 +188,7 @@ Robolectric 排版与 UI 回归在 `tests/ui`：
 cd tests/ui && gradle --no-daemon test --console=plain
 ```
 
-`tools/test-host.ps1` 一次跑完 22 个 JVM 套件，2277 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 183、`SourceLedgerRegression` 来源榜 146、`CharLedgerRegression` 字符账本 100、`CandidateRankerRegression` 候选去重 92、`RoutesRegression` 国内外选路 60、`CorpusImportRegression` 自建库批量导入 131、`AigcRegression` 逐句倾向 157、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 182、`RetrievalCoverageRegression` 检索覆盖率 111、`CnkiSearchRegression` 知网检索式 226、`CnkiTouchRegression` 知网公开页 20、`RewriteRobustnessRegression` 抗改写召回 56、`ReportStoreRegression` 报告中心存储 175、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`ApiRegression` 接口配置与加密 40、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
+`tools/test-host.ps1` 一次跑完 22 个 JVM 套件，2279 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 183、`SourceLedgerRegression` 来源榜 146、`CharLedgerRegression` 字符账本 100、`CandidateRankerRegression` 候选去重 92、`RoutesRegression` 国内外选路 60、`CorpusImportRegression` 自建库批量导入 131、`AigcRegression` 逐句倾向 157、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 182、`RetrievalCoverageRegression` 检索覆盖率 111、`CnkiSearchRegression` 知网检索式 226、`CnkiTouchRegression` 知网公开页 20、`RewriteRobustnessRegression` 抗改写召回与嵌入多报 58、`ReportStoreRegression` 报告中心存储 175、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`ApiRegression` 接口配置与加密 40、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
 
 联网检索源的解析全部走本地回环服务，避免测试依赖外网；要确认这九个内置源此刻真的能返回题录，跑：
 

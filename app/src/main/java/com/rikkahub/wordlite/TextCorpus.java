@@ -77,6 +77,13 @@ public final class TextCorpus {
      * 又查不出来。产品值 0.50 与这一档相等，所以这条 min 今天不改变任何一次判定。
      */
     private static final float LENGTH_BOUND_FLOOR = 0.5f;
+    /**
+     * 包含率通道能不能碰到这一句，还有一条隐藏的上限：这一档 0.5 把可达的长短比卡死在 3.0 倍
+     * （Dice 上界 2·min/(min+max) ≥ 0.5 等价于 max/min ≤ 3）。拆句把 54 字的原句拆成 16 字的碎片，
+     * 比值 3.4，结构上进不了这条通道。想放宽它不能只改这一格：包含率命中记的是**整个片段的区间**，
+     * 一段 26 字的原句嵌进 85 字的学生自写长句里，放宽之后报出来的是 85 字全算重复。
+     * 先有"按实际共享区间落点"的裁剪，再谈放宽比值——顺序反了就是拿相似率换召回。
+     */
 
     public static final class Source {
         public String id = "", title = "", authors = "", year = "", locator = "", engine = "";
@@ -436,7 +443,7 @@ public final class TextCorpus {
     }
 
     /**
-     * 指纹带只补句级比对没盖住的字符：一条带子先减掉已覆盖的区间，补不出 MIN_MATCH 个有效字符就整条丢掉。
+     * 指纹带只补句级比对没盖住的字符：一条带子先减掉已覆盖的区间，剩下的总长够不到 MIN_MATCH 就整条丢掉
      * 返回"这段字符被另一篇文献先占走"的那几段区间（拿带子的原始区间去问 claims），由 attributeHits 与
      * 句级命中之间的重叠并成一份，只喂给 disputedChars 那条注记，不参与判据、不进任何比率。
      * 注意：这里 push 进 hits 的区间与后面记进分子的 valid 必须是同一个区间，来源榜靠这一点从 hits 反推每篇的账。
@@ -456,10 +463,16 @@ public final class TextCorpus {
             Hit band = bands.get(b);
             ArrayList<int[]> rest = subtract(covered, band.start, band.end);
             claimFromOthers(lost, claims, band);
+            // 最短可报告长度按"这条带子还剩下多少字"判，不按切完之后的每一块判。一块一块地量是口径错误：
+            // 一条 40 字的连续复制，中间被一句句级命中咬掉 8 个字，剩下两块各 16 字，两块都够不到 18
+            // → 全丢，于是抄得更多反而报得更少（拆句那一档实测就是这么从 98.1% 掉到 92.8% 的）。
+            // 证据是带子本身——winnowing 保证的连续重合，被句级命中咬掉一段并不会把剩下的字变成巧合。
+            int remaining = 0;
+            for (int r = 0; r < rest.size(); r++) remaining += validCount(norm, rest.get(r)[0], rest.get(r)[1]);
+            if (remaining < Fingerprints.MIN_MATCH) continue;
             for (int r = 0; r < rest.size(); r++) {
                 int[] range = rest.get(r);
-                // 已被句级命中盖住，补不出最短可报告长度就不值得再报一条。
-                if (validCount(norm, range[0], range[1]) < Fingerprints.MIN_MATCH) continue;
+                if (validCount(norm, range[0], range[1]) <= 0) continue;
                 Hit trimmed = new Hit();
                 trimmed.start = range[0];
                 trimmed.end = range[1];
