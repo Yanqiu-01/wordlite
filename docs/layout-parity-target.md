@@ -31,6 +31,8 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 
 本轮落到的 HEAD 是 tag `autospace1`（第 20 节）：`w:autoSpaceDE` / `w:autoSpaceDN` 的缺省从"没写=关"改成 Word 的"没写=开"，第 5 条 62.4% → 69.1%，其余五条一字不差（`pages.tsv` sha `921A8FAB4D3D09F8` 不变、右边界仍 0/32、`lines-all.tsv` sha `D9822E2C3396D6EC` → `AC44D355853F4616`）。
 
+再后一轮（第 21 节，U+207B 上下标单位那条线索）没有动引擎：量完确认这个字符两边用的是同一张随包 Times New Roman、advance 也一致（0.3384 em 对 Word 的 0.338 em），所以六个数与上一行完全相同，新增的只是量台 `tools/font-advance-audit.py`（逐字把 Word 导出 PDF 的脸/advance 与我们随包字库对账）。
+
 三条规矩：
 
 1. 真值只有两个来源——桌面 Word 16.0 COM 的逐行基线/页码坐标，和手机上微软 Word 的实际渲染。
@@ -751,4 +753,109 @@ HEAD（`pwsh tools/page-fill-ledger.ps1 -Tag autospace1`，单位 px）：
 所以最大那一档不是"我们算漏了什么规则"，就是我们把西文与数字的 advance 算宽了——每行大约宽 32 px。
 第二档 +6.9 px 才是取整余量那一类。宽度模型每改一次，跑
 `pwsh tools/parity-six.ps1 -Tag <tag>` 之后拿这张表对：第 5 条要涨，第 6 条必须还是 0/32。
+
+
+
+## 21. U+207B（W·m⁻¹·K⁻¹ 的上标减号）：两边用的是同一张脸、同一个 advance，回退链不改
+
+线索是用户给的：稿子里 `cm⁻¹ / W·m⁻²` 那一类上标用的是 U+207B，随包的 `song.ttc` 与本机
+`simsun.ttc` 都没有这个码位（各 28849 个码位，逐字对过），所以怀疑"Word 换了脸、我们没换，
+于是拿宋体的 advance 去量一个只有替换字库才有的字形"，并把这一条挂到第 1 节"含上下标"那一队列
+（n=32，行高中位 -0.767px）。三条分开量完，**这条线索不成立**，但量出另一件要盯的事（第 21.4 小节）。
+
+### 21.1 Word 侧：这个字符 Word 用哪张脸、收多宽
+
+不用重开 Word 会话，拿已经导出的 PDF（`artifacts/agent-typeset/pdf-truth/input-liu.pdf`，28 页，
+sha256 前缀 `ab298ac416dcfc72`）逐字查：`py tools/font-advance-audit.py`（报告 C）。
+
+- U+207B 全篇只出现 **2 次，都在第 19 页**（`w:p` 第 166 段"…的热导率分别为112.3和102.6 W·m⁻¹·K⁻¹…"）。
+- Word 用的字库是 **`TimesNewRomanPSMT`，12pt，advance 4.056 pt = 5.408 px**；同一段落里
+  `¹` 3.6 pt、`m` 9.336 pt、`K` 8.664 pt。也就是说 Word 把这个字符按**西文**处理，取的是这个 run
+  自己声明的 `w:hAnsi`（这份稿子该 run 写的是 `ascii/hAnsi=Times New Roman`、`eastAsia=宋体`），
+  按整号 12pt 画它自带的上标字形，**不缩放**。
+- 随包的 `times-new-roman.ttf` 里 U+207B 有字形，`hmtx` = 693/2048 em = **0.3384 em**，
+  12pt 下 4.061 pt = 5.414 px；Word 的 0.338 em 与它差 0.0004 em（PDF 坐标的舍入位）。
+  量它的命令：`py "$env:TEMP\wl-edit\cmap.py" app/src/main/assets/fonts/times-new-roman.ttf`
+  与 `py tools/font-advance-audit.py` 报告 C：`U+207B ours[Times]=0.3384  Word(Times) mode=0.338`。
+
+### 21.2 手机侧：我们给这个字符挑了哪张脸、真机收几像素
+
+探针（不装 APK、不进版本库，和 `DeviceCapture.java` 同样跑法）：
+`artifacts/device/probe/FontAdvanceProbe.java`，
+`javac -classpath tools/android-35.jar` → `d8` → `adb push` →
+`CLASSPATH=/data/local/tmp/wlcapture/fap.dex app_process -Xmx256m / FontAdvanceProbe <assets.zip> <out>`，
+设备 `EAMUT20528011355`。读数（12pt = 16.0 px 文档像素）：
+
+| 问的东西 | 读数 |
+| --- | --- |
+| `FontManager.symbolFamily(声明=Times New Roman, U+207B)` | **Times New Roman**（没有改脸） |
+| `FontManager.symbolFamily(声明=宋体, U+207B)` | STIX Two Math（这才是会被换脸的那条路） |
+| `DocxTextLayout.resolve("Times New Roman") == FontManager.load(fonts/times-new-roman.ttf)` | true，随包字库确实挂上去了 |
+| 真机 `measureText` U+207B：Times 脸 / 宋体脸 / STIX 脸 | **5.000 px** / 6.000 px / 9.000 px |
+| 同一批：`¹` 4.797→5.000、`·` 5.328→5.000、`℃` 16.383→16.000、`中` 16.000 | 见 21.4 |
+| `FontScriptMetrics.unicodeScript(U+207B)` | 0 → 这一格不参与上下标缩放，和 Word 一样按整号收 |
+
+结论：**手机用的脸和 Word 是同一张（随包 Times New Roman），advance 的精确值也一样**，
+"Android 静默落到系统 Noto、按宋体量宽度"没有发生——`MeasuredFontSpan` 把 `Typeface` 明确设成
+随包那张脸，而这个码位在那张脸里有字形，走不到系统回退。
+所以 21.1 里那 2 处 U+207B 两边各收 5.4 px（真机取整后 5.0 px），差不到 0.5 px，撑不起一个字位的换行差。
+
+`FontScriptMetrics` / `FontManager` 的回退链这一轮一字未动。
+
+### 21.3 全篇逐字对账（不只看 U+207B）
+
+命令：`py tools/font-advance-audit.py`（新加的量台，报告 A/B/C 一把跑完）
+
+- 23,263 个字符里，**11 个**会被挪出声明的那张脸：全是 `ＭＳ 明朝` 那一段的汉字（随包 `msgothic.ttf`
+  没那些码位），Word 用的是宋体/黑体。U+207B、`¹`、`·`、`℃` **一个都不在**里面。
+- 两边同脸、又能对上的 (字符, 脸) 组合 **1102 组**，`|我们 - Word| > 0.004 em` 的 278 组，逐条看只有两类：
+  1. 中文整宽字 1.000 vs Word 1.009 / 1.019 —— 那是**两端对齐把字距拉开**，不是字库差。同一字符的最小值
+     就是 1.000：`的` 的分布 1.000×161、1.009×63、1.019×31（`py "$env:TEMP\wl-edit\emdist.py"`）。
+  2. 西文成对字距：`I` 我们 0.333 vs Word 0.320（94 例）、`F` 0.556 vs 0.550、`V` 0.722 vs 0.727。
+     这是 Word 用了字距对（kerning），我们逐字相加。**没量到任何一个替换字库造成的宽度差。**
+
+### 21.4 顺带量到的一件事：这台手机把每个字的 advance 就近取整到整像素
+
+同一次探针跑出来的（`ROUNDING` 那两行）：
+
+| 量的串 | hmtx 精确值 | 真机读到 |
+| --- | --- | --- |
+| `m` ×1 | 12.445 px | 12.000 |
+| `m` ×20 | 248.90 px | **240.000**（= 20 × 12，逐字取整后再相加） |
+| U+207B ×1 / ×20 | 5.414 / 108.28 px | 5.000 / **100.000** |
+| `W` ×20 | 301.9 px | 300.000 |
+| `中` ×20（宋体） | 320 px | 320.000（整宽，取整不动它） |
+
+`subpixel`、`antiAlias` 四种开关组合都是整数（只有 `mw` 从 22 变 24，那是字距对/字形的差别）。
+中文整宽所以不受影响，西文窄字受影响最大：`i`/`l` 0.278 em → 4.45 px 收 4、`r`/`t`/`I` 0.333 em →
+5.33 px 收 5，单字最多差 0.45 px（≈10%）。
+
+**这条先别拿去调宽度模型**：还不知道是 `app_process` 探针环境如此，还是装在手机上的 Word Lite 真在
+屏幕上也是这样。动手的人在编辑器里用同样的 `TextPaint` 量一次 `"m"*20` 就知道；在确认之前，
+第 20.5 节里"西文那一档每行宽 32px"不要直接归到 advance 表上。
+
+### 21.5 第 19 页那一段逐行对照：分歧确实不在上标那一行
+
+Word（PDF，页 19）与手机（`autospace1/new/lines-all.tsv`）并排，第 166 段：
+
+| 行 | Word | 手机 |
+| --- | --- | --- |
+| 1 | 计算互连层热导率，再用四探针测量电阻率。公开大面积TLP 接头在室温和**200 ℃** | ，计算互连层热导率，再用四探针测量电阻率。公开大面积TLP接头在室温和 |
+| 2 | 的热导率分别为112.3 和102.6 W·m⁻¹·K⁻¹，可用于检查测试量级和 | **200℃**的热导率分别为112.3和102.6W·m⁻¹·K⁻¹，可用于检查测试量级和温度修正 |
+
+含 U+207B 的那一行两边都是两端对齐、都吃满版心（Word `x1-x0` = 425.48 pt = **567.31 px**，
+手机 **567.0 px**），所以那一行量不出宽度差；真正的分歧在第 1 行末尾——Word 把 `200 ℃` 留下了，
+我们把它挤到下一行。它属于第 20.5 节的"西文与数字 advance"那一档，不属于上下标。
+
+### 21.6 这一轮改了什么、测了什么
+
+- 版本库里只多一个量台：`tools/font-advance-audit.py`。`app/src` 一行没动，
+  所以六条不需要复采，也不会退步：HEAD 的六个数仍是第 20 节 `autospace1` 那次真机采的
+  （7 段错页 / -0.767 / 2.533 / 0.79 行 / 69.1% / 0/32）。
+- 主机测试按 HEAD 的源码全绿：`Regression 74 / OriginalDocx 19 / WordLineHeight 63 / Script 65 /
+  TableGeometry 31 / Preservation 11 / TextCorpus 209`，`javac` 82 个源文件通过。
+- **挡住发版的一件事不在排版这一路**：工作树 `app/src/main/java/com/rikkahub/wordlite/ApiWorkflow.java:327`
+  的 Java 字符串里有没转义的引号（`"检索设置里"联网检索"是关着的…"`），`javac` 报 4 个错，
+  `tools/build-host.ps1` 与 `tools/test-host.ps1` 现在都会挂在那儿。那是别人在飞的改动，我没有动它，
+  所以我这一轮的测试是从 `git archive HEAD` 的源码单独编一遍跑的。
 
