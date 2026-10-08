@@ -3,6 +3,7 @@
 #
 # Usage:  pwsh tools/device-probe.ps1 [[-Query <text>] [-Engines a,b] [-Proxy host:port]
 #         [-Reverse] [-Serial <sn>] [-Per N] [-Timeout s] [-IncludeCnki] [-Keep]
+#         [-Mode engines|fulltext] [-Fetch N] [-Budget N]     (fulltext: see EngineProbe's BODY/EMPTY lines)
 #
 # Which classes the probe needs (deliverable 4, resolved automatically by javac via -sourcepath and
 # printed as "closure:" on every run):
@@ -39,6 +40,9 @@ param(
     [int]$Per = 5,
     [int]$Timeout = 25,
     [switch]$IncludeCnki,
+    [ValidateSet("engines","fulltext")][string]$Mode = "engines",
+    [int]$Fetch = 3,
+    [int]$Budget = 6,
     [switch]$Keep,
     [switch]$BuildOnly,
     [switch]$NoTcp,
@@ -167,8 +171,9 @@ try {
         if (-not $Proxy) { $Proxy = ("127.0.0.1:{0}" -f $ReversePort); Write-Host ("   -Proxy defaulted to " + $Proxy + " because -Reverse was asked for") }
     }
 
-    $argv = @("-s", $device, "shell", ("CLASSPATH={0} app_process / {1} engines --query-file={2} --per={3} --timeout={4} --repeat={5}" -f
-            $remoteDex, $remoteClass, $remoteQuery, $Per, $Timeout, $Repeat))
+    # -Mode fulltext 让探针走 app 的全文那一路：每源试取 -Fetch 条，再按 app 的排队取 -Budget 条。
+    $argv = @("-s", $device, "shell", ("CLASSPATH={0} app_process / {1} {2} --query-file={3} --per={4} --timeout={5} --repeat={6} --fetch={7} --budget={8}" -f
+            $remoteDex, $remoteClass, $Mode, $remoteQuery, $Per, $Timeout, $Repeat, $Fetch, $Budget))
     if ($Engines) { $argv[-1] += (" --only=" + $Engines) }
     if ($Proxy)   { $argv[-1] += (' --proxy=' + $Proxy) }
     if ($NoTcp)   { $argv[-1] += ' --no-tcp' }
