@@ -22,6 +22,8 @@ final class Routes {
     static final int[] LOOPBACK_PORTS = {7897, 7890};
     private static final LinkedHashMap<String, String> USED = new LinkedHashMap<String, String>();
     private static final LinkedHashMap<String, Proxy> KNOWN_GOOD = new LinkedHashMap<String, Proxy>();
+    /** 这个主机的直连拨不上（连接被拒、超时、TLS 谈崩）。只用来把直连从队首挪到队尾，不做别的判断。 */
+    private static final LinkedHashMap<String, Boolean> DIRECT_FAILED = new LinkedHashMap<String, Boolean>();
     private static Proxy lastGood;
 
     private Routes() { }
@@ -40,11 +42,18 @@ final class Routes {
             return out;
         }
         boolean domestic = domestic(host);
-        if (domestic) out.add(null);
-        Proxy remembered = lastGood;
-        if (remembered != null && !same(remembered, explicit)) out.add(remembered);
-        for (Proxy auto : autodiscovered()) if (!same(auto, explicit)) out.add(auto);
-        if (!domestic) out.add(null);
+        /* 国内源直连优先是 0.7.3 实测定的，可那条判据只对「直连出得去」的网络成立。实测过的一台手机：
+           挂在移动数据上时十个源直连全部拨不上（连接被当场拒回），只有电脑上用 adb reverse 转过来的
+           Clash 出得去。那种网络里每一扇窗口都先撞一次直连死路，等于把 0.7.3 想省下的那条六秒死路原样
+           花回去。所以这里的判据跟着实测走：这个主机直连确实失败过、且刚刚有另一条路为它走通过，这一轮
+           就先走那条，直连退到队尾——不删掉它，网络随时可能恢复。 */
+        Proxy proven = KNOWN_GOOD.get(host);
+        boolean directIsDead = domestic && proven != null && DIRECT_FAILED.containsKey(host);
+        if (domestic && !directIsDead) addDirect(out);
+        if (proven != null) add(out, proven);
+        if (lastGood != null) add(out, lastGood);
+        for (Proxy auto : autodiscovered()) add(out, auto);
+        if (!domestic || directIsDead) addDirect(out);
         return out;
     }
 
@@ -87,6 +96,11 @@ final class Routes {
         out.add(value);
     }
 
+    /** 直连（null）也去重：同一次请求不必两次把包发往同一个出不去的出口。 */
+    private static void addDirect(List<Proxy> out) {
+        if (!out.contains(null)) out.add(null);
+    }
+
     private static boolean contains(List<Proxy> out, Proxy value) {
         for (Proxy known : out) if (same(known, value)) return true;
         return false;
@@ -122,6 +136,22 @@ final class Routes {
         lastGood = via;
     }
 
+    /**
+     * 这条路为这个主机没走通。跟着改两件事：直连失败过就别再把它排在第一位；一条代理失败过就不再算
+     * 「上次为它走通的那条」——USB 反代随拔线消失，电脑上的 Clash 也会被关掉，记住一条死代理和记住
+     * 一条死直连是同一种错。调用方只在「路本身不通」时进来，对方返回 403/429 不算（换条路也是同样答复）。
+     */
+    static synchronized void failed(String url, Proxy via) {
+        String host = host(url);
+        if (host.isEmpty()) return;
+        if (via == null) {
+            DIRECT_FAILED.put(host, Boolean.TRUE);
+            while (DIRECT_FAILED.size() > 32) DIRECT_FAILED.remove(DIRECT_FAILED.keySet().iterator().next());
+            return;
+        }
+        KNOWN_GOOD.remove(host);
+    }
+
     /** 找过的路全列出来：自检失败时用户最需要知道的是"到底试过哪几条"，而不是又一句"网络失败"。 */
     static String candidateList(String explicitProxy) {
         StringBuilder out = new StringBuilder(DIRECT);
@@ -138,6 +168,7 @@ final class Routes {
         String text = label(via);
         if (DIRECT.equals(text)) via = null;
         KNOWN_GOOD.put(host, via);
+        if (via == null) DIRECT_FAILED.remove(host);
         USED.put(host, text);
         while (USED.size() > 32) USED.remove(USED.keySet().iterator().next());
     }
@@ -161,6 +192,7 @@ final class Routes {
     static synchronized void reset() {
         USED.clear();
         KNOWN_GOOD.clear();
+        DIRECT_FAILED.clear();
         lastGood = null;
     }
 
@@ -188,4 +220,5 @@ final class Routes {
         return false;
     }
 }
+
 

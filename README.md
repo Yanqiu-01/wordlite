@@ -57,6 +57,7 @@ Android 上的 `.docx` 论文工作台：本地解析与回写 OOXML，按 Word 
 ### 匹配
 
 正文先做归一化（全半角、繁简、标点、空白、序号与前缀剥离），按句子切分后生成字符级 n-gram 指纹与 MinHash 签名；倒排索引按 n-gram 命中候选句，再用片段的 Dice 系数与跨句连续段合并成相似区间。句子级之外还有一条字符指纹带：Schleimer/Wilkerson/Aiken 的 winnowing（7 元组取样、窗口 12），任何连续 18 个字符以上的相同片段必定留下一枚共同指纹，所以两边断句不同、把两句并成一句、或者只在中间加个逗号，整段照抄照样被追出来并成一段报告。这一层里汉字数目字与阿拉伯数字同形（"四十分钟"与"40 分钟"、"七成"与"70%"算同一枚 token），那正是降重写法和录入差异最常动的两处。全部计算在本机完成，比对期间没有正文离开设备。判定线上每一个数的来路分三处可查：[检测阈值标定](docs/detection-calibration.md)（n、w、最短共通指纹数、句级两条下限的网格扫描）、[抗改写召回实测台](docs/rewrite-robustness.md)（17 种改写口径下的召回/归属/噪声，随闸门跑）、[匹配改造方案](docs/paraphrase-robustness.md)（开源实现的参数对照与排序）。
+包含率那条判据说的是「文库那句几乎整块嵌在本文这一段里」，但命中区间不能跟着一起变成整段——否则抄进去一句 26 字，学生自己写的 59 字也一起红。落点因此裁到两边实际共享的那几段：对折叠后的比较键做二分公共块长度 + 滚动哈希求最长公共块，往两端扩到极大，再在剩下的左右区间里找下一段（`SharedBlocks`，每段 `O((n+m)·log min(n,m))`，不建 n×m 的表），两端再剥掉标点与符号才折回原文偏移——`validCount` 认一枚全角逗号为一个有效字符，不剥就是凭空多出来的一枚红。只有一个片段恰好只跟一个候选对得上时才裁：同一段里有两句都过了线，那这段本身就是拼出来的，裁进其中一句会把另一句连证据一起藏掉，这种片段整段报。实测每句连带标红从 40 字降到 0 字，代价是 `merge-pairs` 少认 4 个字，前后对照在[抗改写实测台](docs/rewrite-robustness.md)。
 
 三个指标彼此独立：
 
@@ -85,7 +86,7 @@ Android 上的 `.docx` 论文工作台：本地解析与回写 OOXML，按 Word 
 
 开放获取全文按候选题录按需拉取，只在手机上比对；命中结果带来源、题名、作者、年份与标识符写进报告。中文三库里万方开着检索服务：POST 一帧 protobuf 到 `SearchService.SearchService/search`，回来的同样是 protobuf，一次检索连完整摘要一起给回，编解码在 `WanfangProtocol` 与 `ProtoWire` 里手写，不额外引一个 protobuf 运行时。知网另外两个匿名可读的公开页用来按文献号或链接取条目、按刊期看目录（`wap.cnki.net/touch/web/Journal/…`）。检索口 `search.cnki.com.cn` 实测是个**部分索引**：它自己几分钟前刚返回过的文献，按题名精确查只有 3/5 回得来；它也不做短语检索，喂整句或连续 16 个字一律回 0 条，`Order=2`（相关度）是四种排序里唯一能用的。所以中文库给回的是题录加摘要，报告里的相似率是**下限**，"检索覆盖率"与这句说明必须同段出现；手上的题录、PDF 或 Word 走`自建库`导进来就参与比对，机构或代理商的检测 API 接在`接口设置`（`审阅 → 接口设置`，支持文档上传或选区提交、字段映射、超时重试）。
 
-部分移动网络会重置海外源的 TLS 连接：`检索设置 → HTTP 代理`填一个 `host:port` 就能让检索从那里出网。手机上最省事的接法是把电脑上的代理端口用数据线映射进来：`adb reverse tcp:18899 tcp:7897`（7897 是电脑上 Clash 的 mixed 端口），然后填 `127.0.0.1:18899`。代理只隧道 HTTPS，看不到正文；留空即直连，写法不合法也按直连处理。代理那头没人应答（拔了线、忘了 `adb reverse`）时退回直连重试一次，一次查重不会因为代理没接上而整轮失败。知网、万方、维普、哲社中心按域名认成国内源，一律先直连（知网的检索口在 `cnki.com.cn` 下，不在 `cnki.net` 下）；实测同一个知网口走直连与走海外出口召回没有差别，所以这条只省下每扇窗口一次六秒的死路等待。用户在设置里填的代理与自动发现的端口重合时也只试一次。
+移动网络常常不只重置海外源的 TLS：真机上实测过一台挂在 5G 上的手机，十个检索源直连全部被当场拒回，知网、万方、维普一个都问不到，只有电脑上 Clash 那条路出得去。最省事的接法是用数据线把电脑上的代理端口映射进手机，一条命令：`pwsh tools/phone-gateway.ps1`。它先探出电脑上真正在监听的代理端口（Clash Verge 的 mixed 端口默认 7897，很多人以为的 7890 常常根本没在听，所以它挨个试端口、真的发一次 CONNECT 验证，而不是猜一个），再把 7897 与 7890 一起 `adb reverse` 到手机上，最后用应用自己的检索代码在手机上跑一次自检，把每个源最后走的那条路印出来；`-Watch` 在拔线或 `adb kill-server` 之后自动补上反代。之后 `检索设置 → HTTP 代理` 填 `127.0.0.1:7897` 即可，留空也行——`Routes` 会自动发现回环上的这两个端口。代理只隧道 HTTPS，看不到正文；写法不合法按直连处理。知网、万方、维普、哲社中心按域名认成国内源，只要没为它撞过直连失败就一律先直连（知网的检索口在 `cnki.com.cn` 下，不在 `cnki.net` 下，同一个口走直连与走海外出口实测召回没有差别）；同一台主机上直连确实失败过一次、而代理刚刚又为它通过了一次，下一扇窗口就先走代理，直连退到队尾而不是被删掉，网络一恢复它就重新排回第一。这台手机上一轮三源省下约 0.6 秒（它的直连是被当场拒回的），碰上把连接黑洞掉的网关，省下的就是每扇窗口每次六秒。用户在设置里填的代理与自动发现的端口重合时只试一次。
 
 ### AIGC 倾向
 
@@ -188,7 +189,7 @@ Robolectric 排版与 UI 回归在 `tests/ui`：
 cd tests/ui && gradle --no-daemon test --console=plain
 ```
 
-`tools/test-host.ps1` 一次跑完 22 个 JVM 套件，2279 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 183、`SourceLedgerRegression` 来源榜 146、`CharLedgerRegression` 字符账本 100、`CandidateRankerRegression` 候选去重 92、`RoutesRegression` 国内外选路 60、`CorpusImportRegression` 自建库批量导入 131、`AigcRegression` 逐句倾向 157、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 182、`RetrievalCoverageRegression` 检索覆盖率 111、`CnkiSearchRegression` 知网检索式 226、`CnkiTouchRegression` 知网公开页 20、`RewriteRobustnessRegression` 抗改写召回与嵌入多报 58、`ReportStoreRegression` 报告中心存储 175、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`ApiRegression` 接口配置与加密 40、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
+`tools/test-host.ps1` 一次跑完 23 个 JVM 套件，2350 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 183、`SourceLedgerRegression` 来源榜 146、`CharLedgerRegression` 字符账本 100、`SharedSpanRegression` 单句落点 59、`CandidateRankerRegression` 候选去重 92、`RoutesRegression` 国内外选路 72、`CorpusImportRegression` 自建库批量导入 131、`AigcRegression` 逐句倾向 157、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 182、`RetrievalCoverageRegression` 检索覆盖率 111、`CnkiSearchRegression` 知网检索式 226、`CnkiTouchRegression` 知网公开页 20、`RewriteRobustnessRegression` 抗改写召回与嵌入多报 58、`ReportStoreRegression` 报告中心存储 175、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`ApiRegression` 接口配置与加密 40、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
 
 联网检索源的解析全部走本地回环服务，避免测试依赖外网；要确认这九个内置源此刻真的能返回题录，跑：
 
@@ -204,6 +205,8 @@ pwsh tools/recall-probe.ps1                          # 种一句真论文原文�
 pwsh tools/recall-probe.ps1 -Probe CnkiFormProbe     # 十种写法问知网，比哪种问得回那一篇
 pwsh tools/recall-probe.ps1 -Probe CqvipAlignProbe   # 维普的文献号与摘要有没有对行
 pwsh tools/recall-probe.ps1 -Proxy 127.0.0.1:7897    # 挂代理再量一遍，与直连做 A/B
+pwsh tools/phone-gateway.ps1                           # 三个中文库都问不到时：找端口、建 USB 反代、用手机上的代码验一次
+pwsh tools/device-probe.ps1 -IncludeCnki -Repeat 3     # 同一句问三遍，量选路记忆省了多少（只有第二轮往后再省）
 ```
 
 Robolectric 排版与 UI 回归在 `tests/ui`，覆盖行距、断行、目录分页边界、表格列宽与行高、ribbon 与 PDF 导出、页面缩放与 section 页眉页脚坐标、报告中心（历史倒序、详情页从盘重画、点证据跳转与命中区间、证据行回收），共 18 个测试类 69 例（67 例执行，2 例待真机参考取样），Windows 下全绿。

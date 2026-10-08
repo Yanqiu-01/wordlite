@@ -34,6 +34,7 @@ public final class RoutesRegression {
         try {
             classification();
             ordering();
+            deadDirectRoad();
             parsingAndLabels();
             timeouts();
             routeLedger();
@@ -176,6 +177,58 @@ public final class RoutesRegression {
             if (address.getPort() == port && address.getHostString().equals("127.0.0.1")) return true;
         }
         return false;
+    }
+
+    /**
+     * 手机挂在移动数据上、只有电脑上 adb reverse 出来的 Clash 出得去时，实测十个源直连全部被当场拒回。
+     * 这种网络里每一扇窗口都先撞一次直连死路是没道理的：撞过一次、并且代理为它捞回来过一次，就该记住。
+     * 但降权只能建立在实测上——没撞过就照旧直连优先（0.7.3 的判据），代理死了还要能排回第一位。
+     */
+    private static void deadDirectRoad() {
+        Routes.reset();
+        Proxy tunnel = Routes.parse("127.0.0.1:7897");
+        System.setProperty("http.proxyHost", "127.0.0.1");
+        System.setProperty("http.proxyPort", "7897");
+        try {
+            List<Proxy> first = Routes.order("search.cnki.com.cn", null);
+            check(first.get(0) == null, "没撞过直连的国内源，第一跳照旧是直连（不靠猜就降权）");
+            Routes.failed("https://search.cnki.com.cn/search/listresult?t=1", null);
+            List<Proxy> afterDirectFailure = Routes.order("search.cnki.com.cn", null);
+            check(afterDirectFailure.get(0) == null,
+                    "只撞过直连失败、还没有任何一条路为它通过时，仍先试直连——没有更好的路可选");
+            check(Routes.routeFor("search.cnki.com.cn").equals("未走过"), "没走通的记录不冒充走过的路");
+            Routes.succeeded(tunnel);
+            Routes.note("https://search.cnki.com.cn/search/listresult?t=1", tunnel);
+            List<Proxy> next = Routes.order("search.cnki.com.cn", null);
+            check(next.get(0) == tunnel, "直连为它失败过、代理为它通过过：下一扇窗口先走代理，别再撞死路");
+            check(next.indexOf(null) == next.size() - 1, "直连退到队尾而不是被删掉——网络随时可能恢复");
+            check(distinct(next), "记住的那条路与自动发现的同一个端口不排两次（实测 " + next.size() + " 条）");
+            List<Proxy> overseas = Routes.order("api.openalex.org", null);
+            check(overseas.indexOf(null) == overseas.size() - 1, "海外源的次序不受这条改动影响");
+            Routes.failed("https://search.cnki.com.cn/search/listresult?t=1", tunnel);
+            check(Routes.order("search.cnki.com.cn", null).get(0) == null,
+                    "代理一死（拔线/关掉 Clash）国内源第一跳回到直连，不会被一条死路锁死");
+            Routes.reset();
+            Routes.failed("https://search.cnki.com.cn/search/listresult?t=1", null);
+            Routes.succeeded(tunnel);
+            Routes.note("https://search.cnki.com.cn/search/listresult?t=1", tunnel);
+            Routes.note("https://search.cnki.com.cn/search/listresult?t=1", null);
+            check(Routes.order("search.cnki.com.cn", null).get(0) == null,
+                    "直连重新走通一次就撤销降权，网络恢复不必等一次 reset");
+            for (int i = 0; i < 40; i++) Routes.failed("https://h" + i + ".cnki.net/x", null);
+            List<Proxy> abroad = Routes.order("api.openalex.org", null);
+            check(abroad.indexOf(null) == abroad.size() - 1, "这批死直连记录不改变海外源的次序");
+            Routes.succeeded(tunnel);
+            Routes.note("https://h0.cnki.net/x", tunnel);
+            check(Routes.order("h0.cnki.net", null).get(0) == null,
+                    "死直连记录封顶 32 条：被挤出去的那台主机按没撞过处理");
+            Routes.note("https://h39.cnki.net/x", tunnel);
+            check(Routes.order("h39.cnki.net", null).get(0) == tunnel, "还在记录里的主机照旧先走那条代理");
+        } finally {
+            System.clearProperty("http.proxyHost");
+            System.clearProperty("http.proxyPort");
+            Routes.reset();
+        }
     }
 
     private static boolean distinct(List<Proxy> order) {

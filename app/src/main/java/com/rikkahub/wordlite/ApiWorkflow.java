@@ -558,7 +558,10 @@ public final class ApiWorkflow {
         return "\n\n找过的路：" + Routes.candidateList(proxy)
                 + "\n手机自己出不去时，把流量经电脑上的代理出去：检索设置里的\"HTTP 代理\"填电脑的地址与端口"
                 + "（例如 192.168.1.20:7897，代理端需允许局域网连接）。USB 连着电脑时先执行"
-                + " adb reverse tcp:7897 tcp:7897，这一格留空也能自动找到。";
+                + " adb reverse tcp:7897 tcp:<电脑上的代理端口>（Clash Verge 默认监听 7897，未必是 7890）。"
+                /* 反代进手机的端口是 7897 还是 7890 都行：这两个回环端口 Routes 都会自动发现，
+                   所以这一格留空也用得上代理，不必让用户去猜电脑上那个端口是几号。 */
+                + "反代进来之后这一格留空也能自动找到。";
     }
     private void probeResult(String text, String tail) {
         LinearLayout box = column(); box.setPadding(dp(16), dp(8), dp(16), dp(8));

@@ -58,9 +58,11 @@ public final class RewriteRobustnessRegression {
     /**
      * 嵌入改写：把库里某篇的一句短句整块嵌进一句学生自己写的长句里。量两个数：
      * 嵌进去那段被标没有（该标的要标），以及它**外面**那些字被标了多少字（多报）。
-     * 为什么要单独一档：包含率那条路记的命中区间是整个片段，不是实际共享的那一段，
-     * 于是"抄进去一句 22 字、报出来整句 90 字全红"是它天生的形状。这个数不量出来，
-     * 它就会以"相似率比知网卡出来的高"的形式出现在用户的报告里，而没人知道为什么。
+     * 为什么要单独一档：命中区间一度记的是整个片段而不是实际共享那一段，于是"抄进去一句 22 字、
+     * 报出来整句 90 字全红"是它当时的形状。这个数不量出来，它就会以"相似率比知网卡出来的高"的形式
+     * 出现在用户的报告里，而没人知道为什么。现在落点按几何裁到两边实际共享的那几段（二分 + 滚动哈希
+     * 求最长公共子串，TextCorpus.clipToSharedBlocks），这一档量的是残余：实测带外每句 0 字，
+     * 而不是整句。落点准不准由 SharedSpanRegression 逐字断言。
      */
     private static void embedding(ArrayList<String> copies, ArrayList<String> fillers,
                                  ArrayList<TextCorpus.Source> sources, TextCorpus corpus) {
@@ -79,7 +81,10 @@ public final class RewriteRobustnessRegression {
                     .append(body.substring(comma + 1));
             int end = draft.length();
             draft.append('。').append('\n');
-            int phraseStart = from + comma + 1 + 1;
+            // 被抄那句真正从 from + comma + 1 起头：append(body,0,comma) 只写 comma 个字，补上的那个逗号
+            // 占掉一格。窗口起点一度写成 +1+1，整个窗口右移一格，把段间那个逗号也算进被抄那句，于是落点
+            // 再准也少认回一个字（SharedSpanRegression 逐字钉住落点 == 被抄那句，这里跟着它对齐）。
+            int phraseStart = from + comma + 1;
             phrases.add(new int[] { phraseStart, phraseStart + stripTail(shortOne).length() });
             sentences.add(new int[] { from, end });
         }
@@ -101,13 +106,19 @@ public final class RewriteRobustnessRegression {
         System.out.println("嵌入改写 " + phrases.size() + " 句：嵌进去的 " + phraseChars + " 字标了 "
                 + phraseFlagged + " 字（" + percent(phraseChars == 0 ? 0d : phraseFlagged * 100d / phraseChars)
                 + "），它外面的 " + hostChars + " 字被连带标了 " + hostFlagged + " 字");
-        check(phraseFlagged * 100d >= 90d * phraseChars,
+        // 召回地板 92%。"命中记整个片段"的旧口径下这一档实测 723/778 = 92.9%——整句自写的部分也一起
+        // 红，被抄那句自然全认回来。落点裁到实际共享区间（TextCorpus.clipToSharedBlocks）之后实测
+        // 720/778 = 92.5%：少的 3 字是文库侧 skipPrefix 剥掉的序号与句末那格标点，两边的折叠串在那些
+        // 位置上本来就不相同，不是裁错了。这条地板钉的是"裁落点不许吃掉被抄那句"。
+        check(phraseFlagged * 100d >= 92d * phraseChars,
                 "整句原文嵌进长句也得认出来：实测 " + phraseFlagged + "/" + phraseChars);
-        // 实测每句连带标红 41 字（嵌进去 778 字认回 716 字 = 92.0%，外面 1578 字被带走 688 字 = 43.6%）。
-        // 这是一条已知缺陷的天花板，不是达标线：包含率命中记的是整个片段区间，等命中落到实际共享区间
-        // 那一天（docs/ROADMAP.md 的 1.1.1），这条应该一路掉到个位数。钉在这里只为了它别再加。
-        check(hostFlagged <= 45 * phrases.size(),
-                "多报天花板：平均每句连带标红不许超过 45 字，实测每句 "
+        // 多报天花板。旧口径（命中记整个片段）实测每句连带标红 40 字：被抄那句认回 723 字，它外面
+        // 1578 字被带走 681 字 = 43.2%——抄一句进去，句子外面自写的部分有将近一半跟着红。夹具的窗口
+        // 起点修掉一格之前那组数是 716/778 与带走 688 字（每句 41 字），见 docs/rewrite-robustness.md。
+        // 落点裁到实际共享区间之后实测每句 0 字：带外 1578 字一个字都不红。4 字是钉在实测之上的一格
+        // 天花板，不是达标线；它要是回到两位数，说明落点又被改回整段了。1.1.2 放宽这条通道时这条不许动。
+        check(hostFlagged <= 4 * phrases.size(),
+                "多报天花板：平均每句连带标红不许超过 4 字，实测每句 "
                         + (hostFlagged + phrases.size() - 1) / phrases.size() + " 字");
     }
 

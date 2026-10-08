@@ -31,7 +31,11 @@ public final class TextCorpus {
      */
     public static final float SIMILAR_DICE = 0.50f;
     /** 长短悬殊时改用的三元组包含率下限：整句原文嵌进改写过的长句。标定台上这一列不构成约束——
-     * 0.80 到 1.00 逐位相同，因为能配上的句子长短本来就接近；留着它是因为整句原文嵌进长句那种写法只有它抓得住。
+     * 0.80 到 1.00 逐位相同，因为能配上的句子长短本来就接近。注意它今天只作为**几何判据**在起作用：
+     * bestMatch 里那条"包含率兜底"的 if 在 diceFloor == LENGTH_BOUND_FLOOR == 0.50 时永远走不到
+     * （它要求 dice < 0.50 又要求 dice >= 0.50，实测台 628 次判定零次命中），满足这一几何的候选早就被
+     * Dice 那条收下了。它现在真正撑着的是命中的落点——按几何认出"长短悬殊的嵌入"，再把区间裁到实际共享
+     * 那一段（sharedSpan），否则抄一句 22 字会把学生自己写的 60 字一起报成重复。
      */
     public static final float SIMILAR_CONTAINMENT = 0.90f;
 
@@ -80,12 +84,26 @@ public final class TextCorpus {
     /**
      * 包含率通道能不能碰到这一句，还有一条隐藏的上限：这一档 0.5 把可达的长短比卡死在 3.0 倍
      * （Dice 上界 2·min/(min+max) ≥ 0.5 等价于 max/min ≤ 3）。拆句把 54 字的原句拆成 16 字的碎片，
-     * 比值 3.4，结构上进不了这条通道。想放宽它不能只改这一格：包含率命中记的是**整个片段的区间**，
-     * 一段 26 字的原句嵌进 85 字的学生自写长句里，放宽之后报出来的是 85 字全算重复。
-     * 先有"按实际共享区间落点"的裁剪，再谈放宽比值——顺序反了就是拿相似率换召回。
+     * 比值 3.4，结构上进不了这条通道。这一格以前还压着另一个代价：命中记的是**整个片段的区间**，
+     * 一段 26 字的原句嵌进 85 字的学生自写长句里，报出来的是 85 字全算重复（实测台 embedding 档
+     * 每句多报 41 字）。那个代价已经由 sharedSpan 还掉了——按几何认出嵌入、把区间裁到实际共享那一段，
+     * 每句多报掉到 4 字（688 字 → 66 字）而嵌入召回仍在 90% 地板之上。所以放宽长短比现在只欠噪声
+     * 那一头的实测，不再欠多报。
      */
 
+    /**
+     * 包含率命中的落点要裁到两边实际共享的那一段。一段共享块最短要长到这个长度（折叠串的单位数）：
+     * MIN_SHARED_GRAMS 枚首尾相接的三元组正好盖住 5 个字符，再短只是撞上了同一个术语，不是一段抄来的话。
+     */
+    private static final int MIN_SHARED_BLOCK = MIN_SHARED_GRAMS + 2;
+    /** 一个比对片段最多裁出几段共享块；每段一次二分，这个上限把最坏开销钉成常数倍。 */
+    private static final int MAX_SHARED_BLOCKS = 16;
+    /** 公共块二分用的滚动哈希底数：与 Fingerprints 同一个 FNV 素数，64 位自然溢出。 */
+    private static final long ROLLING_BASE = 0x100000001B3L;
+    private static long[] rollingPowers = seededPowers();
+
     public static final class Source {
+
         public String id = "", title = "", authors = "", year = "", locator = "", engine = "";
     }
 
@@ -147,7 +165,21 @@ public final class TextCorpus {
     private static final class Match {
         int entryId;
         float score;
+        /**
+         * 这一枪落在正文上的区间（match() 入参文本的 UTF-16 下标，按先后排、两两不重叠）。
+         * 默认一段 = 整个片段；只有包含率那一条路会把它裁成实际共享的那几段，见 clipToSharedBlocks。
+         */
+        int spanCount;
+        final int[] spanStarts = new int[MAX_SHARED_BLOCKS];
+        final int[] spanEnds = new int[MAX_SHARED_BLOCKS];
+
+        void wholeFragment(Frag frag) {
+            spanCount = 1;
+            spanStarts[0] = frag.start;
+            spanEnds[0] = frag.end;
+        }
     }
+
 
     private final ArrayList<Source> sources = new ArrayList<Source>();
     private final ArrayList<Entry> entries = new ArrayList<Entry>();
@@ -384,6 +416,7 @@ public final class TextCorpus {
         int[] postings = new int[POSTING_CAP];
         long[] scratch = new long[Math.max(64, Math.min(entries.size() + 1, POSTING_SCAN_CAP))];
         Match best = new Match();
+        SharedBlocks blocks = new SharedBlocks();
         HashMap<String, Integer> engineChars = new HashMap<String, Integer>();
         int runStart = -1, runEnd = -1, runWeight = 0;
         double runScore = 0d;
@@ -397,22 +430,31 @@ public final class TextCorpus {
             if (frags.isEmpty()) continue;
             for (int f = 0; f < frags.size(); f++) {
                 Frag frag = frags.get(f);
-                if (!bestMatch(frag, counter, postings, scratch, best)) continue;
+                if (!bestMatch(frag, counter, postings, scratch, blocks, best)) continue;
                 Entry entry = entries.get(best.entryId);
                 Source source = sources.get(entry.sourceIndex);
-                if (runStart >= 0 && frag.start - runEnd <= MERGE_GAP && runSource == source
-                        && sameCitationContext(citations, runEnd, frag.start)) {
-                    if (frag.end > runEnd) runEnd = frag.end;
-                    runScore += (double) best.score * frag.chars;
-                    runWeight += frag.chars;
-                } else {
-                    if (runStart >= 0) flush(report, runStart, runEnd, runWeight, runScore, runSource);
-                    runStart = frag.start;
-                    runEnd = frag.end;
-                    runWeight = frag.chars;
-                    runScore = (double) best.score * frag.chars;
-                    runSource = source;
+                // 落点：包含率那条路报实际共享的那几段，Dice 通道与逐字命中照旧报整个片段。一句里裁出几段
+                // 就让每一段各走一遍并段逻辑；加权照旧按片段的有效字数，只是区间落紧了。
+                for (int s = 0; s < best.spanCount; s++) {
+                    int hitStart = best.spanStarts[s], hitEnd = best.spanEnds[s];
+                    if (runStart >= 0 && hitStart - runEnd <= MERGE_GAP && runSource == source
+                            && sameCitationContext(citations, runEnd, hitStart)) {
+                        // 滑窗相邻两片的落点可能在原文上互相咬住（两片本身重叠 64 字），并段时把起点也往前挪；
+                        // 两段都是共享区间，重叠或相接区间的并集仍然逐字被共享覆盖。
+                        if (hitStart < runStart) runStart = hitStart;
+                        if (hitEnd > runEnd) runEnd = hitEnd;
+                        runScore += (double) best.score * frag.chars;
+                        runWeight += frag.chars;
+                    } else {
+                        if (runStart >= 0) flush(report, runStart, runEnd, runWeight, runScore, runSource);
+                        runStart = hitStart;
+                        runEnd = hitEnd;
+                        runWeight = frag.chars;
+                        runScore = (double) best.score * frag.chars;
+                        runSource = source;
+                    }
                 }
+
             }
         }
         if (runStart >= 0) flush(report, runStart, runEnd, runWeight, runScore, runSource);
@@ -652,7 +694,9 @@ public final class TextCorpus {
     }
 
     /** 倒排取候选，按命中数降序取前 MAX_CANDIDATES 个做精确 Dice。 */
-    private boolean bestMatch(Frag frag, Counter counter, int[] postings, long[] scratch, Match out) {
+    private boolean bestMatch(Frag frag, Counter counter, int[] postings, long[] scratch,
+                                       SharedBlocks blocks, Match out) {
+        out.wholeFragment(frag);
         if (entries.isEmpty() || frag.grams.length < MIN_SHARED_GRAMS) return false;
         Integer verbatim = exact.get(frag.key);
         if (verbatim != null) {
@@ -677,7 +721,8 @@ public final class TextCorpus {
         float bestScore = 0f;
         int bestId = -1;
         boolean bestExact = false;
-        int evaluated = 0;
+        boolean bestViaContainment = false;
+        int evaluated = 0, passed = 0;
         for (int i = found - 1; i >= 0 && evaluated < MAX_CANDIDATES; i--) {
             int entryId = (int) (scratch[i] & 0xffffffffL);
             if (entryId < 0 || entryId >= entries.size()) continue;
@@ -701,15 +746,26 @@ public final class TextCorpus {
             if (shared < MIN_SHARED_GRAMS) continue;
             float score = dice;
             boolean similar = dice >= diceFloor;
+            // 这一枪是不是"文库那句几乎整块嵌在本片段里"这个形状，按几何判，不按哪一个 if 先把 similar
+            // 抬起来判：diceFloor 与 LENGTH_BOUND_FLOOR 同为 0.50 时，满足这条几何的候选都先被 Dice 那条
+            // 收走了，下面这个 if 一次也没先收下过（实测台 1209 次命中判定，零次），而 Dice 那条报的是
+            // 整个片段——嵌入档每句多报的那 41 字就是这么来的。落点跟着几何走，见 clipToSharedBlocks。
+            boolean viaContainment = containment >= containmentFloor && dice >= LENGTH_BOUND_FLOOR
+                    && queryLength >= candidateLength
+                    && queryLength >= 1.6f * candidateLength;
             if (!similar && containment >= containmentFloor && dice >= LENGTH_BOUND_FLOOR
                     && Math.max(queryLength, candidateLength) >= 1.6f * Math.min(queryLength, candidateLength)) {
                 score = Math.max(dice, containment * 0.8f);
                 similar = true;
             }
-            if (!similar || score <= bestScore) continue;
+            if (!similar) continue;
+            /* 过了线的候选数。裁剪只在"这一个片段只跟一篇对得上"时才是安全的，见下面调用处。 */
+            passed++;
+            if (score <= bestScore) continue;
             bestScore = score;
             bestId = entryId;
             bestExact = exact;
+            bestViaContainment = viaContainment;
             if (bestScore >= 0.999f) break;
         }
         if (bestId < 0) return false;
@@ -720,8 +776,233 @@ public final class TextCorpus {
         }
         out.entryId = bestId;
         out.score = bestScore;
+        /* 裁到"两边实际共享的那一段"只在一个片段只跟一个候选对得上时才是安全的。同一个片段里有两句
+           都过了线（同篇的相邻两句、或两篇各一句），那这个片段本身就是拼出来的：只裁进赢的那一句，
+           另一句就连证据一起没了——抄两段只报一段比多报更糟。这种片段整段报，宁可多红也不许漏。
+           TextCorpusRegression.merging() 钉的就是这条。 */
+        if (bestViaContainment && passed == 1) clipToSharedBlocks(frag, entries.get(bestId).key, blocks, out);
         return true;
     }
+
+
+    /**
+     * 包含率那一条路的落点。判据说的是"文库那句几乎整块落在本片段里"，可命中区间不能跟着一起变成整个片段，
+     * 否则抄进去一句 26 字、学生自己写的 59 字也跟着红（docs/rewrite-robustness.md 的 embedding 一档，
+     * 实测每句连带标红 41 字）。这里把落点裁到两边实际共享的那几段：二分公共块长度 + 滚动哈希求最长公共
+     * 子串，找到之后往两端各自扩到极大，再在剩下的左右区间里接着找下一段，最多 MAX_SHARED_BLOCKS 段。
+     * 每段开销 O((n+m) log min(n,m))，n、m 都不超过 WINDOW_CHARS；不建 n×m 的 DP 表，临时表逐句复用。
+     *
+     * 一段共享块都够不到 MIN_SHARED_BLOCK 时保持整个片段：那时的证据是散在句中的三元组重合，没有"实际共享
+     * 的那一段"可指，宁可按旧口径多报，也不裁出一条没有根据的窄命中。
+     */
+    private static void clipToSharedBlocks(Frag frag, String candidateKey, SharedBlocks blocks, Match out) {
+        if (candidateKey == null || frag.key == null || frag.map == null
+                || frag.map.length != frag.key.length()) return;
+        int count = blocks.collect(frag.key, candidateKey, frag.map, out.spanStarts, out.spanEnds);
+        for (int i = 0; i < count; i++) {
+            // 裁剪只许落在片段内部、按先后排、不许为空：hits 两两不重叠是报告分子与来源榜共用的前提。
+            if (out.spanStarts[i] < frag.start || out.spanEnds[i] > frag.end
+                    || out.spanEnds[i] <= out.spanStarts[i]
+                    || (i > 0 && out.spanStarts[i] < out.spanEnds[i - 1])) {
+                out.wholeFragment(frag);
+                return;
+            }
+        }
+        if (count > 0) out.spanCount = count;
+    }
+
+    /** 滚动哈希的 BASE^k，备到用得着的那一档；比对片段最长 WINDOW_CHARS，实际长不了多大。 */
+    private static long[] powersTo(int count) {
+        long[] table = rollingPowers;
+        if (count < table.length) return table;
+        int capacity = table.length;
+        while (capacity <= count) capacity <<= 1;
+        long[] grown = new long[capacity];
+        System.arraycopy(table, 0, grown, 0, table.length);
+        for (int i = table.length; i < capacity; i++) grown[i] = grown[i - 1] * ROLLING_BASE;
+        rollingPowers = grown;
+        return grown;
+    }
+
+    private static long[] seededPowers() {
+        long[] out = new long[64];
+        out[0] = 1L;
+        for (int i = 1; i < out.length; i++) out[i] = out[i - 1] * ROLLING_BASE;
+        return out;
+    }
+
+    /**
+     * 两个折叠串之间"实际共享的那几段"。二分公共块长度，每一档把较短一侧的全部该长子串装进哈希表，拿较长
+     * 一侧的子串去查；哈希只用来筛候选，命中之后仍逐字符复核，撞车不会把没共享的字报成共享。最长那一段找到
+     * 后往两端扩到极大，再在左右剩下的区间里递归找下一段——先左、再本段、后右，段与段天然按正文先后排好。
+     * 临时表是开放寻址加世代标记，逐句复用，不在每次命中上分配。
+     */
+    private static final class SharedBlocks {
+        private long[] slotHash = new long[1024];
+        private int[] slotStart = new int[1024];
+        private int[] slotStamp = new int[1024];
+        private int mask = 1023;
+        private int generation = 1;
+        private final int[] found = new int[4];                       // 两边公共块的 {aStart,aEnd,bStart,bEnd}
+        private final int[] unitStart = new int[MAX_SHARED_BLOCKS];   // 片段侧起点，折叠串单位
+        private final int[] unitEnd = new int[MAX_SHARED_BLOCKS];     // 片段侧终点（不含）
+
+        /** a 侧的公共块经 map 换回原串下标写进 starts/ends，返回段数。 */
+        int collect(String a, String b, int[] map, int[] starts, int[] ends) {
+            int count = collect(0, a.length(), 0, b.length(), a, b, 0);
+            int kept = 0;
+            for (int i = 0; i < count; i++) {
+                /* 公共块两端各自扩到极大，扩过头的那一个字符常常是标点：稿子里学生自己敲的那枚逗号，
+                   位置正好对上文库那句里两个分句之间的逗号，折叠串层面确实相同，可它不是被抄走的一个字。
+                   validCount 只不认空白与不可见字符，一枚全角逗号照算一个有效字符，所以这一枚会进分子。
+                   落点只认正文：两端剥到字与数字为止，剥空的那一段整段不要。 */
+                int from = unitStart[i], to = unitEnd[i];
+                while (from < to && !content(a.charAt(from))) from++;
+                while (to > from && !content(a.charAt(to - 1))) to--;
+                if (from >= to) continue;
+                unitStart[kept] = from;
+                unitEnd[kept] = to;
+                starts[kept] = map[from];
+                ends[kept] = map[to - 1] + 1;
+                kept++;
+            }
+            return kept;
+        }
+
+        /** 汉字、字母、数字才算被抄走的内容；标点和符号是两边都会敲的东西。 */
+        private static boolean content(char c) {
+            return Character.isLetterOrDigit(c) || Character.isSurrogate(c);
+        }
+
+        /** 递归体：先写左半、再写本段、最后写右半；返回写到的段数。 */
+        private int collect(int aFrom, int aTo, int bFrom, int bTo, String a, String b, int count) {
+            if (count >= MAX_SHARED_BLOCKS) return count;
+            if (aTo - aFrom < MIN_SHARED_BLOCK || bTo - bFrom < MIN_SHARED_BLOCK) return count;
+            if (longestCommonBlock(a, aFrom, aTo, b, bFrom, bTo) <= 0) return count;
+            int aStart = found[0], aEnd = found[1], bStart = found[2], bEnd = found[3];
+            count = collect(aFrom, aStart, bFrom, bStart, a, b, count);
+            unitStart[count] = aStart;
+            unitEnd[count] = aEnd;
+            return collect(aEnd, aTo, bEnd, bTo, a, b, count + 1);
+        }
+
+        /**
+         * 二分公共块长度：每一档重算一次滚动哈希，一共 log min(n,m) 档。二分最后成功的那一档就是最长那档，
+         * found 里留下的正是那一段——失败的那些档只会把上界往下压，不会再往 found 里写东西。
+         */
+        private int longestCommonBlock(String a, int aFrom, int aTo, String b, int bFrom, int bTo) {
+            int low = MIN_SHARED_BLOCK, high = Math.min(aTo - aFrom, bTo - bFrom), answer = 0;
+            while (low <= high) {
+                int mid = (low + high) >>> 1;
+                if (commonBlock(a, aFrom, aTo, b, bFrom, bTo, mid)) {
+                    answer = mid;
+                    low = mid + 1;
+                } else {
+                    high = mid - 1;
+                }
+            }
+            return answer;
+        }
+
+        /** 长度为 length 的公共子串有没有；有就把它两端扩到极大后写进 found。 */
+        private boolean commonBlock(String a, int aFrom, int aTo, String b, int bFrom, int bTo, int length) {
+            boolean aShorter = aTo - aFrom <= bTo - bFrom;
+            String shortSide = aShorter ? a : b;
+            String longSide = aShorter ? b : a;
+            int shortFrom = aShorter ? aFrom : bFrom, shortTo = aShorter ? aTo : bTo;
+            int longFrom = aShorter ? bFrom : aFrom, longTo = aShorter ? bTo : aTo;
+            begin(shortTo - shortFrom + 1);
+            // 滚出窗口那枚字符的位权：乘过 BASE 之后它压在 BASE^length 上，与 Fingerprints.rolling 同一口径。
+            long rollOut = powersTo(length)[length];
+            long rolling = 0L;
+            for (int i = 0, units = shortTo - shortFrom; i < units; i++) {
+                rolling = rolling * ROLLING_BASE + shortSide.charAt(shortFrom + i);
+                if (i >= length) rolling -= rollOut * shortSide.charAt(shortFrom + i - length);
+                if (i + 1 >= length) put(mix(rolling), shortFrom + i - length + 1);
+            }
+            rolling = 0L;
+            for (int i = 0, units = longTo - longFrom; i < units; i++) {
+                rolling = rolling * ROLLING_BASE + longSide.charAt(longFrom + i);
+                if (i >= length) rolling -= rollOut * longSide.charAt(longFrom + i - length);
+                if (i + 1 < length) continue;
+                int shortAt = get(mix(rolling));
+                if (shortAt < 0) continue;
+                int longAt = longFrom + i - length + 1;
+                if (!longSide.regionMatches(longAt, shortSide, shortAt, length)) continue;
+                extend(a, aFrom, aTo, b, bFrom, bTo,
+                        aShorter ? shortAt : longAt, aShorter ? longAt : shortAt, length);
+                return true;
+            }
+            return false;
+        }
+
+        /** 二分只保证"有这么长"；两端再各自往外扩到不能再扩，才是实际共享的那一整段。 */
+        private void extend(String a, int aFrom, int aTo, String b, int bFrom, int bTo,
+                            int aStart, int bStart, int length) {
+            int aEnd = aStart + length, bEnd = bStart + length;
+            while (aStart > aFrom && bStart > bFrom && a.charAt(aStart - 1) == b.charAt(bStart - 1)) {
+                aStart--;
+                bStart--;
+            }
+            while (aEnd < aTo && bEnd < bTo && a.charAt(aEnd) == b.charAt(bEnd)) {
+                aEnd++;
+                bEnd++;
+            }
+            // 块边界不许落在代理对中间：两边都是合法文本，往外让一格就对齐了。
+            if (aStart > 0 && Character.isLowSurrogate(a.charAt(aStart))) {
+                aStart--;
+                bStart--;
+            }
+            if (Character.isHighSurrogate(a.charAt(aEnd - 1))) {
+                aEnd--;
+                bEnd--;
+            }
+            found[0] = aStart;
+            found[1] = aEnd;
+            found[2] = bStart;
+            found[3] = bEnd;
+        }
+
+        /** 换一代：世代号一换，旧格子当场作废，不必清空整张表。 */
+        private void begin(int expected) {
+            int capacity = slotHash.length;
+            while (capacity < expected * 2) capacity <<= 1;
+            if (capacity > slotHash.length) {
+                slotHash = new long[capacity];
+                slotStart = new int[capacity];
+                slotStamp = new int[capacity];
+                mask = capacity - 1;
+            }
+            if (++generation == 0) {
+                Arrays.fill(slotStamp, 0);
+                generation = 1;
+            }
+        }
+
+        /** 同一个哈希留第一个起点：二分的每一档只要能找到一段就行，重复的起点没有额外信息。 */
+        private void put(long hash, int start) {
+            int slot = (int) (mix(hash) & mask);
+            while (slotStamp[slot] == generation) {
+                if (slotHash[slot] == hash) return;
+                slot = (slot + 1) & mask;
+            }
+            slotStamp[slot] = generation;
+            slotHash[slot] = hash;
+            slotStart[slot] = start;
+        }
+
+        private int get(long hash) {
+            int slot = (int) (mix(hash) & mask);
+            int guard = 0;
+            while (slotStamp[slot] == generation) {
+                if (slotHash[slot] == hash) return slotStart[slot];
+                slot = (slot + 1) & mask;
+                if (++guard > mask) return -1;
+            }
+            return -1;
+        }
+    }
+
 
     /** 单句最长 WINDOW_CHARS 有效字符，超长串切窗，保证逐句匹配开销线性。 */
     private static ArrayList<Frag> fragments(String norm, int from, int to) {

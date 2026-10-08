@@ -98,7 +98,11 @@ public final class HttpTransport {
             } catch (ApiClient.Failure error) {
                 failure = error;
                 failedVia = via;
-                if (++i >= order.size() || error.status != 0 || !routeIsDown(error)) break;
+                /* 只有这条路本身拨不通才记账、才换下一条：403/429 是对方答了话，换条路也是同样答复，
+                   把这种失败记成「路不通」会让下一次绕开一条其实好着的路。 */
+                boolean roadIsDown = error.status == 0 && routeIsDown(error);
+                if (roadIsDown) Routes.failed(url, via);
+                if (++i >= order.size() || !roadIsDown) break;
             }
         }
         if (failure.status != 429 || Thread.currentThread().isInterrupted()

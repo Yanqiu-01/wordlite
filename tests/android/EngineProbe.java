@@ -51,7 +51,7 @@ public final class EngineProbe {
     public static void main(String[] argv) throws Exception {
         String query = "深度学习 图像分割 综述";
         String only = "", proxy = "", coreKey = trim(System.getenv("WORDLITE_CORE_KEY")), file = "";
-        int per = 5, timeout = 25;
+        int per = 5, timeout = 25, repeat = 1;
         boolean tcp = true, tcpOnly = false;
         ArrayList<String> words = new ArrayList<String>();
         for (String arg : argv) {
@@ -59,6 +59,7 @@ public final class EngineProbe {
             if (arg.startsWith("--only=")) only = arg.substring(7);
             else if (arg.startsWith("--proxy=")) proxy = arg.substring(8);
             else if (arg.startsWith("--per=")) per = number(arg.substring(6), per);
+            else if (arg.startsWith("--repeat=")) repeat = Math.max(1, number(arg.substring(9), repeat));
             else if (arg.startsWith("--timeout=")) timeout = number(arg.substring(10), timeout);
             else if (arg.startsWith("--core-key=")) coreKey = arg.substring(11).trim();
             else if (arg.startsWith("--query-file=")) file = arg.substring(13).trim();
@@ -93,38 +94,44 @@ public final class EngineProbe {
 
         Set<String> wanted = wanted(only);
         int failures = 0, skipped = 0, candidates = 0, attempted = 0;
-        for (String engine : PaperSources.engines()) {
-            if (!wanted.contains(engine)) continue;
-            attempted++;
-            if ("core".equals(engine) && limits.coreKey.isEmpty()) {
-                skipped++;
-                System.out.printf(Locale.ROOT, "SKIP %-17s tried=%-8s via=%s%n", engine, "-", "needs WORDLITE_CORE_KEY");
-                continue;
-            }
-            int tried = Routes.order(Routes.host(PaperSources.endpoint(engine)),
-                    PaperSources.proxyFor(limits)).size();
-            long started = System.nanoTime();
-            try {
-                ArrayList<PaperSources.Candidate> found = PaperSources.search(engine, query, limits, null);
-                long ms = (System.nanoTime() - started) / 1000000L;
-                candidates += found.size();
-                System.out.printf(Locale.ROOT, "OK   %-17s hits=%-3d %5dms tried=%-2d via=%-22s %s%n", engine,
-                        found.size(), ms, tried, routeOf(engine),
-                        found.isEmpty() ? "(no hits)" : cut(found.get(0).source.title, 60));
-            } catch (Exception error) {
-                long ms = (System.nanoTime() - started) / 1000000L;
-                if (EXCLUDED.equals(String.valueOf(error.getMessage()))) {
+        /* 同一个查询重复几轮：路由记忆到底有没有省下那条死直连，只有第二轮往后的耗时说得清。 */
+        for (int round = 1; round <= repeat; round++) {
+            long roundStarted = System.nanoTime();
+            for (String engine : PaperSources.engines()) {
+                if (!wanted.contains(engine)) continue;
+                attempted++;
+                if ("core".equals(engine) && limits.coreKey.isEmpty()) {
                     skipped++;
-                    System.out.printf(Locale.ROOT, "SKIP %-17s tried=%-8s via=%s%n", engine, "-",
-                            "not in this probe build");
+                    System.out.printf(Locale.ROOT, "SKIP %-17s tried=%-8s via=%s%n", engine, "-", "needs WORDLITE_CORE_KEY");
                     continue;
                 }
-                failures++;
-                String status = error instanceof ApiClient.Failure
-                        ? " http=" + ((ApiClient.Failure) error).status : "";
-                System.out.printf(Locale.ROOT, "FAIL %-17s %9s tried=%-2d via=%-22s %s%s%n", engine, ms + "ms", tried,
-                        "-", String.valueOf(error.getMessage()), status);
+                int tried = Routes.order(Routes.host(PaperSources.endpoint(engine)),
+                        PaperSources.proxyFor(limits)).size();
+                long started = System.nanoTime();
+                try {
+                    ArrayList<PaperSources.Candidate> found = PaperSources.search(engine, query, limits, null);
+                    long ms = (System.nanoTime() - started) / 1000000L;
+                    candidates += found.size();
+                    System.out.printf(Locale.ROOT, "OK   %-17s hits=%-3d %5dms tried=%-2d via=%-22s %s%n", engine,
+                            found.size(), ms, tried, routeOf(engine),
+                            found.isEmpty() ? "(no hits)" : cut(found.get(0).source.title, 60));
+                } catch (Exception error) {
+                    long ms = (System.nanoTime() - started) / 1000000L;
+                    if (EXCLUDED.equals(String.valueOf(error.getMessage()))) {
+                        skipped++;
+                        System.out.printf(Locale.ROOT, "SKIP %-17s tried=%-8s via=%s%n", engine, "-",
+                                "not in this probe build");
+                        continue;
+                    }
+                    failures++;
+                    String status = error instanceof ApiClient.Failure
+                            ? " http=" + ((ApiClient.Failure) error).status : "";
+                    System.out.printf(Locale.ROOT, "FAIL %-17s %9s tried=%-2d via=%-22s %s%s%n", engine, ms + "ms", tried,
+                            "-", String.valueOf(error.getMessage()), status);
+                }
             }
+            System.out.println("ROUND " + round + " " + ((System.nanoTime() - roundStarted) / 1000000L)
+                    + "ms candidates=" + candidates + " routes=" + Routes.summary());
         }
         String routes = Routes.summary();
         System.out.println("ROUTES " + (routes.isEmpty() ? "(no source was reached)" : routes));

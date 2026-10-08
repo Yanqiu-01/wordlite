@@ -1,0 +1,117 @@
+# Word Lite - 让手机经电脑上的代理去问知网、万方、维普。
+#
+# 为什么需要这个脚本：真机上实测过一次，手机挂在移动数据上时十个检索源直连全部被当场拒回
+# （连接被 RST），只有电脑上 Clash 那条路出得去。而两件事随时在变：Clash 实际监听的端口是它
+# 自己配的（Clash Verge 默认 7897，不是大家以为的 7890），adb 的 USB 反代又随拔线和
+# adb kill-server 一起消失。这个脚本负责确认这两件事：探出真正在监听的代理端口、把它反代到
+# 手机上、再用应用自己的检索代码在手机上跑一次，把每个源最后走的那条路印出来。
+#
+# Usage:
+#   pwsh tools/phone-gateway.ps1                 # 探端口 + 建反代 + 用手机上的代码验一次
+#   pwsh tools/phone-gateway.ps1 -Port 7890      # 跳过探测，指定端口
+#   pwsh tools/phone-gateway.ps1 -Status         # 只看当前状态，不改任何东西
+#   pwsh tools/phone-gateway.ps1 -Watch          # 建好之后守着：拔线/adb 重启后自动补上
+#   pwsh tools/phone-gateway.ps1 -SkipVerify     # 不跑手机上的验证（只修管道）
+#
+# 手机拿到的永远是 127.0.0.1:<同一个端口>。WordLite 的 Routes 自动发现回环上的 7897 与 7890，
+# 所以应用里代理留空也能用上；把它填进设置只是让国内库少撞一次直连死路。
+param(
+    [int]$Port = 0,
+    [string]$Serial = "",
+    [switch]$Status,
+    [switch]$Watch,
+    [switch]$SkipVerify
+)
+$ErrorActionPreference = "Stop"
+$root = Split-Path -Parent $PSScriptRoot
+Set-Location $root
+$adb = Get-Command adb -ErrorAction SilentlyContinue
+if (-not $adb) { throw "没找到 adb，先装 platform-tools 或把它加进 PATH" }
+$adb = $adb.Source
+$device = @()
+if ($Serial) { $device = @("-s", $Serial) }
+
+function Invoke-Adb([string[]]$a) { & $adb @device @a }
+function ReverseList { @(Invoke-Adb @("reverse", "--list")) | Where-Object { $_ -and $_.Trim() } }
+
+function Test-PortOpen([int]$number) {
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $begin = $client.BeginConnect("127.0.0.1", $number, $null, $null)
+        if (-not $begin.AsyncWaitHandle.WaitOne(500)) { return $false }
+        $client.EndConnect($begin); return $client.Connected
+    } catch { return $false } finally { $client.Close() }
+}
+
+# 端口开着不代表它是代理：Docker 也爱占 1080。所以拿应用真正要打的那个海外源问一句，
+# 能走 CONNECT 才算数（这一步和手机上的用法完全一样：HTTP 代理 + HTTPS 目标）。
+function Test-PortCarries([int]$number) {
+    try {
+        $r = Invoke-WebRequest -Uri "https://api.openalex.org/works?per-page=1" `
+            -Proxy ("http://127.0.0.1:" + $number) -TimeoutSec 12 -UseBasicParsing
+        return ($r.StatusCode -ge 200 -and $r.StatusCode -lt 300)
+    } catch { return $false }
+}
+
+function Find-ProxyPort {
+    foreach ($candidate in @(7897, 7890, 7891, 8888, 10808)) {
+        if (-not (Test-PortOpen $candidate)) {
+            Write-Host ("  {0,-6} 没在监听" -f $candidate) -ForegroundColor DarkGray
+            continue
+        }
+        if (Test-PortCarries $candidate) {
+            Write-Host ("  {0,-6} 开着，且能把 HTTPS 带出去" -f $candidate) -ForegroundColor Green
+            return $candidate
+        }
+        Write-Host ("  {0,-6} 开着，但它不是可用代理（CONNECT 走不通，可能被防火墙拦或压根是别的服务）" -f $candidate) -ForegroundColor Yellow
+    }
+    return 0
+}
+
+function Ensure-Reverse([int]$number) {
+    # 两个端口都指过去：应用自动发现 7897 与 7890，只反代其中一个时另一个会在候选队列里
+    # 白撞一次，两个都给反而让换端口时不用重新插拔。
+    foreach ($remote in @(7897, 7890)) {
+        Invoke-Adb @("reverse", ("tcp:{0}" -f $remote), ("tcp:{0}" -f $number)) | Out-Null
+        Write-Host ("  手机 127.0.0.1:{0} -> 电脑 127.0.0.1:{1}" -f $remote, $number) -ForegroundColor Cyan
+    }
+}
+
+Write-Host "== 电脑侧代理 ==" -ForegroundColor Cyan
+$found = $Port
+if ($found -le 0) { $found = Find-ProxyPort }
+elseif (-not (Test-PortCarries $found)) { Write-Host ("  {0} 不能把 HTTPS 带出去" -f $found) -ForegroundColor Yellow }
+
+Write-Host "== USB 反代 ==" -ForegroundColor Cyan
+$listed = ReverseList
+if ($listed.Count -eq 0) { Write-Host "  （当前没有任何反代）" -ForegroundColor DarkGray }
+else { $listed | ForEach-Object { Write-Host ("  " + $_) -ForegroundColor DarkGray } }
+if ($Status) {
+    if ($found -gt 0) { Write-Host ("  可用代理端口：" + $found) -ForegroundColor Green }
+    else { Write-Host "  没找到可用代理端口：先把电脑上的 Clash 打开（Clash Verge 默认 7897）" -ForegroundColor Yellow }
+    exit 0
+}
+if ($found -le 0) { throw "电脑上没有能把 HTTPS 带出去的代理端口，手机只能直连；先在 Clash 里开好混合端口再跑一次" }
+Ensure-Reverse $found
+
+if (-not $SkipVerify) {
+    Write-Host "== 手机上的检索自检（用应用自己的代码）==" -ForegroundColor Cyan
+    & (Join-Path $root "tools/device-probe.ps1") -IncludeCnki -Engines "cnki,wanfang,cqvip" -NoTcp -Per 3 2>&1 |
+        Where-Object { $_ -match "^(OK|FAIL|SKIP|ROUTES|SUMMARY|probe exit)" } |
+        ForEach-Object { Write-Host ("  " + $_) }
+}
+Write-Host ("应用里代理填 127.0.0.1:{0} 即可（留空也行，应用会自动发现 7897/7890）" -f $found) -ForegroundColor Green
+
+if ($Watch) {
+    Write-Host "== 守着反代（Ctrl+C 退出）==" -ForegroundColor Cyan
+    while ($true) {
+        Start-Sleep -Seconds 5
+        $now = ReverseList
+        $wanted = @("tcp:7897", "tcp:7890")
+        $gone = @($wanted | Where-Object { $have -notcontains $_ })
+        if ($gone.Count -gt 0) {
+            Write-Host ("  {0} 断了（拔线或 adb 重启），补上" -f ($gone -join ", ")) -ForegroundColor Yellow
+            Ensure-Reverse $found
+        }
+    }
+}

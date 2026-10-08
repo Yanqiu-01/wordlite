@@ -1,4 +1,4 @@
-﻿# Word Lite - run the real retrieval stack on a connected device and print per-engine results.
+# Word Lite - run the real retrieval stack on a connected device and print per-engine results.
 # No UI, no APK: javac the pure-Java subset -> d8 -> push one dex -> app_process.
 #
 # Usage:  pwsh tools/device-probe.ps1 [[-Query <text>] [-Engines a,b] [-Proxy host:port]
@@ -35,6 +35,7 @@ param(
     [switch]$Reverse,
     [int]$ReversePort = 7897,
     [string]$Serial = "EAMUT20528011355",
+    [int]$Repeat = 1,
     [int]$Per = 5,
     [int]$Timeout = 25,
     [switch]$IncludeCnki,
@@ -166,8 +167,8 @@ try {
         if (-not $Proxy) { $Proxy = ("127.0.0.1:{0}" -f $ReversePort); Write-Host ("   -Proxy defaulted to " + $Proxy + " because -Reverse was asked for") }
     }
 
-    $argv = @("-s", $device, "shell", ("CLASSPATH={0} app_process / {1} engines --query-file={2} --per={3} --timeout={4}" -f
-            $remoteDex, $remoteClass, $remoteQuery, $Per, $Timeout))
+    $argv = @("-s", $device, "shell", ("CLASSPATH={0} app_process / {1} engines --query-file={2} --per={3} --timeout={4} --repeat={5}" -f
+            $remoteDex, $remoteClass, $remoteQuery, $Per, $Timeout, $Repeat))
     if ($Engines) { $argv[-1] += (" --only=" + $Engines) }
     if ($Proxy)   { $argv[-1] += (' --proxy=' + $Proxy) }
     if ($NoTcp)   { $argv[-1] += ' --no-tcp' }
