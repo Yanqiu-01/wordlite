@@ -242,6 +242,27 @@ public final class FontSubstitution {
                         + " 个位置 / " + distinctGlyphs + " 个不同的字");
         check(cannot.length() == 0, "样稿里每一个声明了的字体名都画得出它要画的字，缺字：" + cannot);
 
+        /* 11. 文件大小说不清一张脸是被裁过的还是全量的。逐字问基本汉字区（U+4E00-U+9FFF）画得出多少个：
+              本机满字的那几张必须到 20,990；华文新魏/华文隶书/华文行楷本机就只有 GB2312 的 6,763 个汉字，
+              一张都不许多丢。对照过 C:\Windows\Fonts 原件和 GitHub 上 chengda/popular-fonts 的同名字库：
+              Unicode 映射一致、字宽一字不差，所以下面这条地板就是原件的地板，不是我们自己定的低标准。 */
+        String[][] hanziFloors = {
+            { DocxFontAssets.SONG, "20990" }, { DocxFontAssets.MS_YAHEI, "20990" },
+            { DocxFontAssets.DENG_XIAN, "20990" }, { DocxFontAssets.HEI, "20900" },
+            { DocxFontAssets.KAI, "20900" }, { DocxFontAssets.FANG, "20900" },
+            { DocxFontAssets.LI_SU, "20900" }, { DocxFontAssets.YOU_YUAN, "20900" },
+            { DocxFontAssets.FZ_SMALL_SONG, "20900" }, { DocxFontAssets.ST_SONG, "20900" },
+            { DocxFontAssets.ST_ZHONGSONG, "20900" }, { DocxFontAssets.ST_KAITI, "20900" },
+            { DocxFontAssets.ST_FANGSONG, "20900" }, { DocxFontAssets.ST_XIHEI, "20900" },
+            { DocxFontAssets.ST_XINWEI, "6763" }, { DocxFontAssets.ST_LITI, "6763" },
+            { DocxFontAssets.ST_XINGKAI, "6763" }, { DocxFontAssets.MS_GOTHIC, "12500" },
+        };
+        for (int i = 0; i < hanziFloors.length; i++) {
+            long got = countHanzi(hanziFloors[i][0]);
+            check(got >= Long.parseLong(hanziFloors[i][1]), hanziFloors[i][0]
+                    + " 的基本汉字覆盖不许缩水（实测 " + got + "，地板 " + hanziFloors[i][1] + "）");
+        }
+
         System.out.println("SUMMARY " + checks + " font-substitution assertions passed; " + summary);
     }
 
@@ -312,6 +333,14 @@ public final class FontSubstitution {
             if (seen.add(Integer.valueOf(cp))) out.appendCodePoint(cp);
         }
         return out.toString();
+    }
+
+    /** 这张脸在基本汉字区画得出多少个字。 */
+    private static long countHanzi(String path) throws Exception {
+        Font face = Font.createFont(Font.TRUETYPE_FONT, new File("app/src/main/assets/" + path));
+        long got = 0;
+        for (int cp = 0x4E00; cp <= 0x9FFF; cp++) if (face.canDisplay(cp)) got++;
+        return got;
     }
 
     /** 一张脸必须能画出这些字，缺一个就报出来。 */
