@@ -659,12 +659,18 @@ public final class PaperSources {
             got = HttpTransport.getPdf(url, headers, seconds(limits), HttpTransport.MAX_PDF_BODY, cancellation,
                     proxyFor(limits), plainHttpAllowed(url));
         } catch (IOException error) {
-            out.shape = "fetch-failed";
+            /* PDF 这一路以前把所有答复都压成 fetch-failed：实测 sioc-journal.cn 那个下载口回的是
+               301（跳到 https 的同一条地址，跟过去是 500 / 3,134 B 的 HTML 错误页），账上却和
+               "网断了"长一个样。状态能说明的地方就用状态。 */
+            out.shape = fetchFailureShape(error instanceof ApiClient.Failure
+                    ? ((ApiClient.Failure) error).status : -1);
             out.error = clipLine(error.getMessage(), 60);
             out.millis = System.currentTimeMillis() - began;
             return out;
         } catch (RuntimeException error) {
-            out.shape = "fetch-failed";
+            /* 这一路接不住 ApiClient.Failure（它是 IOException），状态只可能藏在 cause 里。 */
+            out.shape = fetchFailureShape(error.getCause() instanceof ApiClient.Failure
+                    ? ((ApiClient.Failure) error.getCause()).status : -1);
             out.error = clipLine(error.getMessage(), 60);
             out.millis = System.currentTimeMillis() - began;
             return out;

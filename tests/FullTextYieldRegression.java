@@ -80,6 +80,13 @@ public class FullTextYieldRegression {
                 "<article><body><p>保温 30 分钟后界面处的孔隙率降到 4% 以下，" + "说明瞬态液相把多孔铜的连通孔基本填满，接头剪切强度随之上升。</p></body></article>"));
         server.createContext("/epmc/gone", exchange -> respond(exchange, 404,
                 "{\"error\":\"Not Found\",\"message\":\"no full text\",\"status\":404}"));
+        server.createContext("/pdf/gone.pdf", exchange -> respond(exchange, 404,
+                "{\"error\":\"Not Found\"}"));
+        server.createContext("/pdf/jump.pdf", exchange -> {
+            exchange.getResponseHeaders().set("Location", "https://elsewhere.example.org/file.pdf");
+            exchange.sendResponseHeaders(301, -1);
+            exchange.close();
+        });
         server.createContext("/epmc/jump", exchange -> {
             exchange.getResponseHeaders().set("Location", "https://elsewhere.example.org/file");
             exchange.sendResponseHeaders(301, -1);
@@ -149,6 +156,21 @@ public class FullTextYieldRegression {
                             && PaperSources.fetchFailureShape(503).equals("source-unavailable")
                             && PaperSources.fetchFailureShape(-1).equals("fetch-failed"),
                     "状态码到形状的换算：403/402/429/5xx/没答话各归一档");
+
+            /* 4b) PDF 那一路以前把 301 也压成 fetch-failed：sioc-journal.cn 那个下载口实测就是 301。 */
+            PaperSources.Candidate pdfGone = new PaperSources.Candidate();
+            pdfGone.source.engine = "semantic-scholar";
+            pdfGone.fullTextUrl = base + "/pdf/gone.pdf";
+            rows.clear();
+            PaperSources.fullText(pdfGone, limits, null);
+            check(lastShape(rows, "link-not-found") != null, "PDF 直链 404 也记 link-not-found，不再压成 fetch-failed");
+            PaperSources.Candidate pdfJump = new PaperSources.Candidate();
+            pdfJump.source.engine = "semantic-scholar";
+            pdfJump.fullTextUrl = base + "/pdf/jump.pdf";
+            rows.clear();
+            PaperSources.fullText(pdfJump, limits, null);
+            check(lastShape(rows, "redirect-not-followed") != null,
+                    "PDF 直链要跳转就记 redirect-not-followed：\u201c它跳转了我们不追\u201d和\u201c这篇真的没字\u201d是两种下一步");
 
             /* 5) 格式不符不许和 PDF 同价：以前 hanspub 的 PDF 和 Europe PMC 的 fullTextXML 同为 1。 */
             check(PaperSources.pdfUrlRank("https://pdf.hanspub.org/MS20170300000_52023950.pdf") == 0
