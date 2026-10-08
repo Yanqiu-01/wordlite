@@ -24,11 +24,11 @@ py tools/build-holdout-corpus.py proof --check-train   # 把"留出集没沾过�
 第 0 步那份导出是自查用的：本轮拿它复算了出厂审计自己的读数——493 真人 / 262 机器、AUC(机器>真人)=0.3119、真人最高 0.5059、机器最高 0.2167、真人误报 2.03/千句，与`AigcFeatureAuditRegression` 打印的 0.312 / 0.506 / 0.217 / 2.03 一字不差。所以下表那一栏【① 出厂审计逐句】与出厂读数是同一批句子，不是另切的一套。
 信号方向在脚本头部按先验写死，量完不许多翻符号——翻了那个数就不干净。
 
-## 1. 三把尺子，真人的定义分开列
+## 1. 四把尺子，真人的定义分开列
 
 | 代号 | 是什么 | 计分句 | 真人来源 |
 | --- | --- | --- | --- |
-| ① 出厂审计逐句 | `AigcFeatureAuditRegression` 实际打分的 755 句：同一批标注文件，但计分单位走产品那条流水线（120 字段落门槛 + `TextCorpus.sentences` + `AigcFeatures.scores`），由 `WORDLITE_AIGC_AUDIT_DUMP` 导出 |
+| ① 出厂审计逐句 | `AigcFeatureAuditRegression` 实际打分的那 755 句：同一批标注文件，但计分单位走产品那条流水线（120 字段落门槛 + `TextCorpus.sentences` + `AigcFeatures.scores`），由 `WORDLITE_AIGC_AUDIT_DUMP` 导出 | 493 真人 / 262 机器 | 与 ③ 同一批来源、同一套标注——门槛那两个数就报在这批句子上 |
 | ③ 真稿独立留出 | `tests/corpus/aigc-label-*.txt` 那批：H1 学位论文正文 + H2 已发表摘要逐字摘录 + H3 知网片段 + X1 轻度润色 + HH 最难真人句，对 M-RAW / M-EVADE / M-DOMAIN 机器稿 | 623 真人 / 369 机器 | **真人稿是学位论文正文与已发表摘要**——门槛只认这一档 |
 | ③c 段落级真稿 | PMC 开放获取子集里已发表论文正文，120~656 字/段，2013-2022，逐篇核许可（CC BY / CC BY-NC-SA），清单 `tests/corpus/aigc-holdout2-manifest.json`，原文留在仓库外 | 2,182~3,000 真人（对 ③ 那 369 机器句） | 真人稿是**期刊正文**，学科窄（分析化学/血液学/肿瘤学为主），不是学位论文正文 |
 | 配对档 | DetectRL-X Academic 的 test 划分：同一篇真稿的真人原句 vs 现代模型（deepseek-v3 / gemini-2.5-flash / gpt-4o / qwen-max）改写句 | 1,168 真人 / 1,196 机器 | 真人稿是中文期刊与鉴定文书正文 |
@@ -94,7 +94,7 @@ py tools/build-holdout-corpus.py proof --check-train   # 把"留出集没沾过�
 
 ### 3.1 出厂那份判据自己的真人被判率（门槛 0.45，不重新定阈值）
 
-上面三行是新拟合的模型。出厂那份判据按同一把尺子、同一句不重定阈值地量，四档分别是：
+上面三行是新拟合的模型。出厂那份判据按同一把尺子量（就用应用现用的 0.45，不重新定阈值），四档分别是：
 
 | 真人池 | 计分句 | 随包 n-gram 逻辑回归句分 >= 0.45 |
 | --- | --- | --- |
