@@ -555,13 +555,20 @@ public final class ApiWorkflow {
      */
     private static String hint(int usable, String proxy) {
         if (usable > 0) return "";
-        return "\n\n找过的路：" + Routes.candidateList(proxy)
-                + "\n手机自己出不去时，把流量经电脑上的代理出去：检索设置里的\"HTTP 代理\"填电脑的地址与端口"
-                + "（例如 192.168.1.20:7897，代理端需允许局域网连接）。USB 连着电脑时先执行"
-                + " adb reverse tcp:7897 tcp:<电脑上的代理端口>（Clash Verge 默认监听 7897，未必是 7890）。"
-                /* 反代进手机的端口是 7897 还是 7890 都行：这两个回环端口 Routes 都会自动发现，
-                   所以这一格留空也用得上代理，不必让用户去猜电脑上那个端口是几号。 */
-                + "反代进来之后这一格留空也能自动找到。";
+
+        String out = "\n\n找过的路：" + Routes.candidateList(proxy)
+                + "\n手机自己出不去时，让流量经电脑上的代理出去：检索设置里的\"HTTP 代理\"填电脑的地址与端口"
+                + "（例如 192.168.1.20:7897，代理端需允许局域网连接）。";
+        if (Routes.anyPortDown())
+            /* 回环端口被拒过一次，说明手机上这会儿没有代理在听，而直连也没出去。这时候最省事的下一步
+               是那条脚本：它自己探端口、自己建反代、再用应用自己的检索代码确认一遍，用户不必去猜
+               电脑上那个端口到底是 7890 还是 7897（实测多数人以为是 7890，实际在听的常常是 7897）。 */
+            return out + "\n回环上的代理端口没人监听：用数据线连上电脑，在电脑上执行 pwsh tools/phone-gateway.ps1，"
+                    + "它探出真正在监听的端口、反代进手机、再拿应用自己的代码验一次。反代之后这一格留空也能自动找到。";
+        /* 反代进手机的端口是 7897 还是 7890 都行：这两个回环端口 Routes 都会自动发现，
+           所以这一格留空也用得上代理，不必让用户去猜电脑上那个端口是几号。 */
+        return out + "\nUSB 连着电脑时也可以自己转一条：adb reverse tcp:7897 tcp:<电脑上的代理端口>"
+                + "（Clash Verge 默认监听 7897，未必是 7890）。反代进来之后这一格留空也能自动找到。";
     }
     private void probeResult(String text, String tail) {
         LinearLayout box = column(); box.setPadding(dp(16), dp(8), dp(16), dp(8));

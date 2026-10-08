@@ -328,11 +328,16 @@ public final class PaperSources {
             java.util.regex.Pattern.compile("href=\"/organization/[^\"]*\"[^>]*>(?s)(.*?)</a>");
 
     /**
-     * 维普不给匿名程序留 API，检索结果是服务端渲染在 HTML 里的，题名由客户端脚本后填，服务端只给
-     * 摘要、作者、刊名、年期和文献页地址。查重比对要的是可比对的正文，摘要够用；报告里这一行以
-     * "《刊名》 年 期"署名并带上文献页地址，仍然能人工核到出处。
+     * 维普不给匿名程序留 API，检索结果是服务端渲染在 HTML 里的，服务端只给摘要、作者、刊名、年期和
+     * 文献页地址——题名那个 {@code <a class="title">} 是空的，真题名由浏览器脚本从同一份响应的
+     * window.__NUXT__ 里填。所以一次请求读两样东西：HTML 给摘要与年期，CqvipState 给真题名、出处与关键词。
+     * 题名照万方那一路署成"题名《出处》"：出处跟着题名走，题名指纹才与万方那条同源记录对得上——
+     * 两个话题共 8 个维普种子里，报告点名到那一篇的从 2 例涨到 7 例；剩下那例是刊名中途改过名，
+     * 两个库写的出处不同，指纹自然不同。状态解不出（服务端改了结构）时照旧署成"《刊名》 年 期"，
+     * 这一行仍带文献页地址，仍然能人工核到出处。
      */
-    private static ArrayList<Candidate> parseCqvip(String html, int limit) {
+    static ArrayList<Candidate> parseCqvip(String html, int limit) {
+        LinkedHashMap<String, CqvipState.Record> state = CqvipState.parse(html);
         ArrayList<Candidate> out = new ArrayList<Candidate>();
         int cursor = 0, recordStart = 0;
         while (out.size() < limit) {
@@ -352,18 +357,49 @@ public final class PaperSources {
             candidate.source.locator = document.isEmpty() ? "" : "https://www.cqvip.com/doc/" + document;
             candidate.source.authors = nameList(CQVIP_AUTHOR, head);
             candidate.source.year = year;
-            String venue = journal;
+            CqvipState.Record known = CqvipState.find(state, document);
+            String venue = known == null || known.venue.isEmpty() ? journal : known.venue;
             if (venue.isEmpty()) {
-                /* 学位论文没有期刊链接，署名退到培养单位，报告里至少看得出是谁的学校。 */
-                String organ = Xml.stripTags(lastMatch(CQVIP_ORGAN, head)).replaceAll("^\\[[0-9]+]\\s*", "").trim();
-                if (!organ.isEmpty()) venue = document.startsWith("degree") ? "学位论文 " + organ : organ;
+                /* 学位论文没有期刊链接，出处退到培养单位，报告里至少看得出是谁的学校。 */
+                venue = Xml.stripTags(lastMatch(CQVIP_ORGAN, head)).replaceAll("^\\[[0-9]+]\\s*", "").trim();
             }
-            candidate.source.title = venue.isEmpty() ? "维普记录 " + document
-                    : venue + (year.isEmpty() ? "" : " " + year + "年") + (issue.isEmpty() ? "" : "第" + issue + "期");
-            candidate.abstractText = clip(Xml.stripTags(html.substring(open + 1, close)));
+            String title = known == null ? "" : known.title;
+            String edition = (year.isEmpty() ? "" : year + "年") + (issue.isEmpty() ? "" : "第" + issue + "期");
+            if (title.isEmpty()) {
+                /* 没有题名可署时才把"学位论文"顶在前面：那是唯一还能看出文献类型的地方。 */
+                String banner = journal.isEmpty() && document.startsWith("degree") && !venue.isEmpty()
+                        ? "学位论文 " + venue : venue;
+                candidate.source.title = banner.isEmpty() ? "维普记录 " + document
+                        : banner + (edition.isEmpty() ? "" : " " + edition);
+            } else {
+                candidate.source.title = venue.isEmpty() || title.contains(venue)
+                        ? title : title + "《" + venue + "》";
+            }
+            /* 题名解得出才追加题录那几项：解不出就整个退回 0.7.3 的字节，服务端改结构时不留下半成品。 */
+            String summary = Xml.stripTags(html.substring(open + 1, close)).trim();
+            candidate.abstractText = clip(title.isEmpty() || summary.isEmpty() ? summary
+                    : comparable(summary, title, candidate.source.authors, edition, known.keywords));
             add(out, candidate, limit);
         }
         return out;
+    }
+
+    /**
+     * 题录自带的字也交进可比对文本，形状照知网那一路（CnkiSearch.abstractOf：摘要 + 题名 + 作者 + 出处）。
+     * 两份真实检索页上对同一批记录逐条比：一篇多交 60~110 字，人均 +74.9 与 +89.3 字。但这批字换的是可比
+     * 材料，不是新判据——照抄题名与照抄关键词两种稿子，实测在旧语料与新语料上都是 0 命中（现行判据要逐字
+     * 长串或整句 Dice >= 0.50，标题行太短进不来）；同一份无关正文上旧新两版命中完全相同，没多一笔误报。
+     */
+    private static String comparable(String summary, String title, String authors, String edition, String keywords) {
+        StringBuilder tail = new StringBuilder();
+        String marks = keywords == null || keywords.isEmpty() ? "" : "关键词 " + keywords.replace(";", " ");
+        for (String part : new String[]{ title, authors, edition, marks }) {
+            String one = part == null ? "" : part.trim();
+            if (one.isEmpty()) continue;
+            if (tail.length() > 0) tail.append(' ');
+            tail.append(one);
+        }
+        return tail.length() == 0 ? summary : summary + "\n" + tail;
     }
 
     /** 哲社中心的 ik_* 字段带着高亮标签，所以只读干净字段；摘要即 remark。 */

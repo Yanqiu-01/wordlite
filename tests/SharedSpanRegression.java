@@ -79,7 +79,7 @@ public final class SharedSpanRegression {
         check(draftChars >= TextCorpus.MIN_SENTENCE_CHARS && copiedChars >= TextCorpus.MIN_SENTENCE_CHARS,
                 label + "：夹具自证，两句都进得了比对（" + draftChars + " / " + copiedChars + " 个有效字符）");
         check(ratio >= 160 && ratio <= 300, label + "：夹具自证，这是长短悬殊的嵌入（三元组比 " + ratio
-                + "%，这一档可达 160%~300%）");
+                + "%，落在经典那一段 160%~300%；更远的那一头另有一档专测）");
     }
 
     /** 一、嵌入：自写前句 + 抄来的整句 + 自写后句。命中必须正好是被抄那句，两头一个字都不许红。 */
@@ -243,11 +243,64 @@ public final class SharedSpanRegression {
         }
     }
 
+    /**
+     * 六、够得着的远端（1.1.2）：拆句把一句 46 字的原句拆成 16 字的碎片，两边折叠串的三元组比 314%。
+     * 这一档以前连候选都问不到——包含率通道借 Dice 那一档（0.50）当候选裁剪地板，长短比 3.0 倍以上的候选
+     * 在算真实交集之前就被扔掉（这一档的 Dice 上界只有 0.488），split-commas 正卡在这道门上。现在这条通道
+     * 用自己的地板（TextCorpus 的 CONTAINMENT_DICE_FLOOR = 0.42，长短比可达 376%），它够得着了：
+     * 实测 13 枚共享三元组、Dice 0.448、包含率 0.929，命中 [0,16)。改之前同一对文本零命中。
+     *
+     * 两头一起钉住：11 字那一刀（440%，Dice 0.333）仍然不许被认下。谁把常数往上挪或者往下挪，这两行都会红，
+     * 改了常数的人必须顺手把它们重述一遍——这是有意为之，可达区间是这一条通道的口径本身，不该悄悄漂。
+     *
+     * 为什么挑 16 字这一刀：加句末标点一共 16 个字符，短于指纹带最短可报告长度（Fingerprints.MIN_MATCH
+     * 是 18），带子那条路根本走不到，于是这条命中只能来自句级包含率；换一刀就分不清是谁认下的。
+     */
+    private static void farFragmentNowReachesACandidate() {
+        String longOne = "热影响区边缘的晶界处存在明显的元素偏聚，局部电位差一升高点蚀就从这里起裂，腐蚀抗力随之下降";
+        String library = longOne + "。";
+        TextCorpus corpus = new TextCorpus();
+        corpus.add(source("F1"), library);
+
+        int cut = 15;
+        String draft = longOne.substring(0, cut) + "。";
+        int reach = Math.round((validOf(library) - 2) * 100f / (validOf(draft) - 2));
+        check(validOf(library) == 46 && validOf(draft) == cut + 1,
+                "远端碎片：夹具自证，文库那句 " + validOf(library) + " 字、稿子这侧 " + validOf(draft) + " 字");
+        check(reach > 300 && reach <= 376, "远端碎片：三元组比 " + reach + "%，旧口径那道 300% 的门够不到、"
+                + "现在这一档（376%）够得到");
+        check(draft.length() < Fingerprints.MIN_MATCH, "远端碎片：整段 " + draft.length()
+                + " 个字符短于指纹带最短可报告长度 " + Fingerprints.MIN_MATCH + "，这条命中只能来自句级包含率");
+        TextCorpus.Report report = corpus.match(draft, null);
+        String norm = TextCorpus.normalize(draft);
+        invariants("远端碎片", report, norm);
+        check(report.hits.size() == 1, "远端碎片现在问得到候选，实测 " + report.hits.size() + " 条命中");
+        TextCorpus.Hit hit = report.hits.isEmpty() ? null : report.hits.get(0);
+        check(hit != null && hit.start == 0 && hit.end == draft.length(),
+                "远端碎片报整段（稿子这侧本来就更短，整段都是抄的）：期望 [0," + draft.length() + ") 实测 ["
+                        + (hit == null ? -1 : hit.start) + "," + (hit == null ? -1 : hit.end) + ")");
+        check(covered(norm, 0, draft.length(), report.hits) == valid(norm, 0, draft.length()),
+                "碎片那 " + valid(norm, 0, draft.length()) + " 个有效字符全认回来");
+        check(hit != null && hit.source != null && "F1".equals(hit.source.id), "远端碎片记在真正出处 F1 名下");
+
+        // 再远一刀就出界：这一条钉的是"放宽有天花板"，不是达标线。
+        int farCut = 11;
+        String farDraft = longOne.substring(0, farCut) + "。";
+        int farReach = Math.round((validOf(library) - 2) * 100f / (validOf(farDraft) - 2));
+        TextCorpus.Report far = corpus.match(farDraft, null);
+        check(validOf(farDraft) >= TextCorpus.MIN_SENTENCE_CHARS,
+                "出界碎片：它自己 " + validOf(farDraft) + " 个有效字符，进得了比对，所以这一条不是空判");
+        check(farReach > 376, "出界碎片：三元组比 " + farReach + "% 已经越过 376% 这一档");
+        check(far.hits.isEmpty(), "出界碎片仍然不许被认下，实测 " + far.hits.size()
+                + " 条命中：长短比再悬殊，共享三元组撑不住就还是两句无关的话");
+    }
+
     public static void main(String[] args) {
         embeddingLandsOnTheCopiedSentence();
         interleavedCopySplitsIntoTwoSharedBlocks();
         diceChannelKeepsTheWholeFragment();
         shortFragmentInsideLongSentenceKeepsItsRange();
+        farFragmentNowReachesACandidate();
         batchKeepsTheLedger();
         System.out.println("SUMMARY " + count + " assertions passed"
                 + " (单句落点只在 host JVM 上跑：界面高亮与报告排版不在本用例范围内).");

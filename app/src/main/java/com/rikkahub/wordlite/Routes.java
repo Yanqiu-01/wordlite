@@ -18,8 +18,12 @@ final class Routes {
     static final String DIRECT = "直连";
     /** 自动探路的连接超时。真不通要等到用户设的超时，等于每条路都白等二十秒。 */
     static final int PROBE_CONNECT_SECONDS = 6;
+
     /** 自动探测只试这两个端口：Clash 系的混合端口，USB 直连时用 adb reverse 也能指到这里。 */
     static final int[] LOOPBACK_PORTS = {7897, 7890};
+    /** 回环端口被当场拒回之后多久之内不再排队。一分钟：拔线、重开 Clash 都在这个量级里能缓过来。 */
+    static final long LOOPBACK_COOLDOWN_MILLIS = 60000L;
+    private static final LinkedHashMap<String, Long> DOWN_UNTIL = new LinkedHashMap<String, Long>();
     private static final LinkedHashMap<String, String> USED = new LinkedHashMap<String, String>();
     private static final LinkedHashMap<String, Proxy> KNOWN_GOOD = new LinkedHashMap<String, Proxy>();
     /** 这个主机的直连拨不上（连接被拒、超时、TLS 谈崩）。只用来把直连从队首挪到队尾，不做别的判断。 */
@@ -57,6 +61,7 @@ final class Routes {
         return out;
     }
 
+
     /** 系统代理（WLAN 里设的、或 adb 转出来的回环代理）加上 Clash 常见的两个本地端口。 */
     private static List<Proxy> autodiscovered() {
         List<Proxy> out = new ArrayList<Proxy>();
@@ -68,9 +73,48 @@ final class Routes {
         }
         for (int value : LOOPBACK_PORTS) {
             Proxy loop = at("127.0.0.1", String.valueOf(value));
-            if (loop != null) out.add(loop);
+            /* 刚被拒过的回环端口这段时间里不再排队。USB 反代随拔线一起消失，而自动发现只看端口号
+               不看有没有人在听，于是每扇窗口都要为一条不存在的路烧一次连接；更糟的是它会把"这条代理
+               不通"当成源站的事实报上去。冷却一会儿就重新排队：用户中途把线插回来、或电脑上刚开
+               Clash，下一轮照样能用上，不必重启应用。 */
+            if (loop != null && !portIsDown(loop)) out.add(loop);
         }
         return out;
+    }
+
+    /**
+     * 这个回环代理端口刚被当场拒回：没人监听，不是网络慢。记下冷却期，过后再试。
+     * 只认自动发现的那两个端口——用户自己填的代理照原样再撞，那是他显式要的路。
+     */
+    static synchronized void portRefused(Proxy via) {
+        if (via == null || !isLoopbackProxy(via)) return;
+        long until = System.nanoTime() / 1000000L + LOOPBACK_COOLDOWN_MILLIS;
+        DOWN_UNTIL.put(address(via), Long.valueOf(until));
+    }
+
+    /** 当前有没有一个自动发现的回环端口在冷却：自检的提示语要看它，才知道该让用户去建反代还是换网络。 */
+    static synchronized boolean anyPortDown() {
+        long now = System.nanoTime() / 1000000L;
+        for (String key : new ArrayList<String>(DOWN_UNTIL.keySet()))
+            if (DOWN_UNTIL.get(key).longValue() > now) return true;
+        return false;
+    }
+
+    private static synchronized boolean portIsDown(Proxy via) {
+        Long until = DOWN_UNTIL.get(address(via));
+        if (until == null) return false;
+        if (until.longValue() > System.nanoTime() / 1000000L) return true;
+        DOWN_UNTIL.remove(address(via));
+        return false;
+    }
+
+    private static String address(Proxy via) {
+        return String.valueOf(via.address()).toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean isLoopbackProxy(Proxy via) {
+        if (via.type() != Proxy.Type.HTTP || !(via.address() instanceof InetSocketAddress)) return false;
+        return isLoopback(((InetSocketAddress) via.address()).getHostString().toLowerCase(Locale.ROOT));
     }
 
     /** 用户填的 host:port；写坏了就当没填，直接拨出去，而不是整次查重失败。 */
@@ -127,7 +171,10 @@ final class Routes {
     /** 探路用的超时：用户显式填的代理和他设的超时都照原样，只有自动试的那几条压到几秒。 */
     static int connectSeconds(Proxy explicit, Proxy via, int timeoutSeconds) {
         int requested = timeoutSeconds <= 0 ? 20 : Math.min(timeoutSeconds, 120);
-        if (via == null || via.equals(explicit)) return requested;
+
+        /* 按值比，不用 equals：java.net.Proxy 不重写 equals，用户填的 127.0.0.1:7897 和自动发现的
+           同一个端口是两个对象，一比之下用户自己设的超时被压成了探路用的六秒。 */
+        if (via == null || same(via, explicit)) return requested;
         return Math.min(requested, PROBE_CONNECT_SECONDS);
     }
 
@@ -189,10 +236,12 @@ final class Routes {
         return out.toString();
     }
 
+
     static synchronized void reset() {
         USED.clear();
         KNOWN_GOOD.clear();
         DIRECT_FAILED.clear();
+        DOWN_UNTIL.clear();
         lastGood = null;
     }
 

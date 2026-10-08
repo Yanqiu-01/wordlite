@@ -36,8 +36,11 @@ public final class RoutesRegression {
             ordering();
             deadDirectRoad();
             parsingAndLabels();
+
             timeouts();
             routeLedger();
+            refusedLoopbackPort();
+            everyRoadReported();
         } finally {
             Routes.reset();
             restore("http.proxyHost", savedHost);
@@ -229,6 +232,77 @@ public final class RoutesRegression {
             System.clearProperty("http.proxyPort");
             Routes.reset();
         }
+    }
+
+
+    /**
+     * 自动发现的回环端口被当场拒回之后要冷却。它不是慢，是不存在：USB 反代随拔线一起没了，
+     * 而每扇窗口都重撞一次，最后那句错误还变成它的口气——真机上用户据此反复检查自己没填错的代理。
+     */
+    private static void refusedLoopbackPort() {
+        Routes.reset();
+        Proxy discovered = Routes.parse("127.0.0.1:7897");
+        check(contains(Routes.order("www.cqvip.com", null), discovered),
+                "没被拒过之前，自动发现把 7897 排进国内源的队列");
+        Routes.portRefused(discovered);
+        check(Routes.anyPortDown(), "回环端口被拒之后，自检看得见\"有端口在冷却\"");
+        List<Proxy> cooled = Routes.order("www.cqvip.com", null);
+        check(!contains(cooled, discovered), "被拒过的回环端口这段时间不再排队");
+        check(cooled.indexOf(null) == 0, "冷却的只是那条代理，国内源照旧直连优先");
+        Proxy explicit = Routes.parse("127.0.0.1:7897");
+        check(Routes.order("www.cqvip.com", explicit).get(0) != null,
+                "用户自己填的那个端口不因自动发现进了冷却而被跳过");
+        check(Routes.connectSeconds(explicit, Routes.parse("127.0.0.1:7897"), 30) == 30,
+                "用户填的端口与自动发现的是同一个地址时按值认，别把他设的 30 秒压成探路的六秒");
+        Routes.reset();
+        check(!Routes.anyPortDown(), "reset 把冷却一起清掉");
+        Routes.portRefused(Routes.parse("10.0.0.9:7897"));
+        check(!Routes.anyPortDown(), "只有回环端口进冷却：局域网里那台代理不许被自动发现判死");
+    }
+
+
+    /** 路全烧完时报的是"每条路各撞了什么"。真机上只剩最后那句 7890，等于把用户往错的方向推。 */
+    private static void everyRoadReported() {
+        int closed = closedLoopbackPort(), alsoClosed = closedLoopbackPort();
+        try {
+            HttpTransport.get("http://127.0.0.1:" + closed + "/search", null, 2, null);
+            throw new AssertionError("这个端口上没人监听，请求不该成功");
+        } catch (ApiClient.Failure error) {
+            check(error.refused, "拒绝连接单独记一笔，不和\"网络失败\"混成一类");
+            check(error.getMessage().startsWith("网络连接失败"),
+                    "只有一条路时报它自己的那句话——汇总只在该换路而没路可换时才加：" + error.getMessage());
+        } catch (java.io.IOException error) {
+            throw new AssertionError("预期拿到 ApiClient.Failure，实际 " + error);
+        }
+        try {
+            HttpTransport.get("http://127.0.0.1:" + closed + "/search", null, 2, 0, null,
+                    Routes.parse("127.0.0.1:" + alsoClosed));
+            throw new AssertionError("代理和直连都没人听，请求不该成功");
+        } catch (ApiClient.Failure error) {
+            check(error.getMessage().startsWith("试过的路都没通：代理 127.0.0.1:" + alsoClosed
+                            + " 拒绝连接；直连 拒绝连接"),
+                    "两条路都烧完时，每条路的下场都要在同一句话里：" + error.getMessage());
+        } catch (java.io.IOException error) {
+            throw new AssertionError("预期拿到 ApiClient.Failure，实际 " + error);
+        }
+    }
+
+    /** 确定没人监听的回环端口：让系统发一个，立刻关掉。 */
+    private static int closedLoopbackPort() {
+        try {
+            java.net.ServerSocket probe =
+                    new java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"));
+            int port = probe.getLocalPort();
+            probe.close();
+            return port;
+        } catch (java.io.IOException error) {
+            throw new AssertionError("连一个本地端口都开不出来：" + error);
+        }
+    }
+
+    private static boolean contains(List<Proxy> order, Proxy wanted) {
+        for (Proxy proxy : order) if (Routes.same(proxy, wanted)) return true;
+        return false;
     }
 
     private static boolean distinct(List<Proxy> order) {

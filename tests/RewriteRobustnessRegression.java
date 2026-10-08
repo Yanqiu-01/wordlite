@@ -39,6 +39,12 @@ public final class RewriteRobustnessRegression {
     /** -Drrroc=1 时打印分值分布：漏掉的字是卡在阈值上，还是压根没进候选。 */
     private static final boolean ROC = System.getProperty("rrroc") != null;
     private static final String[] ROC_CASES = { "verbatim", "sub-char-25", "pruned", "split-commas" };
+    /** -Drrcont=1 时扫包含率通道自己那两档（TextCorpus 的 CONTAINMENT_DICE_FLOOR 与共享三元组地板）。 */
+    private static final boolean CONT = System.getProperty("rrcont") != null;
+    /** 这一档放宽的是长短悬殊那条通道，所以扫的口径以"拆过句、拼过句"为主，再带上两列没拆的当对照。 */
+    private static final String[] CONT_CASES = {
+        "pruned", "split-commas", "merge-pairs", "spliced", "verbatim", "sub-char-25",
+    };
     private static final String[] SWEEP_CASES = {
         "verbatim", "synonym", "sub-char-10", "sub-char-25", "pruned", "split-commas", "spliced",
     };
@@ -66,6 +72,32 @@ public final class RewriteRobustnessRegression {
      */
     private static void embedding(ArrayList<String> copies, ArrayList<String> fillers,
                                  ArrayList<TextCorpus.Source> sources, TextCorpus corpus) {
+        int[] n = embeddingNumbers(copies, fillers, corpus);
+        int phraseChars = n[0], phraseFlagged = n[1], hostChars = n[2], hostFlagged = n[3];
+        int phraseCount = n[4];
+        System.out.println();
+        System.out.println("嵌入改写 " + phraseCount + " 句：嵌进去的 " + phraseChars + " 字标了 "
+                + phraseFlagged + " 字（" + percent(phraseChars == 0 ? 0d : phraseFlagged * 100d / phraseChars)
+                + "），它外面的 " + hostChars + " 字被连带标了 " + hostFlagged + " 字");
+        // 召回地板 92%。"命中记整个片段"的旧口径下这一档实测 723/778 = 92.9%——整句自写的部分也一起
+        // 红，被抄那句自然全认回来。落点裁到实际共享区间（TextCorpus.clipToSharedBlocks）之后实测
+        // 720/778 = 92.5%：少的 3 字是文库侧 skipPrefix 剥掉的序号与句末那格标点，两边的折叠串在那些
+        // 位置上本来就不相同，不是裁错了。这条地板钉的是"裁落点不许吃掉被抄那句"。
+        check(phraseFlagged * 100d >= 92d * phraseChars,
+                "整句原文嵌进长句也得认出来：实测 " + phraseFlagged + "/" + phraseChars);
+        // 多报天花板。旧口径（命中记整个片段）实测每句连带标红 40 字：被抄那句认回 723 字，它外面
+        // 1578 字被带走 681 字 = 43.2%——抄一句进去，句子外面自写的部分有将近一半跟着红。夹具的窗口
+        // 起点修掉一格之前那组数是 716/778 与带走 688 字（每句 41 字），见 docs/rewrite-robustness.md。
+        // 落点裁到实际共享区间之后实测每句 0 字：带外 1578 字一个字都不红。4 字是钉在实测之上的一格
+        // 天花板，不是达标线；它要是回到两位数，说明落点又被改回整段了。1.1.2 放宽这条通道时这条不许动。
+        check(hostFlagged <= 4 * phraseCount,
+                "多报天花板：平均每句连带标红不许超过 4 字，实测每句 "
+                        + (hostFlagged + phraseCount - 1) / phraseCount + " 字");
+    }
+
+    /** 只量不判，返回 {被抄字数, 被抄里标了, 带外字数, 带外标了, 句数}：扫描模式要每一档配置都拿到这四个数。 */
+    private static int[] embeddingNumbers(ArrayList<String> copies, ArrayList<String> fillers,
+                                          TextCorpus corpus) {
         StringBuilder draft = new StringBuilder();
         ArrayList<int[]> phrases = new ArrayList<int[]>();
         ArrayList<int[]> sentences = new ArrayList<int[]>();
@@ -102,24 +134,7 @@ public final class RewriteRobustnessRegression {
             hostFlagged += cover(norm, sentence[0], sentence[1], hits, null)
                     - cover(norm, phrase[0], phrase[1], hits, null);
         }
-        System.out.println();
-        System.out.println("嵌入改写 " + phrases.size() + " 句：嵌进去的 " + phraseChars + " 字标了 "
-                + phraseFlagged + " 字（" + percent(phraseChars == 0 ? 0d : phraseFlagged * 100d / phraseChars)
-                + "），它外面的 " + hostChars + " 字被连带标了 " + hostFlagged + " 字");
-        // 召回地板 92%。"命中记整个片段"的旧口径下这一档实测 723/778 = 92.9%——整句自写的部分也一起
-        // 红，被抄那句自然全认回来。落点裁到实际共享区间（TextCorpus.clipToSharedBlocks）之后实测
-        // 720/778 = 92.5%：少的 3 字是文库侧 skipPrefix 剥掉的序号与句末那格标点，两边的折叠串在那些
-        // 位置上本来就不相同，不是裁错了。这条地板钉的是"裁落点不许吃掉被抄那句"。
-        check(phraseFlagged * 100d >= 92d * phraseChars,
-                "整句原文嵌进长句也得认出来：实测 " + phraseFlagged + "/" + phraseChars);
-        // 多报天花板。旧口径（命中记整个片段）实测每句连带标红 40 字：被抄那句认回 723 字，它外面
-        // 1578 字被带走 681 字 = 43.2%——抄一句进去，句子外面自写的部分有将近一半跟着红。夹具的窗口
-        // 起点修掉一格之前那组数是 716/778 与带走 688 字（每句 41 字），见 docs/rewrite-robustness.md。
-        // 落点裁到实际共享区间之后实测每句 0 字：带外 1578 字一个字都不红。4 字是钉在实测之上的一格
-        // 天花板，不是达标线；它要是回到两位数，说明落点又被改回整段了。1.1.2 放宽这条通道时这条不许动。
-        check(hostFlagged <= 4 * phrases.size(),
-                "多报天花板：平均每句连带标红不许超过 4 字，实测每句 "
-                        + (hostFlagged + phrases.size() - 1) / phrases.size() + " 字");
+        return new int[] { phraseChars, phraseFlagged, hostChars, hostFlagged, phrases.size() };
     }
 
     private static String shortestSentence(String paragraph) {
@@ -206,11 +221,12 @@ public final class RewriteRobustnessRegression {
             measure("spliced", copies, fillers, sources, corpus, mutator("spliced")),
         };
         printTable(scores);
-        // 诊断模式（-Drrs / -Drrroc）不跑地板：这两台是拿来查明原因的，
+        // 诊断模式（-Drrs / -Drrroc / -Drrcont）不跑地板：这几台是拿来查明原因的，
         // 让一条地板断言半路把进程掐掉，就永远看不到后面的分布表了。
-        if (SWEEP || ROC) {
+        if (SWEEP || ROC || CONT) {
             if (SWEEP) sweep(copies, fillers, sources, corpus);
             if (ROC) roc(copies, fillers, sources, corpus);
+            if (CONT) containmentSweep(copies, fillers, sources, corpus);
             return;
         }
         embedding(copies, fillers, sources, corpus);
@@ -334,9 +350,12 @@ public final class RewriteRobustnessRegression {
         recall(scores, "number-style", 99d);
         recall(scores, "drop-20pct", 99d);
         recall(scores, "stacked", 99d);
-        recall(scores, "pruned", 97d);
-        recall(scores, "split-commas", 99d);   // 0.55->0.50 之后 98.1，带子分块修复之后 99.4
-        recall(scores, "merge-pairs", 99d);
+        // 1.1.2 给包含率通道换了自己的地板（长短比 3.0 → 3.76），拆出来的碎片第一次问得到候选，
+        // 这三条地板跟着实测往上提：pruned 97.8 → 99.0，split-commas 99.4 → 99.5，merge-pairs 99.4 → 99.6。
+        // 提的是地板不是天花板——哪天这条通道又被收回 0.5 那一边，这三条会先红。
+        recall(scores, "pruned", 98d);         // 带子分块修复之后 97.8，包含率通道独立之后 99.0
+        recall(scores, "split-commas", 99.4d); // 0.55->0.50 之后 98.1，带子分块修复之后 99.4，1.1.2 之后 99.5
+        recall(scores, "merge-pairs", 99.5d);  // 1.1.1 的多候选守卫之后 99.4，1.1.2 之后 99.6
         recall(scores, "sub-char-10", 99d);
         recall(scores, "sub-char-25", 26d);
         recall(scores, "local-edit-16", 99d);
@@ -398,6 +417,69 @@ public final class RewriteRobustnessRegression {
             }
         }
         TextCorpus.restoreThresholds();
+    }
+
+    /**
+     * 包含率通道自己那两档的扫描（ROADMAP 1.1.2）。放宽的是"文库那句几乎整块落在本片段里"这条通道能碰到
+     * 的长短比，所以三件事必须同一行里一起看：该认的认没认回来（pruned / split-commas 这些拆过句的口径最吃
+     * 这一档）、没进库的段落被多标多少字（噪声）、抄进去一句之外带外多报多少字。只看召回的扫描可以靠放宽
+     * 刷出任何好看的数字，这就是每一行都要带上嵌入那一列的原因。
+     *
+     * 第一行（0.50 / 3）就是 1.1.2 之前的判据：那条通道借 Dice 那一档当地板、共享三元组也只有 3 枚，候选
+     * 裁剪跟着回到 0.5，所以这一行必须和主表逐位相同——对不上说明这里量的不是同一件事。噪声只把扫描覆盖到
+     * 的那几列加起来，全 17 列的零噪声由主表那条断言负责。
+     */
+    private static void containmentSweep(ArrayList<String> copies, ArrayList<String> fillers,
+                                        ArrayList<TextCorpus.Source> sources, TextCorpus corpus) {
+        float[] dice = floatProperty("rrcontdice", new float[] { 0.50f, 0.46f, 0.44f, 0.42f, 0.40f,
+                0.38f, 0.36f, 0.34f, 0.30f });
+        int[] shared = intProperty("rrcontshared", new int[] { 3, 8 });
+        System.out.println();
+        System.out.println("| 包含率 Dice 地板 | 共享三元组 | " + join(CONT_CASES) + " | 嵌入带内 | 嵌入带外 | 噪声 |");
+        System.out.print("| --- | --- |");
+        for (int i = 0; i < CONT_CASES.length; i++) System.out.print(" --- |");
+        System.out.println(" --- | --- | --- |");
+        for (int d = 0; d < dice.length; d++) {
+            for (int s = 0; s < shared.length; s++) {
+                StringBuilder row = new StringBuilder();
+                row.append("| ").append(dice[d]).append(" | ").append(shared[s]).append(" |");
+                int noise = 0;
+                TextCorpus.overrideContainmentThresholds(dice[d], shared[s]);
+                try {
+                    for (int i = 0; i < CONT_CASES.length; i++) {
+                        Score score = measureOnce(CONT_CASES[i], copies, fillers, sources, corpus);
+                        row.append(" ").append(percent(score.recall)).append(" |");
+                        noise += score.noiseChars;
+                    }
+                    int[] n = embeddingNumbers(copies, fillers, corpus);
+                    row.append(" ").append(n[1]).append('/').append(n[0]).append(" |")
+                            .append(" ").append(n[3]).append(" |")
+                            .append(" ").append(noise).append(" |");
+                } finally {
+                    TextCorpus.restoreContainmentThresholds();
+                }
+                System.out.println(row);
+            }
+        }
+    }
+
+    /** 扫描列表可以从命令行覆盖（-Drrcontdice=0.40,0.38 -Drrcontshared=8），方便复扫其中某一档。 */
+    private static float[] floatProperty(String name, float[] fallback) {
+        String raw = System.getProperty(name);
+        if (raw == null || raw.trim().isEmpty()) return fallback;
+        String[] parts = raw.split(",");
+        float[] out = new float[parts.length];
+        for (int i = 0; i < parts.length; i++) out[i] = Float.parseFloat(parts[i].trim());
+        return out;
+    }
+
+    private static int[] intProperty(String name, int[] fallback) {
+        String raw = System.getProperty(name);
+        if (raw == null || raw.trim().isEmpty()) return fallback;
+        String[] parts = raw.split(",");
+        int[] out = new int[parts.length];
+        for (int i = 0; i < parts.length; i++) out[i] = Integer.parseInt(parts[i].trim());
+        return out;
     }
 
     private static String join(String[] names) {

@@ -31,11 +31,11 @@ public final class TextCorpus {
      */
     public static final float SIMILAR_DICE = 0.50f;
     /** 长短悬殊时改用的三元组包含率下限：整句原文嵌进改写过的长句。标定台上这一列不构成约束——
-     * 0.80 到 1.00 逐位相同，因为能配上的句子长短本来就接近。注意它今天只作为**几何判据**在起作用：
-     * bestMatch 里那条"包含率兜底"的 if 在 diceFloor == LENGTH_BOUND_FLOOR == 0.50 时永远走不到
-     * （它要求 dice < 0.50 又要求 dice >= 0.50，实测台 628 次判定零次命中），满足这一几何的候选早就被
-     * Dice 那条收下了。它现在真正撑着的是命中的落点——按几何认出"长短悬殊的嵌入"，再把区间裁到实际共享
-     * 那一段（sharedSpan），否则抄一句 22 字会把学生自己写的 60 字一起报成重复。
+     * 0.80 到 1.00 逐位相同，因为能配上的句子长短本来就接近。它管两件事：判据上它是几何判据（短的一侧
+     * 几乎整块重合才叫嵌入），落点上它认出嵌入之后把命中区间裁到实际共享那一段（sharedSpan），否则抄一句
+     * 22 字会把学生自己写的 60 字一起报成重复。这条通道以前借 Dice 通道那一档当地板（dice >= 0.50），
+     * 于是那个 if 一次也走不到——它要求 dice < 0.50 又要求 dice >= 0.50；1.1.2 给它换了自己的地板
+     * CONTAINMENT_DICE_FLOOR，它才头一回真的收下候选。
      */
     public static final float SIMILAR_CONTAINMENT = 0.90f;
 
@@ -78,18 +78,68 @@ public final class TextCorpus {
      * 精算 Dice 前使用的 Dice 上界下限。包含式判定自己就要求 Dice >= 0.5，所以按这一档裁剪不会漏报；
      * 但句级 Dice 下限是活的（diceFloor，标定台会临时压低它），裁剪必须跟着那个活值取小：
      * 下限一旦降到 0.5 以下，还按 0.5 裁就把 0.4~0.5 之间该复核的候选悄悄扔掉了，而那种漏查处处都是
-     * 又查不出来。产品值 0.50 与这一档相等，所以这条 min 今天不改变任何一次判定。
+     * 又查不出来。产品值 0.50 与这一档相等，所以这条 min 今天不改变任何一次判定。包含率通道独立之后
+     * 这一档在取小时几乎总被 CONTAINMENT_DICE_FLOOR 压住，它守的是"哪天那条通道收回 0.5 以上，Dice 这一头
+     * 不许被顺带放宽"。
      */
     private static final float LENGTH_BOUND_FLOOR = 0.5f;
     /**
-     * 包含率通道能不能碰到这一句，还有一条隐藏的上限：这一档 0.5 把可达的长短比卡死在 3.0 倍
-     * （Dice 上界 2·min/(min+max) ≥ 0.5 等价于 max/min ≤ 3）。拆句把 54 字的原句拆成 16 字的碎片，
-     * 比值 3.4，结构上进不了这条通道。这一格以前还压着另一个代价：命中记的是**整个片段的区间**，
-     * 一段 26 字的原句嵌进 85 字的学生自写长句里，报出来的是 85 字全算重复（实测台 embedding 档
-     * 每句多报 41 字）。那个代价已经由 sharedSpan 还掉了——按几何认出嵌入、把区间裁到实际共享那一段，
-     * 每句多报掉到 4 字（688 字 → 66 字）而嵌入召回仍在 90% 地板之上。所以放宽长短比现在只欠噪声
-     * 那一头的实测，不再欠多报。
+     * 包含率通道自己的 Dice 地板（1.1.2）。以前这条路借 Dice 通道那一档当地板（dice >= LENGTH_BOUND_FLOOR），
+     * 于是它的可达区间被长短比卡死在 3.0 倍——Dice 上界 2·min/(min+max) ≥ 0.5 等价于 max/min ≤ 3，而
+     * bestMatch 里就是拿这个上界在算真实交集之前把候选扔掉的。拆句把 54 字的原句拆成 16 字的碎片（比值
+     * 3.4）、嵌入档那三句的 gram 比 6.6 / 4.9 / 3.5，结构上都进不了这条通道，split-commas 因此卡在 98~99.4%。
+     *
+     * 借来的这一档卡错了东西：这条通道要的证据不是"两边一样像"，而是"文库那句几乎整块落在本片段里"
+     * （containment ≥ 0.90）再加共享三元组的绝对量；长短悬殊恰恰是它存在的理由，用对称度量那一步的下限去
+     * 卡它，卡掉的正是它唯一能认出的形状。
+     *
+     * 停在 0.42（长短比 2/0.42 - 1 = 3.76 倍）而不是计划里写的 0.38，是实测台 -Drrcont=1 扫出来的：同一批
+     * 20 段种入、同一批没进库的负例，噪声在 0.30~0.50 整段都是 0，差别全在召回这一头（pruned / split-commas /
+     * merge-pairs / 嵌入带内）——
+     *   列：dice  pruned  split-commas  merge-pairs  嵌入带内/778
+     *   0.50（改之前） 97.8  99.4  99.4  720
+     *   0.46           98.6  99.4  99.5  720
+     *   0.45           99.0  99.4  99.5  720
+     *   0.44 ~ 0.43    99.0  99.4  99.6  720
+     *   0.425 ~ 0.42   99.0  99.5  99.6  720   ← 三条一起向上的最后一档
+     *   0.415 ~ 0.40   99.0  99.2  99.6  720
+     *   0.38           99.0  99.2  99.6  741
+     *   0.36 ~ 0.34    99.0  99.2  99.7  741
+     *   0.30           99.0  99.2  99.8  759
+     * 共享三元组地板那一维（3 与 8）在整段上逐位相同，见下一条常量的注释。
+     * 0.415 以下 split-commas 掉头不是松了会漏字，是两条通道抢同一段字：稿子里 13 字那一碎片（frag[6817,6830)）
+     * 第一次过线，和前面那段并成一条句级命中 [6771,6830)，于是把一条 26 字的逐字带 [6817,6843) 咬得只剩 13 字，
+     * 而带子的规矩是"减掉已覆盖之后补不出 MIN_MATCH=18 个字符就整条丢"（1.1.0 那一刀，见 match() 里 remaining
+     * 那一行）——[6830,6843) 就这样一起没了。又是"抄得更多、报得更少"那个形状，改法排在 1.1.7，不在这条里顺手做。
+     * 0.38 那一档多认回的 21 字是嵌入夹具第 14 句（gram 比 3.5：候选裁剪那一关 0.42 已经放它过了，是它自己
+     * 的 Dice 只有 0.38~0.40，够不到 0.42 这条线）；0.30 再多认 18 字是第 10 句（比 4.9）；比 6.6 那一句（12 字）
+     * 要地板低到 0.26 才够线。这几档眼下都换不来 split-commas 向上，
+     * 所以先把线放在 0.42，等 1.1.7 把带子那一咬修掉再往回扫。扫描表与多报实测另见 docs/rewrite-robustness.md。
      */
+    private static final float CONTAINMENT_DICE_FLOOR = 0.42f;
+    /**
+     * 包含率通道自己的共享三元组地板（1.1.2）。MIN_SHARED_GRAMS=3 是给 Dice 那条兜底的底数，三枚首尾相接
+     * 只盖住 5 个字，撞上一个术语就够；而这一档现在肯在长短比 3.76 的几何上放行，containment ≥ 0.90 单独挡不住
+     * 那种巧合——gramsOf 是去过重的，一句字多重复的句子可能只剩个位数枚三元组，0.90 一乘就是三四枚。抬到
+     * 8 枚（首尾相接是 10 个字），判据和落点也就同了一档：落点最短的 MIN_SHARED_BLOCK 是 5 字。这一档在
+     * 17 列实测台上不改变任何一个数（3 与 8 逐位相同，0.50~0.30 整段都是）：containment ≥ 0.90 自己就要求
+     * 短的一侧至少中九成三元组，12 字以上的句子有 10 枚以上，乘出来已经不低于 8。留这一档是因为它挡的正是
+     * 上面说的那种退化输入，而它一分钱召回都不花——扫描那一头记账要记清它是护栏不是杠杆。
+     */
+    private static final int CONTAINMENT_MIN_SHARED_GRAMS = 8;
+    /** 抗改写实测台（RewriteRobustnessRegression -Drrcont）扫这两档用的活值，产品路径一次也不碰。 */
+    private static float containmentDiceFloor = CONTAINMENT_DICE_FLOOR;
+    private static int containmentSharedFloor = CONTAINMENT_MIN_SHARED_GRAMS;
+
+    static void overrideContainmentThresholds(float dice, int sharedGrams) {
+        containmentDiceFloor = dice;
+        containmentSharedFloor = sharedGrams;
+    }
+
+    static void restoreContainmentThresholds() {
+        containmentDiceFloor = CONTAINMENT_DICE_FLOOR;
+        containmentSharedFloor = CONTAINMENT_MIN_SHARED_GRAMS;
+    }
 
     /**
      * 包含率命中的落点要裁到两边实际共享的那一段。一段共享块最短要长到这个长度（折叠串的单位数）：
@@ -723,13 +773,16 @@ public final class TextCorpus {
         boolean bestExact = false;
         boolean bestViaContainment = false;
         int evaluated = 0, passed = 0;
+        /* 候选裁剪按两条通道里更宽的那一档：Dice 那条（LENGTH_BOUND_FLOOR 与活值 diceFloor 取小）和
+           包含率那条自己的地板。连 Dice 上界都够不到任何一条线的候选，算一次真实交集也是白费。 */
+        float reachFloor = Math.min(Math.min(LENGTH_BOUND_FLOOR, containmentDiceFloor), diceFloor);
         for (int i = found - 1; i >= 0 && evaluated < MAX_CANDIDATES; i--) {
             int entryId = (int) (scratch[i] & 0xffffffffL);
             if (entryId < 0 || entryId >= entries.size()) continue;
             Entry candidate = entries.get(entryId);
             int candidateLength = candidate.grams.length;
             float bound = 2f * Math.min(queryLength, candidateLength) / (queryLength + candidateLength);
-            if (bound < Math.min(LENGTH_BOUND_FLOOR, diceFloor)) continue;
+            if (bound < reachFloor) continue;
             evaluated++;
             int total = queryLength + candidateLength;
             int smaller = Math.min(queryLength, candidateLength);
@@ -746,15 +799,18 @@ public final class TextCorpus {
             if (shared < MIN_SHARED_GRAMS) continue;
             float score = dice;
             boolean similar = dice >= diceFloor;
-            // 这一枪是不是"文库那句几乎整块嵌在本片段里"这个形状，按几何判，不按哪一个 if 先把 similar
-            // 抬起来判：diceFloor 与 LENGTH_BOUND_FLOOR 同为 0.50 时，满足这条几何的候选都先被 Dice 那条
-            // 收走了，下面这个 if 一次也没先收下过（实测台 1209 次命中判定，零次），而 Dice 那条报的是
-            // 整个片段——嵌入档每句多报的那 41 字就是这么来的。落点跟着几何走，见 clipToSharedBlocks。
-            boolean viaContainment = containment >= containmentFloor && dice >= LENGTH_BOUND_FLOOR
-                    && queryLength >= candidateLength
+            /* 这一枪是不是"文库那句几乎整块落在本片段里"这个形状，按几何判，不按哪一个 if 先把 similar
+               抬起来判：长短悬殊（≥1.6 倍）加上短的一侧几乎整块重合，就是嵌入与拆句碎片的形状。这条通道
+               用自己的地板（CONTAINMENT_DICE_FLOOR / CONTAINMENT_MIN_SHARED_GRAMS），理由写在那两个常量上；
+               共享三元组那一档只关掉这条通道的资格，Dice 那条该怎么判还怎么判。落点跟着几何走，见
+               clipToSharedBlocks：按这条通道认下的命中只报两边实际共享的那一段。 */
+            boolean embedded = containment >= containmentFloor
+                    && dice >= containmentDiceFloor
+                    && shared >= containmentSharedFloor
+                    && Math.max(queryLength, candidateLength) >= 1.6f * Math.min(queryLength, candidateLength);
+            boolean viaContainment = embedded && queryLength >= candidateLength
                     && queryLength >= 1.6f * candidateLength;
-            if (!similar && containment >= containmentFloor && dice >= LENGTH_BOUND_FLOOR
-                    && Math.max(queryLength, candidateLength) >= 1.6f * Math.min(queryLength, candidateLength)) {
+            if (!similar && embedded) {
                 score = Math.max(dice, containment * 0.8f);
                 similar = true;
             }

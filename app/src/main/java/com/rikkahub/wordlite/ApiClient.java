@@ -37,8 +37,12 @@ public final class ApiClient {
     }
     public static final class Failure extends IOException {
         public final int status;
+
         /** Retry-After in whole seconds from a 429, or 0 when the source did not say. */
         public int retryAfterSeconds;
+        /** 这条路是拨不上而不是对方答了话（连接被当场拒回）。回环上没人监听的端口和源站回的 403
+         *  需要完全相反的补救，所以这个区别得留到选路那一层，不能淹在同一句"网络连接失败"里。 */
+        public boolean refused;
         public Failure(String message, int status) { super(message); this.status = status; }
     }
     private ApiClient() { }

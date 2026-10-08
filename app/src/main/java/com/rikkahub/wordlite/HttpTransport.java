@@ -84,7 +84,13 @@ public final class HttpTransport {
            对端明确拒绝或限流的时候换路只是慢。 */
         java.util.List<java.net.Proxy> order = Routes.order(Routes.host(url), proxy);
         ApiClient.Failure failure;
+
         java.net.Proxy failedVia = proxy;
+        /* 每条路最后撞上了什么，一路记着。真机实测：手机挂在 5G 上时先撞直连死路、再撞两个没人监听的
+           回环代理端口，而异常里只剩最后那一句 "Failed to connect to /127.0.0.1:7890"——用户读到的是
+           "我代理是不是填错了"，真正的原因是这台手机在自己的网络上出不去。谁撞了什么就都列出来。 */
+        StringBuilder burned = new StringBuilder();
+        boolean roadDown = false;
         for (int i = 0; ; ) {
             java.net.Proxy via = order.get(i);
             try {
@@ -100,10 +106,24 @@ public final class HttpTransport {
                 failedVia = via;
                 /* 只有这条路本身拨不通才记账、才换下一条：403/429 是对方答了话，换条路也是同样答复，
                    把这种失败记成「路不通」会让下一次绕开一条其实好着的路。 */
-                boolean roadIsDown = error.status == 0 && routeIsDown(error);
-                if (roadIsDown) Routes.failed(url, via);
-                if (++i >= order.size() || !roadIsDown) break;
+
+                roadDown = error.status == 0 && routeIsDown(error);
+                if (roadDown) {
+                    Routes.failed(url, via);
+                    if (error.refused) Routes.portRefused(via);
+                    if (burned.length() > 0) burned.append("；");
+                    burned.append(Routes.label(via)).append(' ').append(brief(error));
+                }
+                if (++i >= order.size() || !roadDown) break;
             }
+        }
+
+        if (roadDown && burned.length() > 0 && order.size() > 1) {
+            /* 路是全烧完的，不是某一条坏了：报"哪几条路各撞了什么"，而不是只报最后一条的下场。
+               只有一条路时不改写：那时候"请求超时"已经是全部信息，而下游按前缀分类的判据照旧要认它。 */
+            ApiClient.Failure exhausted = new ApiClient.Failure("试过的路都没通：" + burned, failure.status);
+            exhausted.refused = failure.refused;
+            throw exhausted;
         }
         if (failure.status != 429 || Thread.currentThread().isInterrupted()
                 || (cancellation != null && cancellation.cancelled())) throw failure;
@@ -132,6 +152,18 @@ public final class HttpTransport {
      * 这条路本身没通：代理拨不上、网络把连接掐了、TLS 谈崩、或者干脆超时。
      * 只有这一类失败才值得换一条路再试；"已取消"也是零状态码，但它换哪条路都一样，不在此列。
      */
+
+    /** 一条路上撞见的那一句，短到能和别的路并排写在同一行里；正文永远进不了这里。 */
+    private static String brief(ApiClient.Failure error) {
+        if (error.refused) return "拒绝连接";
+        String text = String.valueOf(error.getMessage());
+        if (text.startsWith("请求超时")) return "超时";
+        if (text.startsWith("安全连接失败")) return "TLS 握手失败";
+        int colon = text.indexOf(": ");
+        if (colon > 0 && colon < 12) text = text.substring(colon + 2);
+        return text.length() <= 28 ? text : text.substring(0, 28);
+    }
+
     private static boolean routeIsDown(ApiClient.Failure failure) {
         String message = String.valueOf(failure.getMessage());
         return message.startsWith("网络连接失败") || message.startsWith("安全连接失败")
@@ -195,8 +227,16 @@ public final class HttpTransport {
             throw new ApiClient.Failure("请求超时", 0);
         } catch (javax.net.ssl.SSLException error) {
             throw new ApiClient.Failure("安全连接失败: " + cause(error), 0);
+
         } catch (java.net.ProtocolException error) {
             throw new ApiClient.Failure("检索请求不受支持", 0);
+        } catch (java.net.ConnectException error) {
+            /* 拒绝连接单独记一笔：移动网络把出站连接掐了，和回环端口上根本没人监听，异常里是同一句
+               "Failed to connect to"。前者要换路，后者要用户去把代理建起来，混在一起就只能瞎猜。 */
+            guard(cancellation);
+            ApiClient.Failure refused = new ApiClient.Failure("网络连接失败: " + cause(error), 0);
+            refused.refused = true;
+            throw refused;
         } catch (IOException error) {
             guard(cancellation);
             throw new ApiClient.Failure("网络连接失败: " + cause(error), 0);
