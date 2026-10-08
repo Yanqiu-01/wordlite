@@ -291,6 +291,13 @@ public final class TextCorpus {
     public static final class Source {
 
         public String id = "", title = "", authors = "", year = "", locator = "", engine = "";
+        /**
+         * 这一篇拿来比对的是什么档：正文（抓到的全文、导进自建库的原文）还是只有摘要
+         * （联网候选的摘要、题录导入的那一批）。命中按它分档记账，摘要级的命中不许和
+         * 正文级的命中混成一个数——见 DuplicateEngine.MATERIAL_* 与 SourceLedger 的分档字数。
+         * 空串按正文级算：老记录与没记档的来源本来就都是正文。
+         */
+        public String material = "";
     }
 
     /** 被检文本上的一段相似区间，偏移是 match() 传入文本的 UTF-16 下标。 */

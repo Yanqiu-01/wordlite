@@ -611,18 +611,48 @@ public final class ApiWorkflow {
         final ApiClient.Task task = begin("导入自建库");
         worker = new Thread(() -> {
             int added = 0; String firstError = "";
+            // 题录导出（.bib/.ris/NoteExpress/知网纯文本）不能整份当一篇文章塞进库：
+            // 那样五百条题录并成一条，来源榜只会指着"这份导出文件"报字数。
+            ArrayList<String> recordNotes = new ArrayList<>();
             for (int i = 0; i < uris.size(); i++) {
                 if (task.cancelled()) break;
                 progress("导入 " + (i + 1) + "/" + uris.size());
                 try {
                     byte[] bytes = readAll(uris.get(i));
-                    String error = library.addDocument(MainActivity.displayName(activity, uris.get(i)), bytes);
+                    String name = MainActivity.displayName(activity, uris.get(i));
+                    RecordImport.Parsed parsed = RecordImport.parse(bytes, name);
+                    if (RecordImport.prefersRecords(bytes, name, parsed)) {
+                        int imported = recordBatch(parsed, task);
+                        recordNotes.add(parsed.summary() + "，入库 " + imported + " 篇");
+                        added += imported;
+                        continue;
+                    }
+                    String error = library.addDocument(name, bytes);
                     if (error == null) added++; else if (firstError.isEmpty()) firstError = error;
                 } catch (Exception error) { if (firstError.isEmpty()) firstError = "读取失败"; }
             }
-            final int count = added; final String tail = firstError.isEmpty() ? "" : "（" + firstError + "）";
+            final int count = added;
+            final String tail = !recordNotes.isEmpty() ? "，其中题录按篇分开入库（" + recordNotes.get(0) + "）"
+                    : firstError.isEmpty() ? "" : "（" + firstError + "）";
             complete(task, () -> toast("已导入 " + count + " 篇" + tail));
         }, "wordlite-library"); worker.start();
+    }
+
+    /** 一份题录导出一整批进自建库：一篇一条，去重与容量都走 CorpusImport 那三条规矩。 */
+    private int recordBatch(RecordImport.Parsed parsed, ApiClient.Task task) {
+        CorpusImport.Batch batch = RecordImport.into(library, parsed,
+                (done, total, receipt) -> {
+                    if (done % 20 == 0 || done == total) progress("题录入库 " + done + "/" + total);
+                },
+                task::cancelled);
+        if (batch.failed() > 0) noteLibrary(batch.firstProblem());
+        return batch.imported();
+    }
+
+    /** 自建库导入路径上的注记：这一层没有 Report 可写，落到 toast 上。 */
+    private void noteLibrary(String message) {
+        if (message == null || message.isEmpty()) return;
+        activity.runOnUiThread(() -> toast(message));
     }
     private byte[] readAll(Uri uri) throws java.io.IOException {
         InputStream input = activity.getContentResolver().openInputStream(uri);

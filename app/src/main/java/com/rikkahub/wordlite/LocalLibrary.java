@@ -21,6 +21,11 @@ public final class LocalLibrary {
         public int sentences;
         /** 正文哈希（归一化正文的 SHA-256）。version 1 的索引没这个字段，读到空值就补算。 */
         public String hash = "";
+        /**
+         * 题录级条目：这一份是从题录导出里读进来的，只有题名/作者/刊名/关键词/摘要可比，
+         * 一个字的正文都没有。索引里的老条目没这个键，按 false 读（导进来的原文不该被降权）。
+         */
+        public boolean record;
     }
 
     /** 抽取结果：正文之外还得说清"为什么没有正文"，扫描版和空文件不是一回事。 */
@@ -90,6 +95,12 @@ public final class LocalLibrary {
      * 两参版本的语义一个字没改——它从来不去重，去重只在新重载里生效。
      */
     public AddResult addDocument(String fileName, byte[] content, String bodyHash, boolean skipDuplicates) {
+        return addDocument(fileName, content, bodyHash, skipDuplicates, false);
+    }
+
+    /** 题录级入库（recordLevel 为真）：文件照存、哈希照算，只在条目上多打一个档，比对降权与报告要用。 */
+    public AddResult addDocument(String fileName, byte[] content, String bodyHash, boolean skipDuplicates,
+                                 boolean recordLevel) {
         AddResult result = new AddResult();
         load();
         if (content == null || content.length == 0) return fail(result, "文件内容为空");
@@ -137,6 +148,7 @@ public final class LocalLibrary {
         entry.addedAt = System.currentTimeMillis();
         entry.sentences = 0;
         entry.hash = hash;
+        entry.record = recordLevel;
         entries.add(entry);
         // 每成功一篇就落一次索引：批量跑到一半被杀，已经进来的那些不至于看不见。
         persist();
@@ -219,6 +231,8 @@ public final class LocalLibrary {
         source.title = stripExtension(entry.name);
         source.engine = "local";
         source.locator = entry.name;
+        // 题录导进来的那一批只有题名与摘要可比，档位跟着条目走；导进库的原文不沾这个档。
+        source.material = entry.record ? DuplicateEngine.MATERIAL_ABSTRACT : DuplicateEngine.MATERIAL_FULL;
         source.year = "";
         source.authors = "";
         return source;
@@ -400,6 +414,7 @@ public final class LocalLibrary {
                         entry.sentences = (int) number(map.get("sentences"));
                         Object hash = map.get("hash");
                         entry.hash = hash instanceof String ? (String) hash : "";
+                        entry.record = Boolean.TRUE.equals(map.get("record"));
                         if (place(entry.name) == null || !isSupported(extensionOf(entry.name))) continue;
                         entries.add(entry);
                     }
@@ -448,8 +463,9 @@ public final class LocalLibrary {
                     .append(",\"bytes\":").append(entry.bytes)
                     .append(",\"addedAt\":").append(entry.addedAt)
                     .append(",\"sentences\":").append(entry.sentences)
-                    .append(",\"hash\":").append(ApiJson.quote(entry.hash == null ? "" : entry.hash))
-                    .append('}');
+                    .append(",\"hash\":").append(ApiJson.quote(entry.hash == null ? "" : entry.hash));
+            if (entry.record) out.append(",\"record\":true");   // 只在真为有时多写这一键，老索引逐字不变
+            out.append('}');
         }
         out.append("]}");
         writeIndex(out.toString());

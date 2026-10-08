@@ -21,6 +21,11 @@ public final class CorpusImport {
     public static final class Source {
         public final String name;
         public final byte[] content;
+        /**
+         * 题录级：这一份只有题名/作者/刊名/关键词/摘要，一个字的正文都没有（RecordImport 那一路）。
+         * 落库带上这个档，比对与来源榜才知道这里的命中只能算摘要级证据。
+         */
+        public boolean recordLevel;
 
         public Source(String name, byte[] content) {
             this.name = name == null ? "" : name;
@@ -253,7 +258,8 @@ public final class CorpusImport {
             receipt.message = "本批已有同一篇正文：" + twin;
             return;
         }
-        LocalLibrary.AddResult added = library.addDocument(safe, source.content, hash, true);
+        LocalLibrary.AddResult added = library.addDocument(safe, source.content, hash, true,
+                source.recordLevel);
         if (added.ok) {
             receipt.status = Status.IMPORTED;
             receipt.storedName = added.name;

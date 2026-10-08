@@ -937,15 +937,17 @@ public class EditorActivity extends Activity {
                 }).show();
     }
 
-    /** The comparison library takes any number of .docx/.txt documents. */
+    /** 自建库收两类东西：文档（.docx/.txt/.md/.pdf）与题录导出（.bib/.ris/.enl，见 RecordImport）。 */
     private void pickLibraryDocuments() {
         if (busy) return;
         Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         pick.addCategory(Intent.CATEGORY_OPENABLE);
         pick.setType("*/*");
+        // 系统给 .bib/.ris/.enl 报的往往是 octet-stream（有的 ROM 干脆报 bin），
+        // 白名单里没有它，用户在文件选择器里就看不见自己刚导出的那份题录。
         pick.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "text/plain", "text/markdown"});
+                "text/plain", "text/markdown", "application/octet-stream", "text/csv"});
         pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         startActivityForResult(pick, REQUEST_LIBRARY);
     }
