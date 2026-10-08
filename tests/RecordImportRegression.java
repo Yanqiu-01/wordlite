@@ -415,6 +415,8 @@ public final class RecordImportRegression {
     // ---- 10. 真链路：题录 → 自建库 → 语料 → 命中 ----
 
     private static void intoLibraryAndMatch() throws Exception {
+        // 上一次跑崩在这儿，库里会留下那三篇，于是这一次开局就撞哈希——先清一遍再谈验收。
+        deleteRecursively(new File(ROOT));
         File dir = new File(ROOT, "library");
         dir.mkdirs();
         LocalLibrary library = new LocalLibrary(dir);
@@ -475,6 +477,18 @@ public final class RecordImportRegression {
         }
         check(attributed, "命中署到那一篇的题名上（每篇单独成篇换来的就是这件事）");
         check(abstractLevel, "这条命中带着摘要级档位：它不能和正文级命中混成一个数");
+
+        // 档位分布也要穿过索引：那三条里有一条没摘要，它只能落在"仅题录"，不许混进"摘要"那一档。
+        int recordTier = 0;
+        int abstractTier = 0;
+        for (int i = 0; i < corpus.sourceCount(); i++) {
+            TextCorpus.Source src = corpus.sourceAt(i);
+            String tier = src == null ? "" : src.material;
+            if (DuplicateEngine.MATERIAL_RECORD.equals(tier)) recordTier++;
+            else if (DuplicateEngine.MATERIAL_ABSTRACT.equals(tier)) abstractTier++;
+        }
+        check(recordTier == 1 && abstractTier == 4,
+                "五篇语料的档位分布是 1 条仅题录 + 4 条摘要，got " + recordTier + " 与 " + abstractTier);
     }
 
     // ---- helpers ----

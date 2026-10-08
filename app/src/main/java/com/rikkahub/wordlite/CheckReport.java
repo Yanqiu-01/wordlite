@@ -25,6 +25,7 @@ public final class CheckReport {
         if (report.retrievalIncomplete) unfinished(out, report); else completed(out, report);
         /* 未完成也交代问了几个窗口：覆盖率小节在两种头部之后都调。 */
         coverage(out, report);
+        inventory(out, report);
         merges(out, report);
         engines(out, report);
         sourcesLedger(out, report);
@@ -55,6 +56,10 @@ public final class CheckReport {
         out.append("</tbody></table><p>参与比对 ").append(report.comparedChars)
                 .append(" 个有效字符（语料侧可比候选 ").append(report.comparableCandidates).append(" 篇），命中相似 ")
                 .append(report.duplicateChars).append(" 个，其中落在引用区间内 ").append(report.citedDuplicateChars).append(" 个。</p>");
+        String split = DuplicateEngine.materialSplitLine(report);
+        if (split.length() > 0)
+            out.append("<p><strong>").append(escape(DuplicateEngine.MATERIAL_SPLIT_LABEL))
+                    .append("：</strong>").append(escape(split)).append("</p>");
         abstractLayer(out, report);
     }
     /** A run that consulted nothing gets 未完成查重 as its headline; the AIGC share is local, so it stays. */
@@ -97,6 +102,26 @@ public final class CheckReport {
                     .append("</strong></p>");
         }
     }
+    /**
+     * 这次到底比了哪些库、各多少篇。一组一行，档位直接写在组名里——"哪几库只有摘要"是这张表要回答的
+     * 第一件事，藏在表注里等于没写。语料为空（一张表都没进）时整节不画。
+     */
+    private static void inventory(StringBuilder out, DuplicateEngine.Report report) {
+        CorpusLedger ledger = report == null ? null : report.inventory;
+        if (ledger == null || ledger.rows.isEmpty()) return;
+        out.append("<h2>比对材料 ").append(ledger.papers).append(" 篇 &#183; ").append(ledger.groups)
+                .append(" 组</h2><table><thead><tr><th>来源 &#183; 可比材料</th><th>篇数</th>")
+                .append("<th>比对字数</th></tr></thead><tbody>");
+        for (int i = 0; i < ledger.rows.size(); i++) {
+            CorpusLedger.Row row = ledger.rows.get(i);
+            out.append("<tr><td>").append(escape(row.label())).append("</td><td>").append(row.papers)
+                    .append("</td><td>").append(row.chars).append("</td></tr>");
+        }
+        out.append("</tbody></table>");
+        out.append("<p>「只有精要可读」那一档比的是网站从整篇里自己摘的那一段，「只有摘要可比」那一档比的是摘要："
+                + "撞上几句只说明那几句在里面，正文没比过。各档字数各记各的，不相加成一个结论。</p>");
+    }
+
     /** 跨源合并的账目：留下谁、并掉谁、按哪个键并的、凭什么留它。 */
     private static void merges(StringBuilder out, DuplicateEngine.Report report) {
         if (report == null || report.merges.isEmpty()) return;
@@ -149,7 +174,7 @@ public final class CheckReport {
             return;
         }
         out.append("<h2>来源榜 &#183; 按文献 &#183; 共 ").append(ledger.paperCount).append(" 篇命中</h2>");
-        out.append("<table><thead><tr><th>#</th><th>文献</th><th>检索源</th><th>重复字符</th>")
+        out.append("<table><thead><tr><th>#</th><th>文献</th><th>检索源</th><th>可比材料</th><th>重复字符</th>")
                 .append("<th>该篇重复率</th><th>处数</th><th>标识符</th></tr></thead><tbody>");
         for (int i = 0; i < ledger.rows.size(); i++) {
             SourceLedger.Row row = ledger.rows.get(i);
@@ -161,7 +186,8 @@ public final class CheckReport {
                 String meta = ledgerMeta(row);
                 if (meta.length() > 0) out.append("<br><span>").append(meta).append("</span>");
             }
-            out.append("</td><td>").append(escape(row.engine)).append("</td><td>").append(row.duplicateChars)
+            out.append("</td><td>").append(escape(row.engine)).append("</td><td>")
+                    .append(escape(ledgerMaterial(row))).append("</td><td>").append(row.duplicateChars)
                     .append("</td><td>").append(percent(row.share(ledger.comparedChars)))
                     .append("</td><td>").append(row.hitCount).append("</td><td>");
             ledgerIdentifier(out, row);
@@ -170,6 +196,13 @@ public final class CheckReport {
         out.append("</tbody></table>");
         out.append("<p>各篇重复率用整篇有效字数 ").append(ledger.comparedChars)
                 .append(" 个有效字符当同分母，所以各行相加就是总相似度比；同一段字符只记给命中最长的那一篇。</p>");
+        out.append("<p>").append(escape(DuplicateEngine.MATERIAL_SPLIT_LABEL)).append("：正文级 ")
+                .append(ledger.fullDuplicateChars).append(" 字（").append(ledger.fullPapers)
+                .append(" 篇）&#183; 只有精要可读 ").append(ledger.digestDuplicateChars).append(" 字（")
+                .append(ledger.digestPapers).append(" 篇）&#183; 只有摘要可比 ")
+                .append(ledger.abstractDuplicateChars).append(" 字（").append(ledger.abstractPapers)
+                .append(" 篇）。各档各记各的，不相加成一个结论；排序先分档再比字数，"
+                        + "精要级与摘要级都排在正文级那几行后面。</p>");
         for (int i = 0; i < LEDGER_SAMPLE_ROWS && i < ledger.rows.size(); i++)
             ledgerSample(out, report.sourceText, ledger.rows.get(i), i + 1);
     }
@@ -184,6 +217,23 @@ public final class CheckReport {
         }
         out.append("<p>比对过 ").append(consulted).append(" 篇候选与自建库，没有一篇命中相似片段。未命中只说明这 ")
                 .append(consulted).append(" 篇里没有相似段落，未命中不等于全文没有重复。</p>");
+    }
+
+    /**
+     * 材料档那一格。并过条的行可能几档都有字数，那种行必须把每一份都写出来——只写"正文"那两个字
+     * 就等于把这一行里精要级、摘要级那两笔账盖掉，而这一轮要防的正是这种盖法。
+     */
+    private static String ledgerMaterial(SourceLedger.Row row) {
+        int parts = (row.fullChars > 0 ? 1 : 0) + (row.digestChars > 0 ? 1 : 0)
+                + (row.abstractChars > 0 ? 1 : 0);
+        if (parts <= 1) return SourceLedger.materialLabel(row);
+        StringBuilder out = new StringBuilder();
+        if (row.fullChars > 0) out.append("正文 ").append(row.fullChars).append(" 字");
+        if (row.digestChars > 0)
+            out.append(out.length() > 0 ? " + " : "").append("精要 ").append(row.digestChars).append(" 字");
+        if (row.abstractChars > 0)
+            out.append(out.length() > 0 ? " + " : "").append("摘要 ").append(row.abstractChars).append(" 字");
+        return out.toString();
     }
 
     /** 作者 &#183; 年份 &#183; 并自几条题录：并了两条题录这件事要在表里露出来，否则用户会以为库里真有两篇。 */

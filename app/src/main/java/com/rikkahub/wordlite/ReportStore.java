@@ -52,6 +52,8 @@ public final class ReportStore {
     public static final int MAX_SHAPE_ROWS = 150;
     /** 来源榜行数 = SourceLedger.MAX_ROWS + 折叠行，折叠行本身就代表"其余 N 篇"，不能再砍。 */
     public static final int MAX_SOURCE_ROWS = SourceLedger.MAX_ROWS + 1;
+    /** 比对材料清单的行数上限。组数 = 检索源 × 材料档，比来源榜的行数更值得整张留下。 */
+    public static final int MAX_MATERIAL_ROWS = CorpusLedger.MAX_ROWS + 1;
     public static final int MAX_ENGINE_ROWS = 16;
     public static final int MAX_NOTES = 12;
     public static final int MAX_NOTE_CHARS = 200;
@@ -127,11 +129,25 @@ public final class ReportStore {
     public static final class SourceRow {
         public String key = "", title = "", authors = "", year = "", engine = "", locator = "";
         public int duplicateChars, hitCount, sourceCount;
+        /** 这一行拿来比对的材料是什么档：正文 / 只有摘要可比。老记录缺这键时是空串，按正文读。 */
+        public String material = "";
+        /** 重复字符按可比材料档分开的三份：相加 == duplicateChars。老记录里没有，读回来是 0。 */
+        public int fullChars, digestChars, abstractChars;
         /** 最早命中的起始偏移，点来源行也跳这里；没有命中时为 -1。 */
         public int firstStart = -1;
         public double share;
         public boolean others;
         public int othersCount;
+    }
+
+    /** 比对材料清单的一行：一个检索源在一个材料档下进了几篇、多少字。 */
+    public static final class MaterialRow {
+        public String engine = "", material = "";
+        public int papers, chars;
+
+        public String label() {
+            return CorpusLedger.sourceLabel(engine) + " · " + CorpusLedger.materialLabel(material);
+        }
     }
 
     /** 「按检索源分布」那一列：一个检索源一行。 */
@@ -197,6 +213,12 @@ public final class ReportStore {
 
         /* ---- 字符账本：四个比率的分子分母，指标卡的注脚全靠它 ---- */
         public int comparedChars, duplicateChars, citedDuplicateChars, selfWrittenChars, machineChars, excludedChars;
+        /** 分子按可比材料档分开的两份账（相加 == duplicateChars）与各自的命中篇数。 */
+        public int fullTextDuplicateChars, digestDuplicateChars, abstractDuplicateChars;
+        public int fullTextHitPapers, digestHitPapers, abstractHitPapers;
+        /** 这次比了哪些库、各多少篇：老记录没这几项时清单为空，界面上那一节整块不画。 */
+        public final ArrayList<MaterialRow> materials = new ArrayList<MaterialRow>();
+        public int materialsTotal, materialsPapers, materialsChars;
         /** 落盘时账本的闭合残差，恒为 0；留着它是为了让人怀疑"报告是不是凑出来的"时查得出处。 */
         public int ledgerResidual;
 
@@ -265,6 +287,23 @@ public final class ReportStore {
             aigcScore = rate(aigcScore);
             comparedChars = atLeastZero(comparedChars);
             duplicateChars = atLeastZero(duplicateChars);
+            fullTextDuplicateChars = atLeastZero(fullTextDuplicateChars);
+            digestDuplicateChars = atLeastZero(digestDuplicateChars);
+            abstractDuplicateChars = atLeastZero(abstractDuplicateChars);
+            fullTextHitPapers = atLeastZero(fullTextHitPapers);
+            digestHitPapers = atLeastZero(digestHitPapers);
+            abstractHitPapers = atLeastZero(abstractHitPapers);
+            materialsTotal = Math.max(materialsTotal, materials.size());
+            materialsPapers = atLeastZero(materialsPapers);
+            materialsChars = atLeastZero(materialsChars);
+            while (materials.size() > MAX_MATERIAL_ROWS) materials.remove(materials.size() - 1);
+            for (int i = 0; i < materials.size(); i++) {
+                MaterialRow row = materials.get(i);
+                row.engine = cut(row.engine, 40);
+                row.material = cut(row.material, 20);
+                row.papers = atLeastZero(row.papers);
+                row.chars = atLeastZero(row.chars);
+            }
             citedDuplicateChars = atLeastZero(citedDuplicateChars);
             selfWrittenChars = atLeastZero(selfWrittenChars);
             machineChars = atLeastZero(machineChars);
@@ -303,6 +342,10 @@ public final class ReportStore {
                 row.locator = cut(row.locator, 160);
                 row.key = cut(row.key, 160);
                 row.duplicateChars = atLeastZero(row.duplicateChars);
+                row.fullChars = atLeastZero(row.fullChars);
+                row.digestChars = atLeastZero(row.digestChars);
+                row.abstractChars = atLeastZero(row.abstractChars);
+                row.material = cut(row.material, 20);
                 row.hitCount = atLeastZero(row.hitCount);
                 row.sourceCount = atLeastZero(row.sourceCount);
                 row.share = rate(row.share);
@@ -432,6 +475,12 @@ public final class ReportStore {
                     .append(",\"self\":").append(selfWrittenChars)
                     .append(",\"machine\":").append(machineChars)
                     .append(",\"excluded\":").append(excludedChars)
+                    .append(",\"materialFull\":").append(fullTextDuplicateChars)
+                    .append(",\"materialDigest\":").append(digestDuplicateChars)
+                    .append(",\"materialAbstract\":").append(abstractDuplicateChars)
+                    .append(",\"materialFullPapers\":").append(fullTextHitPapers)
+                    .append(",\"materialDigestPapers\":").append(digestHitPapers)
+                    .append(",\"materialAbstractPapers\":").append(abstractHitPapers)
                     .append(",\"residual\":").append(ledgerResidual)
                     .append("},\"coverage\":{\"windowsAvailable\":").append(windowsAvailable)
                     .append(",\"windowsPlanned\":").append(windowsPlanned)
@@ -452,6 +501,18 @@ public final class ReportStore {
                 out.append(sourceJson(sources.get(i)));
             }
             out.append("],\"sourcesTotal\":").append(sourcesTotal)
+                    .append(",\"materials\":[");
+            for (int i = 0; i < materials.size(); i++) {
+                if (i > 0) out.append(',');
+                MaterialRow row = materials.get(i);
+                out.append("{\"engine\":").append(ApiJson.quote(row.engine))
+                        .append(",\"material\":").append(ApiJson.quote(row.material))
+                        .append(",\"papers\":").append(row.papers)
+                        .append(",\"chars\":").append(row.chars).append('}');
+            }
+            out.append("],\"materialsTotal\":").append(materialsTotal)
+                    .append(",\"materialsPapers\":").append(materialsPapers)
+                    .append(",\"materialsChars\":").append(materialsChars)
                     .append(",\"evidence\":[");
             for (int i = 0; i < evidence.size(); i++) {
                 if (i > 0) out.append(',');
@@ -528,6 +589,12 @@ public final class ReportStore {
                 record.selfWrittenChars = (int) whole(ledger.get("self"));
                 record.machineChars = (int) whole(ledger.get("machine"));
                 record.excludedChars = (int) whole(ledger.get("excluded"));
+                record.fullTextDuplicateChars = (int) whole(ledger.get("materialFull"));
+                record.digestDuplicateChars = (int) whole(ledger.get("materialDigest"));
+                record.abstractDuplicateChars = (int) whole(ledger.get("materialAbstract"));
+                record.fullTextHitPapers = (int) whole(ledger.get("materialFullPapers"));
+                record.digestHitPapers = (int) whole(ledger.get("materialDigestPapers"));
+                record.abstractHitPapers = (int) whole(ledger.get("materialAbstractPapers"));
                 record.ledgerResidual = (int) whole(ledger.get("residual"));
             }
             Map<?, ?> coverage = asMap(map.get("coverage"));
@@ -550,6 +617,19 @@ public final class ReportStore {
                 if (row != null) record.sources.add(row);
             }
             record.sourcesTotal = (int) whole(map.get("sourcesTotal"));
+            for (Object item : asList(map.get("materials"))) {
+                Map<?, ?> seg = asMap(item);
+                if (seg == null) continue;
+                MaterialRow row = new MaterialRow();
+                row.engine = text(seg.get("engine"));
+                row.material = text(seg.get("material"));
+                row.papers = (int) whole(seg.get("papers"));
+                row.chars = (int) whole(seg.get("chars"));
+                record.materials.add(row);
+            }
+            record.materialsTotal = (int) whole(map.get("materialsTotal"));
+            record.materialsPapers = (int) whole(map.get("materialsPapers"));
+            record.materialsChars = (int) whole(map.get("materialsChars"));
             for (Object item : asList(map.get("evidence"))) {
                 Evidence hit = evidenceFrom(item);
                 if (hit != null) record.evidence.add(hit);
@@ -633,6 +713,10 @@ public final class ReportStore {
 
     static String sourceJson(SourceRow row) {
         return "{\"key\":" + ApiJson.quote(row.key)
+                + ",\"material\":" + ApiJson.quote(row.material)
+                + ",\"fullChars\":" + row.fullChars
+                + ",\"digestChars\":" + row.digestChars
+                + ",\"abstractChars\":" + row.abstractChars
                 + ",\"title\":" + ApiJson.quote(row.title)
                 + ",\"authors\":" + ApiJson.quote(row.authors)
                 + ",\"year\":" + ApiJson.quote(row.year)
@@ -658,6 +742,11 @@ public final class ReportStore {
         row.engine = text(map.get("engine"));
         row.locator = text(map.get("locator"));
         row.duplicateChars = (int) whole(map.get("duplicateChars"));
+        // 材料与分档字数是后加的键：老记录里没有，读回空档与 0 字数，界面上按正文级读。
+        row.material = text(map.get("material"));
+        row.fullChars = (int) whole(map.get("fullChars"));
+        row.digestChars = (int) whole(map.get("digestChars"));
+        row.abstractChars = (int) whole(map.get("abstractChars"));
         row.hitCount = (int) whole(map.get("hitCount"));
         row.sourceCount = (int) whole(map.get("sourceCount"));
         // firstStart 的"没有命中"是 -1，缺键时也必须读回 -1，不然空行会被当成能跳的。
@@ -844,6 +933,26 @@ public final class ReportStore {
                 ? report.comparedChars - report.duplicateChars : balance.selfWrittenChars;
         record.machineChars = balance == null ? 0 : balance.machineChars;
         record.excludedChars = report.excludedChars;
+        record.fullTextDuplicateChars = report.fullTextDuplicateChars;
+        record.digestDuplicateChars = report.digestDuplicateChars;
+        record.abstractDuplicateChars = report.abstractDuplicateChars;
+        record.fullTextHitPapers = report.fullTextHitPapers;
+        record.digestHitPapers = report.digestHitPapers;
+        record.abstractHitPapers = report.abstractHitPapers;
+        if (report.inventory != null) {
+            for (int i = 0; i < report.inventory.rows.size(); i++) {
+                CorpusLedger.Row group = report.inventory.rows.get(i);
+                MaterialRow row = new MaterialRow();
+                row.engine = group.engine;
+                row.material = group.material;
+                row.papers = group.papers;
+                row.chars = group.chars;
+                record.materials.add(row);
+            }
+            record.materialsTotal = report.inventory.groups;
+            record.materialsPapers = report.inventory.papers;
+            record.materialsChars = report.inventory.chars;
+        }
         record.ledgerResidual = balance == null ? 0 : balance.residual();
         record.overallRate = report.overallRate;
         record.excludingCitationsRate = report.excludingCitationsRate;
@@ -899,6 +1008,10 @@ public final class ReportStore {
             row.engine = source.engine;
             row.locator = source.locator;
             row.duplicateChars = source.duplicateChars;
+            row.material = SourceLedger.materialLabel(source);
+            row.fullChars = source.fullChars;
+            row.digestChars = source.digestChars;
+            row.abstractChars = source.abstractChars;
             row.hitCount = source.hitCount;
             row.sourceCount = source.sourceCount;
             row.firstStart = source.firstStart;

@@ -23,6 +23,8 @@ public final class DuplicateEngine {
      * 6 次额度期望只有 2 篇可比正文，10 次才够 3-4 篇。代价是流量：一轮实测见 docs/retrieval-recall.md。
      */
     static final int MAX_REQUESTS = 120, MAX_FULL_TEXTS = 10, MAX_CORPUS_PAPERS = 120, MAX_NOTES = 40;
+    /** 分档命中那一格的名字。它不是第四个比率，只是把分子按材料档拆开说一遍。 */
+    public static final String MATERIAL_SPLIT_LABEL = "命中材料分档";
     /** 报告里列几条"可以下进自建库"的候选：再多那一屏就没人看了。 */
     static final int MAX_DOWNLOADABLES = 10;
     /* 挂钟闸门与限速：实测一轮 9 个源约 10 秒（维普最慢 4062ms），但 Routes 的多路尝试能把单个
@@ -42,6 +44,12 @@ public final class DuplicateEngine {
     static final String THROTTLED_PREFIX = "检索源限流";
     /** 候选清单「可比材料」列的三个取值，入库时逐条写死，报告里不许再现场猜。 */
     static final String MATERIAL_FULL = "全文", MATERIAL_ABSTRACT = "摘要", MATERIAL_RECORD = "仅题录";
+    /**
+     * 精要档：手机上把详情页渲染出来取回的那一段——万方那 1,500+ 字是网站自己从整篇里摘出来的
+     * "全文精要"，比摘要厚、比正文薄。它不许并进"全文"那一档：一句撞进精要，只说明那句话被网站
+     * 摘进去了，正文其余的部分根本没进过比对。
+     */
+    static final String MATERIAL_DIGEST = "精要";
     /** Retrieval gaps phrased with the note(...) vocabulary so the headline and the notes never disagree. */
     static final String GAP_NOTHING_RETRIEVED = "联网检索没有取回可比对的候选文献";
     static final String GAP_CANCELLED = "检索已取消，没有联网取候选文献";
@@ -93,6 +101,16 @@ public final class DuplicateEngine {
         public int localDuplicateChars, webDuplicateChars;
         /** 上面两档各自的比率：分母都是 comparedChars，与总相似度比同一把尺，上限 100%。 */
         public double localRate, webRate;
+        /**
+         * 上面那两档回答"从哪儿比来的"，这两档回答"拿什么档的材料比的"：撞上的时候对面那篇
+         * 有没有正文可查。两档相加 == duplicateChars，但界面上不许相加成一个数读——
+         * 摘要级那一档的覆盖面只有正文级的一小截（实测见 docs/material-tiers.md）。
+         */
+        public int fullTextDuplicateChars, digestDuplicateChars, abstractDuplicateChars;
+        /** 各档有几篇命中，与上面那几个字数同源（SourceLedger 折叠前的全量篇数）。 */
+        public int fullTextHitPapers, digestHitPapers, abstractHitPapers;
+        /** 这次到底比了哪些库、各多少篇（含每库几篇只有摘要）：结果页与 HTML 都读它。 */
+        public CorpusLedger inventory;
         /** 本次真正拿来比对的语料（自建库加检索到的候选），改写效果要用同一份基线。 */
         public TextCorpus baseline;
         public long elapsedMillis;
@@ -255,6 +273,48 @@ public final class DuplicateEngine {
                 + "手头有原文的疑似来源可以导进自建库再查一次，那一条路给得出正文级数字。";
     }
 
+    /** 分档命中那一行的唯一写法：结果页、HTML、存档读同一句，两处各起一名就一定漂移。 */
+    public static String materialSplitLine(Report report) {
+        if (report == null) return "";
+        return materialSplitLine(report.fullTextDuplicateChars, report.digestDuplicateChars,
+                report.abstractDuplicateChars, report.comparedChars, report.fullTextHitPapers,
+                report.digestHitPapers, report.abstractHitPapers);
+    }
+
+    /**
+     * 同上，数字入口（存档记录那一侧读的是这一份）。各档之间那个"另有"是"几把尺并列"，
+     * 不是"合成一个数"：正文级那部分能与总相似度比对照，精要级与摘要级都只能与摘要层对照。
+     * 一处命中都没有时返回空串，界面连那一行都不画。
+     */
+    public static String materialSplitLine(int fullChars, int digestChars, int abstractChars,
+                                           int comparedChars, int fullPapers, int digestPapers,
+                                           int abstractPapers) {
+        StringBuilder out = new StringBuilder();
+        if (fullChars > 0) appendTier(out, "正文级", fullChars, comparedChars, fullPapers, "篇有正文可比");
+        if (digestChars > 0)
+            appendTier(out, "精要级", digestChars, comparedChars, digestPapers,
+                    "篇只有精要可读，那是网站从整篇里自己摘的一段");
+        if (abstractChars > 0)
+            appendTier(out, "摘要级", abstractChars, comparedChars, abstractPapers,
+                    "篇只有摘要可比，正文没比过");
+        if (out.length() == 0) return "";
+        if (fullChars <= 0) out.insert(0, "命中不含正文级：");
+        return out.toString();
+    }
+
+    /** 一档的写法：档名 + 字数 + 用整篇分母算出的比率 + 几篇，以及那一档到底比的是什么。 */
+    private static void appendTier(StringBuilder out, String name, int chars, int comparedChars,
+                                   int papers, String papersNote) {
+        out.append(out.length() > 0 ? "，另有" : "").append(name).append(' ').append(chars).append(" 字 = ")
+                .append(percent(SourceLedger.rate(chars, comparedChars))).append("（")
+                .append(papers).append(" ").append(papersNote).append("）");
+    }
+
+    /** 比对材料清单那一行的唯一写法；空语料返回空串，界面连那一行都不画。 */
+    public static String inventoryLine(Report report) {
+        return report == null || report.inventory == null ? "" : report.inventory.summaryLine();
+    }
+
     /** 摘要层的注记：报告中心与面板的注记列表都要能查到这一层做了、做了什么口径。 */
     static String abstractLayerNote(Report report) {
         return ABSTRACT_LAYER_LABEL + "：" + report.abstractSentencesMatched + "/"
@@ -300,6 +360,8 @@ public final class DuplicateEngine {
                             + structure.bibliographySections + " 节共 " + structure.citationLines
                             + " 条，致谢/附录/目录等 " + structure.otherSections + " 节；这部分不计入相似率");
             }
+            // 语料到此定型（检索回来的候选已入库、比对也做完了），清单再数，篇数才对得上比的那一份。
+            report.inventory = CorpusLedger.aggregate(library);
             if (cancelled(cancellation)) note(report, "检测到取消，未执行 AIGC 倾向分析");
             else {
                 step(progress, "AIGC 倾向分析", 3, 4);
@@ -413,6 +475,22 @@ public final class DuplicateEngine {
         report.webDuplicateChars = byPaper.webDuplicateChars();
         report.localRate = SourceLedger.rate(report.localDuplicateChars, report.comparedChars);
         report.webRate = SourceLedger.rate(report.webDuplicateChars, report.comparedChars);
+        report.fullTextDuplicateChars = byPaper.fullDuplicateChars;
+        report.digestDuplicateChars = byPaper.digestDuplicateChars;
+        report.abstractDuplicateChars = byPaper.abstractDuplicateChars;
+        report.fullTextHitPapers = byPaper.fullPapers;
+        report.digestHitPapers = byPaper.digestPapers;
+        report.abstractHitPapers = byPaper.abstractPapers;
+        /* 摘要级命中必须单独说一句：只拿摘要比过的那些篇，撞上一句只说明那句话在摘要里，
+           不说明整篇比过。来源榜已把它们排在正文级那几篇后面，这一句负责把话说明白。 */
+        if (byPaper.abstractDuplicateChars > 0)
+            note(report, "撞上的材料里有 " + byPaper.abstractPapers + " 篇只有摘要可比（"
+                    + byPaper.abstractDuplicateChars + " 字）：这部分只说明那句原话在那几篇的摘要里，"
+                    + "正文没有比过，所以不与正文级那 " + byPaper.fullDuplicateChars + " 字混成一个数");
+        if (byPaper.digestDuplicateChars > 0)
+            note(report, "还有 " + byPaper.digestPapers + " 篇只有精要可读（"
+                    + byPaper.digestDuplicateChars + " 字）：那是手机上把详情页渲染出来后取回的"
+                    + "「全文精要」，网站从整篇里自己摘的一段，不是整篇正文，也不与上面两档混成一个数");
         if (byPaper.numeratorOverflowChars > 0)
             note(report, "来源榜各行相加比整篇可比字数多 " + byPaper.numeratorOverflowChars
                     + " 字：那些字落在参考文献表/致谢这类结构性文本里，不参与比率；"
@@ -993,6 +1071,9 @@ public final class DuplicateEngine {
                 continue;
             }
             candidate.comparableMaterial = fetched ? MATERIAL_FULL : MATERIAL_ABSTRACT;
+            /* 同一个档必须落到语料那条来源上：SourceLedger 按 Source.material 分档记账，
+               只写在 candidate 上等于只有候选表知道、命中侧全按正文算——摘要级命中就冒充正文级了。 */
+            if (candidate.source != null) candidate.source.material = candidate.comparableMaterial;
             if (fetched) report.fullTextCandidates++; else report.abstractOnlyCandidates++;
             report.comparableCandidates++;
             corpus.add(candidate.source, body);

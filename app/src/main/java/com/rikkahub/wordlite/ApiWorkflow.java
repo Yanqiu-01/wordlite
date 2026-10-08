@@ -336,6 +336,13 @@ public final class ApiWorkflow {
                             .append(String.format(Locale.CHINA, "%.1f%%  ", entry.getValue()));
                 box.addView(label(line.toString().trim(), 12));
             }
+            /* 比了哪些库、各多少篇，紧跟在三个比率下面：一个总相似度比没说它是拿什么比出来的，
+               读者就会把"拿三十条摘要比出来的 3%"读成"跟全网正文比过只有 3%"。 */
+            String inventory = DuplicateEngine.inventoryLine(result);
+            if (!inventory.isEmpty()) box.addView(label(inventory, 12));
+            String split = DuplicateEngine.materialSplitLine(result);
+            if (!split.isEmpty())
+                box.addView(label(DuplicateEngine.MATERIAL_SPLIT_LABEL + "：" + split, 12));
             if (result.retrievalPartial) box.addView(label(result.retrievalPartialReason, 11));
             // 摘要层另起一行，名字里自带"近似"与"只到摘要"：它不是第四个比率，也不与上面三个相加。
             String abstractLine = DuplicateEngine.abstractLayerLine(result);
@@ -352,6 +359,9 @@ public final class ApiWorkflow {
             box.addView(label(result.retrievalReason == null
                     ? "检索没有取回可比对的文献，相似度类指标无法成立" : result.retrievalReason, 13));
             box.addView(label("相似度类指标不成立，只有 AIGC 倾向是本机计算的结果。", 11));
+            // 这一屏更要说清比了什么：库里有几篇、各是什么档，直接决定"未完成"这三个字该怎么读。
+            String inventory = DuplicateEngine.inventoryLine(result);
+            if (!inventory.isEmpty()) box.addView(label(inventory, 12));
             /* 这一屏不许停在"量不到"就完事：上面那句讲的是真的（没有可比正文），
                但同一屏必须跟着给出摘要层那个数，以及现在就能走的下一步。 */
             String abstractLine = DuplicateEngine.abstractLayerLine(result);
@@ -505,8 +515,12 @@ public final class ApiWorkflow {
         TextCorpus.Source source = hit.source;
         String title = source == null || source.title.isEmpty() ? "相似片段" : source.title;
         String year = source == null ? "" : source.year;
+        /* 档位跟着出处走：只有摘要可比的那几处必须看得见"正文没比过"这件事，
+           否则一句撞进摘要的话会被读成"整篇都比过而且抄了这么多"。 */
+        String tier = source != null && DuplicateEngine.MATERIAL_ABSTRACT.equals(source.material)
+                ? " · 只有摘要可比" : "";
         return safeSlice(lastScanned == null ? "" : lastScanned.text, hit.start, hit.end)
-                + "\n" + title + (year.isEmpty() ? "" : "（" + year + "）");
+                + "\n" + title + (year.isEmpty() ? "" : "（" + year + "）") + tier;
     }
     /** 题名在确认框里只占一行，长了截断加省略号；一个字都不编，只是不让它把对话框撑破。 */
     private static String cut(String value, int max) {

@@ -26,6 +26,11 @@ public final class LocalLibrary {
          * 一个字的正文都没有。索引里的老条目没这个键，按 false 读（导进来的原文不该被降权）。
          */
         public boolean record;
+        /**
+         * 材料档（DuplicateEngine.MATERIAL_* 之一，空串 = 正文）。"精要"那一档是手机渲染详情页取回的
+         * 那一段——它比摘要厚、比正文薄，写在布尔位里就会被读成"要么正文要么摘要"，所以另开一字段。
+         */
+        public String material = "";
     }
 
     /** 抽取结果：正文之外还得说清"为什么没有正文"，扫描版和空文件不是一回事。 */
@@ -101,6 +106,13 @@ public final class LocalLibrary {
     /** 题录级入库（recordLevel 为真）：文件照存、哈希照算，只在条目上多打一个档，比对降权与报告要用。 */
     public AddResult addDocument(String fileName, byte[] content, String bodyHash, boolean skipDuplicates,
                                  boolean recordLevel) {
+        return addDocument(fileName, content, bodyHash, skipDuplicates,
+                recordLevel ? DuplicateEngine.MATERIAL_ABSTRACT : "");
+    }
+
+    /** 带材料档的入库：material 为空按正文算（导进库的原文），否则原样落到条目上。 */
+    public AddResult addDocument(String fileName, byte[] content, String bodyHash, boolean skipDuplicates,
+                                 String material) {
         AddResult result = new AddResult();
         load();
         if (content == null || content.length == 0) return fail(result, "文件内容为空");
@@ -148,7 +160,11 @@ public final class LocalLibrary {
         entry.addedAt = System.currentTimeMillis();
         entry.sentences = 0;
         entry.hash = hash;
-        entry.record = recordLevel;
+        String tier = material == null ? "" : material.trim();
+        entry.material = tier;
+        // 只要不是正文档，索引里那个老布尔位就得为真：老版本 App 读不到 material 键时，
+        // 还得靠它把这一条降权，不能让"仅题录""精要"这两档从降权里溜出去。
+        entry.record = tier.length() > 0 && !DuplicateEngine.MATERIAL_FULL.equals(tier);
         entries.add(entry);
         // 每成功一篇就落一次索引：批量跑到一半被杀，已经进来的那些不至于看不见。
         persist();
@@ -231,8 +247,10 @@ public final class LocalLibrary {
         source.title = stripExtension(entry.name);
         source.engine = "local";
         source.locator = entry.name;
-        // 题录导进来的那一批只有题名与摘要可比，档位跟着条目走；导进库的原文不沾这个档。
-        source.material = entry.record ? DuplicateEngine.MATERIAL_ABSTRACT : DuplicateEngine.MATERIAL_FULL;
+        // 档位跟着条目走：题录导进来的只有摘要，手机渲染回来的只有精要，导进库的原文才是正文。
+        // 老条目只有 record 那个布尔位，没有 material 键，所以先读 material，再退到 record。
+        if (entry.material != null && entry.material.length() > 0) source.material = entry.material;
+        else source.material = entry.record ? DuplicateEngine.MATERIAL_ABSTRACT : DuplicateEngine.MATERIAL_FULL;
         source.year = "";
         source.authors = "";
         return source;
@@ -415,6 +433,7 @@ public final class LocalLibrary {
                         Object hash = map.get("hash");
                         entry.hash = hash instanceof String ? (String) hash : "";
                         entry.record = Boolean.TRUE.equals(map.get("record"));
+                        entry.material = text(map.get("material"));
                         if (place(entry.name) == null || !isSupported(extensionOf(entry.name))) continue;
                         entries.add(entry);
                     }
@@ -465,6 +484,9 @@ public final class LocalLibrary {
                     .append(",\"sentences\":").append(entry.sentences)
                     .append(",\"hash\":").append(ApiJson.quote(entry.hash == null ? "" : entry.hash));
             if (entry.record) out.append(",\"record\":true");   // 只在真为有时多写这一键，老索引逐字不变
+            if (entry.material != null && entry.material.length() > 0
+                    && !entry.material.equals(DuplicateEngine.MATERIAL_FULL))
+                out.append(",\"material\":").append(ApiJson.quote(entry.material));
             out.append('}');
         }
         out.append("]}");
@@ -556,6 +578,11 @@ public final class LocalLibrary {
 
     File directoryFile() {
         return directory;
+    }
+
+    /** 索引里的一个字符串字段：缺键、类型不对一律按空串读，不让一条坏数据把整份索引带崩。 */
+    private static String text(Object value) {
+        return value instanceof String ? (String) value : "";
     }
 
     private static long number(Object value) {

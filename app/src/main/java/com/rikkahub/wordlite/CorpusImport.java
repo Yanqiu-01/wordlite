@@ -26,6 +26,12 @@ public final class CorpusImport {
          * 落库带上这个档，比对与来源榜才知道这里的命中只能算摘要级证据。
          */
         public boolean recordLevel;
+        /**
+         * 材料档（DuplicateEngine.MATERIAL_* 之一）：手机渲染详情页取回的那一批走这一格，
+         * 拿到的多是"全文精要"而不是整篇正文，档位不写清楚就会被读成正文级证据。
+         * recordLevel 是它的旧写法（只有摘要档），两者都给时以本字段为准。
+         */
+        public String material = "";
 
         public Source(String name, byte[] content) {
             this.name = name == null ? "" : name;
@@ -63,6 +69,8 @@ public final class CorpusImport {
                 out.append(" → ").append(storedName).append("（").append(chars).append(" 字");
                 if (pages > 0) out.append(" / ").append(pages).append(" 页");
                 out.append('）');
+                // 只有带了档位的那几批才会有这句话，普通导入的回执一个字都不变。
+                if (message.length() > 0) out.append(" · ").append(message);
             } else if (status == Status.DUPLICATE) {
                 out.append(" → 库里已有同一篇：").append(duplicateOf);
             } else {
@@ -194,6 +202,12 @@ public final class CorpusImport {
         return batch;
     }
 
+    /** 这一份该落哪个档：material 优先，退到旧的 recordLevel 布尔，再退到正文（导进库的原文）。 */
+    private static String tierOf(Source source) {
+        if (source.material != null && source.material.length() > 0) return source.material;
+        return source.recordLevel ? DuplicateEngine.MATERIAL_ABSTRACT : "";
+    }
+
     private static void importOne(LocalLibrary library, Source source, Receipt receipt, Map<String, String> seen) {
         String safe = LocalLibrary.sanitize(source.name);
         if (safe == null) {
@@ -258,11 +272,14 @@ public final class CorpusImport {
             receipt.message = "本批已有同一篇正文：" + twin;
             return;
         }
-        LocalLibrary.AddResult added = library.addDocument(safe, source.content, hash, true,
-                source.recordLevel);
+        String material = tierOf(source);
+        LocalLibrary.AddResult added = library.addDocument(safe, source.content, hash, true, material);
         if (added.ok) {
             receipt.status = Status.IMPORTED;
             receipt.storedName = added.name;
+            // 档位写进回执：一篇"只有精要可读"的材料进库，用户要在回执上看得见这件事。
+            if (DuplicateEngine.MATERIAL_ABSTRACT.equals(material)) receipt.message = "摘要级入库";
+            else if (material.length() > 0) receipt.message = CorpusLedger.materialLabel(material) + "入库";
             seen.put(hash, added.name);
             return;
         }

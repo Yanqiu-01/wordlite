@@ -43,11 +43,14 @@
 - 联网检索回来的候选同样带档（抓到的开放获取全文是正文级，只有摘要的是摘要级），
   两边共用一套 `DuplicateEngine.MATERIAL_*` 写法。
 
+一共四档（正文 / 精要 / 摘要 / 仅题录）怎么分开数、结果页与来源榜哪几处分开报、
+以及为什么不给摘要级乘一个折扣系数，写在 `docs/material-tiers.md`。
+
 可比文本的形状照 `CnkiSearch.abstractOf`：摘要一行在前，题名/作者/刊名/年期/关键词跟在后面一行。
 **DOI 与链接不进可比文本**——谁都一样的字符串，撞上了是假命中；`【作者单位】`、`【基金】`、
 `%C` 那个刊号（`11-2127/TP`）同理，认得出但只认不用。
 
-## 131 条断言钉住什么
+## 140 条断言钉住什么
 
 `tests/RecordImportRegression.java`，纯 JVM、不联网，夹具是内联的字符串（形状照各站导出页
 的真实写法手抄）：五种写法各验字段落位与可比文本形状（`noteExpressShape` 等 5 组）；
@@ -58,7 +61,8 @@
     题录 → RecordImport.into → LocalLibrary → LocalLibrary.index → TextCorpus.match
 
 把题录摘要里的一句原话种进一段无关正文，检出 1 处，出处署到那一篇的题名上，
-命中带着摘要级档位。这一组是 131 条，`CorpusImportRegression` 的 140 条一条没动。
+命中带着摘要级档位，末尾那一条查的是"没有摘要的那条题录重开库之后仍在仅题录档"。
+这一组是 140 条，`CorpusImportRegression` 的 140 条一条没动。
 
 ## 这一条不解决什么
 

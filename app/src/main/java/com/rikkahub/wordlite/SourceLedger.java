@@ -33,6 +33,16 @@ public final class SourceLedger {
         public final ArrayList<Integer> engineChars = new ArrayList<Integer>();
         /** 与 Report.duplicateChars 同口径：各行相加（含 others）等于总重复字符数。 */
         public int duplicateChars;
+        /**
+         * 这一行按可比材料档分开的字数，fullChars + digestChars + abstractChars == duplicateChars。
+         * 各档各报各的：摘要级只说明那句原话在那篇的摘要里，精要级只说明在那篇的"全文精要"里
+         * （万方那一段是网站自己摘的 1,500 字，不是整篇正文），都给不出"整篇比过"的结论。
+         * 同一把尺量出来的三种东西，相加成一个数就等于把覆盖面写没了
+         * （各档的覆盖面实测差多少见 docs/material-tiers.md）。
+         */
+        public int fullChars, digestChars, abstractChars;
+        /** 这一行的材料档。并过条的行取最强的那一档：并进来一条正文，这一行就不再是"只有精要"。 */
+        public String material = "";
         public int hitCount;
         /** 这一行背后并了几个 Source 对象，跨检索源归并的证据。 */
         public int sourceCount;
@@ -54,6 +64,41 @@ public final class SourceLedger {
         public double share(int total) {
             return rate(duplicateChars, total);
         }
+
+        /** 整行都只有摘要可比：界面上"只有摘要可比"那个标注认它，排序也认它。 */
+        public boolean abstractOnly() {
+            return fullChars == 0 && digestChars == 0 && abstractChars > 0;
+        }
+
+        /** 整行都只有精要可读：撞上那句只说明它在那篇的"全文精要"里。 */
+        public boolean digestOnly() {
+            return fullChars == 0 && digestChars > 0;
+        }
+
+        /**
+         * 排序用的档序：正文级 0、精要级 1、摘要级 2，同一档内再比字数。
+         * "仅题录"没有可比文本，进不了语料，也就拿不到命中。
+         */
+        public int tierRank() {
+            if (fullChars > 0) return 0;
+            if (digestChars > 0) return 1;
+            return abstractChars > 0 ? 2 : 0;
+        }
+
+        /** 这一行正文级那部分占整篇的比率：与 share() 同一把尺、同一个 100% 上限。 */
+        public double fullShare(int total) {
+            return rate(fullChars, total);
+        }
+
+        /** 这一行摘要级那部分占整篇的比率。只有摘要可比的行，share() 与它是同一个数。 */
+        public double abstractShare(int total) {
+            return rate(abstractChars, total);
+        }
+
+        /** 这一行精要级那部分占整篇的比率。 */
+        public double digestShare(int total) {
+            return rate(digestChars, total);
+        }
     }
 
     public final ArrayList<Row> rows = new ArrayList<Row>();
@@ -68,6 +113,14 @@ public final class SourceLedger {
     public int numeratorOverflowChars;
     /** 折叠之前的真实篇数：表里只画 MAX_ROWS + 1 行，标题上要说清一共几篇。 */
     public int paperCount;
+    /**
+     * 分子按可比材料档分开的三份账：fullDuplicateChars + digestDuplicateChars + abstractDuplicateChars
+     * == duplicateChars。报告与结果页要说"重复 N 字 = 正文级 X + 精要级 Y + 摘要级 Z"，只能从这里取；
+     * 自己按 hits 再数一遍必然对不上。
+     */
+    public int fullDuplicateChars, digestDuplicateChars, abstractDuplicateChars;
+    /** 各档有几篇命中（折叠前的全量篇数）：一行归一档，按那一行的主档归。 */
+    public int fullPapers, digestPapers, abstractPapers;
 
     private SourceLedger() { }
 
@@ -122,11 +175,24 @@ public final class SourceLedger {
             Bucket bucket = buckets.get(i);
             bucket.row.sourceCount = bucket.sources;
             bucket.row.engine = labels(bucket.row.engineKeys);
+            bucket.row.material = dominantTier(bucket.row);
             ledger.rows.add(bucket.row);
         }
         ledger.paperCount = buckets.size();
+        for (int i = 0; i < ledger.rows.size(); i++) {
+            Row row = ledger.rows.get(i);
+            ledger.fullDuplicateChars += row.fullChars;
+            ledger.digestDuplicateChars += row.digestChars;
+            ledger.abstractDuplicateChars += row.abstractChars;
+            if (row.tierRank() == 2) ledger.abstractPapers++;
+            else if (row.tierRank() == 1) ledger.digestPapers++;
+            else ledger.fullPapers++;
+        }
         Collections.sort(ledger.rows, new Comparator<Row>() {
             public int compare(Row left, Row right) {
+                // 先分档、再比字数：只有摘要可比的那几行整体排在正文级后面。不给它乘折扣系数——
+                // 乘完两档就又变成一个数了，而这两档的差别恰恰在覆盖面，不在那几笔字本身。
+                if (left.tierRank() != right.tierRank()) return left.tierRank() < right.tierRank() ? -1 : 1;
                 if (left.duplicateChars != right.duplicateChars)
                     return left.duplicateChars > right.duplicateChars ? -1 : 1;
                 int a = left.firstStart < 0 ? Integer.MAX_VALUE : left.firstStart;
@@ -216,6 +282,10 @@ public final class SourceLedger {
     private static void charge(Bucket bucket, TextCorpus.Source source, TextCorpus.Hit hit, int valid) {
         Row row = bucket.row;
         row.duplicateChars += valid;
+        int tier = tierOf(source);
+        if (tier == 2) row.abstractChars += valid;
+        else if (tier == 1) row.digestChars += valid;
+        else row.fullChars += valid;
         row.hitCount++;
         if (row.firstStart < 0 || hit.start < row.firstStart) row.firstStart = hit.start;
         if (hit.end - hit.start > row.longestEnd - row.longestStart) {
@@ -256,6 +326,9 @@ public final class SourceLedger {
         for (int i = MAX_ROWS; i < rows.size(); i++) {
             Row row = rows.get(i);
             tail.duplicateChars += row.duplicateChars;
+            tail.fullChars += row.fullChars;
+            tail.digestChars += row.digestChars;
+            tail.abstractChars += row.abstractChars;
             tail.hitCount += row.hitCount;
             tail.sourceCount += row.sourceCount;
             if (row.firstStart >= 0 && (tail.firstStart < 0 || row.firstStart < tail.firstStart))
@@ -273,6 +346,8 @@ public final class SourceLedger {
             }
         }
         while (rows.size() > MAX_ROWS) rows.remove(rows.size() - 1);
+        // 折进来的那一堆里是什么档，折叠行也得说：不然被折掉的正好是那几篇"只有摘要/只有精要"的，就藏起来了。
+        tail.material = dominantTier(tail);
         tail.engine = labels(tail.engineKeys);
         rows.add(tail);
     }
@@ -281,6 +356,34 @@ public final class SourceLedger {
         int total = 0;
         for (int i = 0; i < rows.size(); i++) total += rows.get(i).duplicateChars;
         return total;
+    }
+
+    /**
+     * 入库时写死在 Source.material 上的档：0 = 正文可查（含没记档的老语料与老记录），
+     * 1 = 只有精要可读（手机渲染详情页取回的那一段），2 = 只有摘要或只有题录。
+     * 认不出的档位一律落到最弱那一档——宁可少算成正文，也不能让一栏新加的档名悄悄混进正文级的账。
+     */
+    private static int tierOf(TextCorpus.Source source) {
+        String material = source == null || source.material == null ? "" : source.material;
+        if (DuplicateEngine.MATERIAL_ABSTRACT.equals(material)
+                || DuplicateEngine.MATERIAL_RECORD.equals(material)) return 2;
+        if (DuplicateEngine.MATERIAL_DIGEST.equals(material)) return 1;
+        return 0;
+    }
+
+    /** 一行的主档：三档里最强的那个。并条行只要并进来一条正文，就不再是"只有精要/摘要"。 */
+    private static String dominantTier(Row row) {
+        if (row.fullChars > 0) return DuplicateEngine.MATERIAL_FULL;
+        if (row.digestChars > 0) return DuplicateEngine.MATERIAL_DIGEST;
+        return DuplicateEngine.MATERIAL_ABSTRACT;
+    }
+
+    /** 材料档标注的唯一写法：结果页、HTML、存档都读这里，两处各起一名就一定漂移。 */
+    public static String materialLabel(Row row) {
+        if (row == null) return "正文";
+        if (row.abstractOnly()) return CorpusLedger.materialLabel(DuplicateEngine.MATERIAL_ABSTRACT);
+        if (row.digestOnly()) return CorpusLedger.materialLabel(DuplicateEngine.MATERIAL_DIGEST);
+        return CorpusLedger.materialLabel(DuplicateEngine.MATERIAL_FULL);
     }
 
     /** 检索源键：TextCorpus 把空引擎记成 "local"，两侧必须同一个写法，两张表才对得上。 */

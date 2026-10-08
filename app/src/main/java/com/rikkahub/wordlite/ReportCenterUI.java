@@ -345,6 +345,12 @@ public final class ReportCenterUI extends LinearLayout {
         if (record.machineChars > 0 && !record.aigcUnmeasured)
             foot.append("；机器腔可疑 ").append(record.machineChars).append(" 个");
         if (record.excludedChars > 0) foot.append("；另有结构性文本 ").append(record.excludedChars).append(" 个未参与比对");
+        // 命中按材料档分开说：只报一个总命中数，会把"只有摘要比过"的那几笔读成正文级的结论。
+        String split = DuplicateEngine.materialSplitLine(record.fullTextDuplicateChars,
+                record.digestDuplicateChars, record.abstractDuplicateChars, record.comparedChars,
+                record.fullTextHitPapers, record.digestHitPapers, record.abstractHitPapers);
+        if (split.length() > 0) foot.append("。").append(DuplicateEngine.MATERIAL_SPLIT_LABEL).append("：")
+                .append(split);
         footLine.setText(foot.toString());
         coverage.setText(record.coverageNote);
         if (ReportStore.STATE_PARTIAL.equals(record.state)) {
@@ -487,6 +493,20 @@ public final class ReportCenterUI extends LinearLayout {
         sourceBox.addView(section(record.sourcesTotal > record.sources.size()
                 ? "来源榜 " + record.sourcesTotal + " 篇（列 " + record.sources.size() + " 行）"
                 : "来源榜 " + record.sources.size() + " 篇"), new LayoutParams(-1, -2));
+        // 这次到底比了哪些库、各多少篇：档位直接写在组名里，哪几库只有摘要一眼看得见。
+        if (!record.materials.isEmpty()) {
+            StringBuilder materials = new StringBuilder("比对材料 " + record.materialsPapers + " 篇（")
+                    .append(record.materialsTotal).append(" 组）：");
+            for (int i = 0; i < record.materials.size(); i++) {
+                if (i > 0) materials.append(" · ");
+                materials.append(record.materials.get(i).label()).append(' ')
+                        .append(record.materials.get(i).papers).append(" 篇");
+            }
+            TextView groups = text(materials.toString(), 12, muted);
+            groups.setTag("material-groups");
+            groups.setMinHeight(dp(36));
+            sourceBox.addView(groups, new LayoutParams(-1, -2));
+        }
         if (record.sources.isEmpty()) {
             TextView none = text("本次没有文献命中相似片段。未命中不等于全文没有重复。", 13, muted);
             none.setTag("source-empty");
@@ -498,7 +518,20 @@ public final class ReportCenterUI extends LinearLayout {
             ReportStore.SourceRow row = record.sources.get(i);
             String who = row.others ? "其余 " + row.othersCount + " 篇合计"
                     : (row.title.length() == 0 ? "未署名文献" : row.title);
-            String meta = "重复 " + row.duplicateChars + " 字 · " + percent(row.share)
+            // 材料档排在最前：这一行第一件该说的事是"撞上的时候对面有没有正文可查"。
+            // 并过条的行几档都有字数，那种行把每一份都写出来，别让"正文"两个字盖掉别的档。
+            String tier = row.material.length() == 0 ? "正文" : row.material;
+            StringBuilder parts = new StringBuilder();
+            if (row.fullChars > 0) parts.append("正文 ").append(row.fullChars).append(" 字");
+            if (row.digestChars > 0)
+                parts.append(parts.length() > 0 ? " + " : "").append("精要 ").append(row.digestChars).append(" 字");
+            if (row.abstractChars > 0)
+                parts.append(parts.length() > 0 ? " + " : "").append("摘要 ")
+                        .append(row.abstractChars).append(" 字");
+            int tiers = (row.fullChars > 0 ? 1 : 0) + (row.digestChars > 0 ? 1 : 0)
+                    + (row.abstractChars > 0 ? 1 : 0);
+            String meta = tier + (tiers > 1 ? "（" + parts + "）" : "")
+                    + " · 重复 " + row.duplicateChars + " 字 · " + percent(row.share)
                     + " · 命中 " + row.hitCount + " 处 · " + PaperSources.label(row.engine);
             LinearLayout line = twoLine(who, meta);
             line.setTag("source-row");

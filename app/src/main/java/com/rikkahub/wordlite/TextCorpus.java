@@ -394,6 +394,8 @@ public final class TextCorpus {
 
 
     private final ArrayList<Source> sources = new ArrayList<Source>();
+    /** 与 sources 一一对应：这一篇拿来比对的有效字数（normalize 之后数的）。「比了哪些库、各多少篇」读它。 */
+    private final ArrayList<Integer> sourceChars = new ArrayList<Integer>();
     private final ArrayList<Entry> entries = new ArrayList<Entry>();
     private final GramIndex index = new GramIndex();
     /** 原文窗口折叠串 -> 句子 id：逐字相同的抄袭不依赖倒排，重复度极高的文本也不会漏报。 */
@@ -427,6 +429,8 @@ public final class TextCorpus {
         int sourceIndex = sources.size() - 1;
         indexFingerprints(sourceIndex, text);
         String norm = normalize(text);
+        // 篇数与字数在这儿记，不让界面自己数：被语料上限截掉的句子没进比对，外面数会虚报字数。
+        sourceChars.add(Integer.valueOf(validCount(norm, 0, text.length())));
         ArrayList<int[]> spans = sentences(text);
         for (int i = 0; i < spans.size(); i++) {
             if (entries.size() >= MAX_CORPUS_SENTENCES) return;
@@ -606,6 +610,7 @@ public final class TextCorpus {
 
     public void clear() {
         sources.clear();
+        sourceChars.clear();
         entries.clear();
         index.clear();
         exact.clear();
@@ -620,6 +625,12 @@ public final class TextCorpus {
     }
 
     int sourceCount() { return sources.size(); }
+
+    /** 第 i 篇来源的题录（带材料档）；越界返回 null。比对材料清单（CorpusLedger）逐篇问这里要。 */
+    Source sourceAt(int i) { return i >= 0 && i < sources.size() ? sources.get(i) : null; }
+
+    /** 第 i 篇来源拿来比对的有效字数；越界返回 0。 */
+    int sourceCharsAt(int i) { return i >= 0 && i < sourceChars.size() ? sourceChars.get(i).intValue() : 0; }
 
     /** 因过短而被忽略的句子数，供自检与报告使用。 */
     int skippedSentenceCount() { return skippedSentences; }
