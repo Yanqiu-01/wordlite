@@ -207,3 +207,28 @@
 2. `pwsh tools/test-host.ps1` 全绿；动到界面或渲染的版本再跑 Robolectric（`sh tools/build.sh && sh tools/test.sh`）。
 3. `pwsh tools/build-host.ps1` 出 APK，`pwsh tools/release-version.ps1 -Version x.y.z` 一次完成升版本、提交、打 tag、开 release 并附上可安装 APK。
 4. **每一版都要与微软原生 Word 再对一次版**（常驻职责，不许攒到"以后统一对"）：`pwsh tools/capture-device.ps1` 采手机侧真值 -> `pwsh tools/word-parity.ps1`（分页归属）、`pwsh tools/edge-parity.ps1 -Impl new`（两端对齐右边界）、`pwsh tools/line-break-delta.ps1`（逐行换行点），上标/下标对行高与分页的影响单列一行数字；结果与 `docs/edge-parity-baseline.md` 的基线逐条对比，进步退步都写进去。真值来自桌面 Word 16.0 的 COM 扫描（`tools/word-line-breaks.ps1`、`tools/word-justify-truth.ps1`），手机版微软 Word 的包是仓库根的 `base.apk.1`（`base.apk (1).1` 是 Word Lite 自己的包，别搞混）。
+
+## 第三轮：2.2.0 之后（2026-10-09 起）
+
+### 2.2.0 落地的实测，先记在这
+
+- 两端对齐：桌面 Word 逐字量过的 32 行两端对齐仍 32/32 在 1px 内；整篇列宽逐行量，越过右边界的行 49 → 12，其中 11 条越出去的只是行尾空格占位（墨迹落在边距内侧 3.93px，Word 同排），1 条是图文混排与对齐无关；英文参考行单行最多 617.50px → 488.00px。`w:ind/@w:left` 按有符号值继承（样稿里 15 个 x.y.z 黑体小标题写的是 `left="-458"`）。页数 28、逐段错位 7 条不变。
+- 目录：分页视图 39 条全量，页码右边缘平均差 -0.32px、最大 |差| 1.40px——Word 用的是 `<w:tab w:val="right" w:leader="dot" w:pos="8164"/>`。**真缺陷不在分页视图**：目录行有两个制表符时前导符挂在第一个 tab（页码右边缘跑到 540.93~554.47px），以及 `LeaderTab` 只在 `measure()` 里挂、`styledText()` 不挂，于是编辑视图与阅读视图的目录行既没有右对齐制表位也没有点线。
+- 字库：随包的 CJK 脸按本机原身的全量字形重建（逐字符 advance width 零变化），微软雅黑补了本尊；打包改成压缩存字体，183MB 未压缩字库对应的 APK 是 117,250,875 字节。只剩 ＭＳ 明朝一种替代（本机没有 mincho 字库，桌面 Word 在同一台机器上也是落宋体）。
+- 查重：摘要层独立卡出厂，判据就是正文级那一条 `TextCorpus.bagJudge`（四道门一份出处，阈值取标定台活值 0.72，没另存常数）；真稿 374 句对同领域摘要的天花板量到 0.706，所以这一轮它印 0/374 是对的；每次检索请求都留档（状态/字节/本机解出/源声称总数/形状/开头 180 字）。
+- AIGC：33 条证据清单，系数仍是 `v1-order-only`，界面不给百分比——留出集 AUC 0.271、人类误报 2.03/千句，这个数不足以印。
+
+### 3.0.0 / 4.0.0 的两个大门：把验收钉在实测上
+
+3.0.0（AIGC 内核）按上一节 3.0.x 走，只补一句：语料不许再拿同源改写冒充 AI，公开数据集许可不许再分发的，仓库里只留派生统计量；出厂门槛写死——用真稿那份独立留出（493 句人写 / 262 句机器）量 AUC ≥ 0.85 且人类句子误判 ≤ 2/1000，达不到就只交模型和报告。
+
+4.0.0（检索与自建库）新增两条 2026-10-09 实测出来的硬事实，验收要围着它们写：
+
+- **公开检索口只到摘要，正文级不是靠调阈值能开门的。** 维普检索第一条命中就是这篇样稿本身（题名、哈工大、2024 全对），但它只回题名+摘要 1,987 字，与正文对应句整段袋 Dice 最高 0.536；万方给同一篇 1,001 字摘要，0.538；判据地板是 0.72。
+- **匿名能拿到中文正文的实测只有一条路**：OpenAlex（`language:zh` + `open_access.is_oa:true`）→ `best_oa_location.pdf_url` 下 PDF。中文库 543 万条里 OA 29.1 万条；样稿题目 4 种检索式 34 条里 15 条带 pdf_url；实下 12 个成 4 个，单篇 700–1,345KB / 6,600–12,355 字；`cursor=<next_cursor>` 翻页实测连打 8 次全 200。两个现成 bug 堵着：`PaperSources.fullText()` 第一行就把 `.pdf` 链接丢了，`HttpTransport.MAX_FULL_TEXT = 512KB` 会把 700KB 起的 PDF 截断。判据本身是活的：拿一篇 OA 论文自己的 32 句导进自建库跑 `TextCorpus.match` 得 100.0% / 25 处命中。
+- 拿不到的路也记下来，别再试第二遍：哲社中心 `readDownloadUrl` 与 `getMinioSign` 都回"请先登录"；维普 `qikan` 412 WAF；万方详情页所有 URL 回同一个 168,407 字节的 SPA 壳；Europe PMC 全文通道 12 次抓取全 0 字；CORE 无 key 时 200/429/500 随机；没有任何公开镜像能下到中文硕士论文全文。
+- 4.0.0 的验收因此是：真跑一轮样稿能报出"可比正文 N 篇"且 N > 0（走 OA 全文或用户自建库，二者都要通），报告里带"把这篇下进自建库"的入口，并且把 app 的 PDF 取字量与 PyMuPDF 的差距（同一份扫描字体 PDF：1,846 字对 9,414 字）查清是解析漏字还是必须 OCR。
+
+### 采真值的工具
+
+`tools/capture-device.ps1` 原来把每个 `.class` 平铺在 d8 命令行上，Windows 直接报"文件名或扩展名太长"，现在先 jar 再喂 d8。门禁三条命令本身没变：`tools/word-parity.ps1`（分页归属）、`tools/edge-parity.ps1 -Impl new`（右边界）、`tools/line-break-delta.ps1`（逐行换行点）。
