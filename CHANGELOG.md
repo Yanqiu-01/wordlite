@@ -13,17 +13,20 @@
 
 
 
-## 未发布（排版对账：把 `snapToGrid=false` 那一族的行高抬到 Word 的实测值）
+## 未发布（排版对账：按 Word 实测 em 抬行高这一族，量死之后改回原状）
 
-**一句话：行高这一族单独打开后，逐行行高误差中位 -0.767px 变 0.000px、每页累计 0.79 行变 0.00 行（这两条第一次过线），但段落页归属从 7 段错页退到 70 段、页数 28 变 29，所以开关关掉留在代码里；顺带把"按字库 ascent+descent 算行高"这条路用度量表实测否掉了。**
+**一句话：按 Word 实测 em 抬行高，逐行行高的 p90 确实从 2.533px 降到 0.934px，可段落页归属从 7 段错页涨到 70 段、页数 28 变 29；这一轮又把它收到只剩量过的那 140 行，照样 68 段错页、29 页——第一个兜不住的是第 13 页（余量 11.0px，那一页要吃 45.7px）。钱不是多花了，是我们别处每页多占把余量吃光了，所以 app/src 里这套抬法整个改回原状，不留关掉的开关。**
 
 - 新增 `tools/parity-six.ps1`：第 0 节那六条一次跑完（真机采样、行高探针、页归属、换行点、右边界、逐行行高），只调已有脚本不重新定义量法；Word 真值走缓存，不重开 Word 会话（Word 只允许一个会话）。每一轮的输出带 `head_sha` 与 `lines-all.tsv` 的 sha，对不上就作废。
-- 行高口径（`WordLineHeights.MEASURED_AUTO_NO_GRID`，出厂 `false`）：带 `w:line` + `lineRule=auto` + `snapToGrid=false` 的段落，且撑起这一段行高那张脸在 Word 实测表里（宋体 1.31335 em、Times 1.17665 em），行高就按实测 em 一步算成小数（`measuredFamilyPt`），画出来的行盒 23px 变 26px、分页再补 0.267px 的小数。`snapToGrid=true` 那 268 行、目录点线行、`exact` / `atLeast`、没量过的脸（黑体等）不参与。
-- 打开后的真机对账（同一篇 `tests/samples/input-liu.docx`，CDY-AN90，改完重打包并 `adb install -r` 再采）：**涨**——逐行行高误差中位 -0.767px → 0.000px（n=91）、`|误差|` p90 2.533px → 0.934px、每页累计 0.79 行 → 0.00 行、目标队列每行 23.0px（差 -3.267）→ 26.2725px（差 +0.006，Word 26.267px）、纯西文参考文献行 23.0px → 23.54px（Word 23.533px）；**退**——段落页归属 7 段错页 → **70 段**（exact 96.6% → 66.0%，全部是晚一页，首个错页段从 para 121 变 para 163），总页数 28 → **29**（Word 28）。这一族全篇只多算 +493.6px（0.57 个版心页）就换来这个退步，原因是 Word 的页尾本来只剩 2.1~5.7px（第 9 节实测），我们另一处每页多占的钱必须同时定出来，所以这一族关掉，逐页高度对平排在下一步。
-- 关掉后与改前逐字节相同：`lines-all.tsv`、`pages.tsv` 的 sha 与改前基线一字不差（`D9822E2C3396D6EC` / `921A8FAB4D3D09F8`），六条读数回到 `-0.767 / 2.533 / 0.79 行 / 62.4% / 0 超`。
+- 上一轮（tag `lh-family1`）那一族抬的是"带 `w:line` + `lineRule=auto` + `snapToGrid=false` 就抬"：真机两份逐行账单相减，抬了 283 行 / +624.4px = 0.72 个版心页。目标队列只占其中 140 行 +457.4px 与纯西文 68 行 +36.2px，剩下 75 行 / +130.8px 落在从没量过 Word 行距的格子（10.5pt、14pt、15pt、`w:line=276/280/288`）——那部分是外推，本轮不再要它。
+- 本轮把抬法收到"量过那一格"再量（一次上机跑 9 档重放，`artifacts/agent-typeset/run-repaginate.ps1`）：1 档只抬中文脸 + 12pt + `w:line=300` + `auto` + `snap=false`（全篇 140 行 / +457.4px，就是第 17.3 节那笔钱），错页段 9 → 68、28 页 → 29 页；2 档再加撑起行高的是 Times 的 12pt/`w:line=300`（再 68 行 / +36.2px），页归属与 1 档一字不差。所以"上一轮抬宽了"不是原因，140 行就够崩。
+- 定位到崩页的位置（量台新写逐页账单 `repag-pagefill.tsv`）：第 13 页只剩 11.0px 余量，这一页要吃的钱是 45.7px（设备段 113/114/115 = Word 段 120/121/122），段尾 Word 段 122「(2)多孔Cu辅助TLP反应区…」被推到 14 页，后面整段路 +1 页。同样兜不住的还有第 15、16、24、26 页；全篇 28 页里有 9 页余量 ≤ 14.5px（第 26 页只有 2.0px）。HEAD 那 7 段 -1 错页里的第一段（Word 段 121）也在第 13 页，方向相反。
+- 钉住一条读数陷阱：整族那次"中位 -0.767px → 0.000px、每页累计 0.79 行 → 0.00 行"不等于行高排对了。同一份逐行账单里 70 行 `snapToGrid=true` 的行改前改后都是 -0.767px，这一族从没抬过它们；中位只是恰好掉进 10 行并列 0 的那一段，而第 4 条本来就是中位乘每页行数。p90 2.533px → 0.934px 是真的。
+- 改回原状之后是惰性的：`pwsh tools/parity-six.ps1 -Tag lh-revert1` 六条与 `lh-base2` 一字不差（-0.767px / 2.533px / 0.79 行 / 62.4% / 0 超），`lines-all.tsv` sha `D9822E2C3396D6EC`、`pages.tsv` sha `921A8FAB4D3D09F8`（601 行 / 28 页）。
 - 否掉一条走不通的路：手机字库换成 Windows 原字库之后，"行高取本脸字体的 ascent+descent 乘行距"仍然算不出 Word 的数。本机 Word 真正用的 `simsun.ttc`（与打包的 `song.ttc` 同一套度量）win=1.000 em、hhea=1.000 em、hhea+lineGap=1.1406 em，而 Word 的中文行高反推是 1.3134 em；Times 表里 1.1074 / 1.1499 em，Word 要 1.1767 em。字库同源也推不出来——行高只能按脸取 Word 实测值，测量命令写在 `docs/layout-parity-target.md` 第 17.2 节。
 - 顺手量清了一件事：`snapToGrid=false` 的中文行现在每行 23px，那 23px 是 **Times 的 1.1074 em** 经两步取整垫出来的，宋体自己那张表只给 20px。所以"改比值"改的其实是西文脸，先把脸选对才有意义。
-- 测试：`tests/WordLineHeightRegression.java` 行高断言 59 → 78 条，新增的覆盖这一族的四种排除条件（`snapToGrid=true`、目录点线行、`exact` / `atLeast`、没量过的脸）、纯西文行按西文脸实测 em、混排行按字符选脸、以及出厂值为 false 这条。`tools/test-host.ps1` 全绿。
+- 量台升级（`artifacts/agent-typeset/`，不进包）：新增 `family_ea` / `family_ea_latin` 两档重放（抬哪一格的判定放在量台一侧，与真机分类一致，引擎侧不留开关）；新增逐页账单 `repag-pagefill.tsv`（每页每段用了多少、页尾垂下多少、页容量多少）；重放补上引擎给每段的页尾垂下量 `hang`（以前一律按 0，比引擎本身严）；`d8` 改收一个 jar——几百个 `.class` 路径会撞 Windows 命令行长度上限，症状只有"文件名或扩展名太长"。
+- 测试：`tests/WordLineHeightRegression.java` 回到 63 条断言（含"实测 em 不参与分页"这条出厂值断言，就是本轮否决的落地凭据），`ScriptRegression` 65 条、`Regression` 72 条、`TableGeometryRegression` 31 条全过，app 侧 `javac` 82 个文件通过。整条 `tools/test-host.ps1` 现在跑不通，原因不在排版：别人未提交的 `tests/PdfExtractProbe.java` 引用了 `PdfFile.FONT_STATS`，HEAD 里没有这个符号，测试整批编译不过。
 
 ## 2.3.0（`versionCode 45`）
 
