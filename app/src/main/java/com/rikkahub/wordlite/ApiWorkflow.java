@@ -71,6 +71,8 @@ public final class ApiWorkflow {
     private String preRewriteText = "";
     private TextSelection lastScanned;
     private boolean scanShowsDuplicates = true;
+    /** 这一轮用户要的是联网查重，但检索设置里联网是关着的——结果页要认这件事。 */
+    private boolean webAskedOff;
     private TextView jobLabel;
 
     public ApiWorkflow(Activity activity, Host host) {
@@ -96,8 +98,12 @@ public final class ApiWorkflow {
         if (job != null || host.document() == null) return;
         final ArrayList<String> ids = new ArrayList<String>();
         final ArrayList<String> titles = new ArrayList<String>();
-        titles.add("本机查重（自建库）"); ids.add("local");
-        titles.add("联网查重（内置文献库）"); ids.add("web");
+        /* 一次点到底：自建库和联网检索一起跑，不再让用户先选一种再补另一种。
+           以前"本机查重（自建库）"和"联网查重（内置文献库）"是两格，看着像两套判据——
+           其实联网那一格本来也会把自建库index进去，分开摆只是把人绕晕。离线那一格留着，
+           名字里写清它比的是什么：飞机上、没有信号的地方，它照样能出数。 */
+        titles.add("查重（自建库 " + library.size() + " 篇 + 联网检索）"); ids.add("scan");
+        titles.add("只查自建库（不联网）"); ids.add("local");
         titles.add("AIGC 检测"); ids.add("aigc");
         titles.add("自建库（" + library.size() + " 篇）"); ids.add("library");
         titles.add("检索设置"); ids.add("engines");
@@ -112,8 +118,8 @@ public final class ApiWorkflow {
         new AlertDialog.Builder(activity).setTitle("查重")
                 .setItems(titles.toArray(new String[titles.size()]), (dialog, which) -> {
             String id = ids.get(which);
-            if ("local".equals(id)) scan(false, false);
-            else if ("web".equals(id)) scan(true, false);
+            if ("scan".equals(id)) scan(true, false);
+            else if ("local".equals(id)) scan(false, false);
             else if ("aigc".equals(id)) scan(false, true);
             else if ("library".equals(id)) libraryMenu();
             else if ("engines".equals(id)) engineSettings();
@@ -242,9 +248,13 @@ public final class ApiWorkflow {
         AigcNgramModel.loadFromAssets(activity);
         // 随包的 Adobe-GB1 表也装载一次：方正那一族期刊 PDF 的码到字全靠它，缺表时那一路字按读不出算。
         CidUnicodeTables.loadFromAssets(activity);
-        final ApiClient.Task task = begin(aigcOnly ? "AIGC 检测" : useWeb ? "联网查重" : "本机查重");
+        final ApiClient.Task task = begin(aigcOnly ? "AIGC 检测"
+                : useWeb ? "查重（自建库 + 联网）" : "查重（只查自建库）");
         final EngineSettings options = engine.copy();
         final boolean wantWeb = useWeb && options.web && !aigcOnly;
+        /* 点了合并那一格、可 检索设置 里"联网"是关着的：这一轮实际只比了自建库。
+           这事必须写在结果页上——不然用户以为查过了全网。 */
+        webAskedOff = useWeb && !options.web && !aigcOnly;
         worker = new Thread(() -> {
             try {
                 TextCorpus corpus = new TextCorpus();
@@ -313,6 +323,9 @@ public final class ApiWorkflow {
         LinearLayout box = column(); box.setPadding(dp(16), dp(8), dp(16), dp(8));
         if (scanShowsDuplicates && !result.retrievalIncomplete) {
             box.addView(label(String.format(Locale.CHINA, "总相似度比 %.2f%%", result.overallRate), 20));
+            if (webAskedOff)
+                box.addView(label("检索设置里\"联网检索\"是关着的：上面这个数只比了自建库的 "
+                        + result.localDocuments + " 篇材料，没有查过文献库。", 12));
             if (result.windowsPlanned > 0) box.addView(label(coverageLine(result), 12));
             box.addView(label(String.format(Locale.CHINA, "去除引用重复比 %.2f%%  ·  自编率 %.2f%%",
                     result.excludingCitationsRate, result.selfWrittenRate), 13));
@@ -332,6 +345,10 @@ public final class ApiWorkflow {
             // A run that consulted nothing must not read as a clean document: 0.00% here would be
             // the most expensive number in the app to get wrong.
             box.addView(label("未完成查重", 20));
+            /* 手机自己的网络事实排在原因前面。检索站不通不等于手机没网，
+               把两件事混成一句，用户就会去开关飞行模式，而那正是没用的一步。 */
+            String phoneNetwork = NetworkStatus.line(activity);
+            if (!phoneNetwork.isEmpty()) box.addView(label(phoneNetwork, 13));
             box.addView(label(result.retrievalReason == null
                     ? "检索没有取回可比对的文献，相似度类指标无法成立" : result.retrievalReason, 13));
             box.addView(label("相似度类指标不成立，只有 AIGC 倾向是本机计算的结果。", 11));

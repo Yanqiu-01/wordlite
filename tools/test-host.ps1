@@ -88,6 +88,8 @@ Add-Suite "DetectionFloor"       @("tests/corpus", "$out/detection-floor-library
 Add-Suite "AbstractLayerRegression" @("tests/corpus")
 # 字体替代表的账：标题写着华文新魏的稿子不许再悄悄变宋体，替代是谁、缺了哪些字，都要说得出。
 Add-Suite "FontSubstitution"      @("tests/samples/input-liu.docx")
+# 结果页那句"手机有没有网"的判据：手机有网时不许说手机没网（真机被这句话坑过一次）。
+Add-Suite "NetworkStatusRegression" @()
 if (-not $SkipRealDoc) {
     $doc = if ($RealDocx) { $RealDocx } else { Join-Path $root "tests/samples/input-liu.docx" }
     if (Test-Path $doc) {
