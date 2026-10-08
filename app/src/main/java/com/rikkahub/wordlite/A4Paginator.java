@@ -145,6 +145,14 @@ public final class A4Paginator {
         return sectionOf(document, sectionIndex).lineGridPitchTwips;
     }
 
+    /**
+     * 这一项是不是"分节符开出来的那一页"的第一项。是则它的段前距不画（PageBreaker.Item.sectionStart
+     * 那条真值）。文档第一节排除在外：它那一页不是分页符推上来的。
+     */
+    private static boolean sectionStart(SectionBatch batch, List<SectionBatch> batches) {
+        return batch.items.isEmpty() && batches.size() > 1 && batches.get(0) != batch;
+    }
+
     private PageResult measureAndBreak(DocxDocument document,
                                        Map<Integer, Integer> pageOf, int totalPages,
                                        HashMap<DocxDocument.ParagraphBlock, ParagraphLayout> cache) {
@@ -207,6 +215,7 @@ public final class A4Paginator {
                     item.after = p.images.isEmpty()
                             ? PageGeometry.twips(effectiveSpacingTwips(p, false, gridPitch)) : 0;
                     item.pageBreakBefore = p.format.pageBreakBefore;
+                    item.sectionStart = sectionStart(batch, batches);
                     item.keepLines = p.format.keepLines;
                     item.keepNext = p.format.keepNext;
                     item.widowControl = p.format.widowControl;
@@ -242,6 +251,7 @@ public final class A4Paginator {
                     picture.after = imageIndex == p.images.size() - 1
                             ? PageGeometry.twips(effectiveSpacingTwips(p, false, gridPitch)) : 0;
                     picture.pageBreakBefore = !textPresent && imageIndex == 0 && p.format.pageBreakBefore;
+                    picture.sectionStart = sectionStart(batch, batches);
                     picture.widowControl = false;
                     picture.keepLines = true;
                     picture.sectionIndex = sectionIndex;
@@ -266,6 +276,7 @@ public final class A4Paginator {
                     // breaks inside a row that is taller than the page, which still lands here
                     // as its own overflowing page.
                     item.widowControl = false; item.keepLines = true;
+                    item.sectionStart = sectionStart(batch, batches);
                     item.sectionIndex = sectionIndex;
                     batch.items.add(item); measured.put(item, layout);
                 }

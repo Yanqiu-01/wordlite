@@ -393,7 +393,46 @@ engine-vs-mirror mismatch=0，228 块全等）。可配对边界 166 条。
 另外更正第 13 节转过来的一句话：我方第 11 页那 339.8 px 差额**不是段前后距**（该页段距只有 42.7 px），
 而它多半也不是引擎真多算了 340 px——逐页"逐项高"是按块的起始页记账的，跨页大块会把钱记错页。
 下一轮要让探针按 PageBreaker 的实际消费顺序逐 fragment 打账（item id / before gap / height / after gap），
-再与 Word 的 page_stack 按内容对齐，而不是按页号硬拼。
+再与 Word 的 page_stack 按内容对齐，而不是按页号硬拼。（第 15 节已经把这页的账定下来了。）
+
+## 15. 页顶那条：分节符开出来的那一页不画段前距（已修），章标题那一半还没定死
+
+真值（Word 16.0.20430.20092 COM，`artifacts/agent-layout-verify/gaps/page-top.tsv`，
+sha 前 8 位 7F2B84E1）：
+
+| 量 | Word 实测 | 当时我方计费 |
+| --- | --- | --- |
+| 目录页文字区顶 | 107.7 pt | - |
+| "目 录"标题行框顶 | 110.05 pt | - |
+| 标题上方净空间（扣掉 13 页 min=max 的自然页顶偏移 0.40px） | **2.73 px** | **24.0 px** |
+| 标题下方 after（= 标题行顶到下一行顶 49.80px - 行高 30.60px） | **17.8~19.2 px** | 19.2 px |
+
+after 是对的，**before 才是错的**。触发方式在 XML 里：`w:p[3]`（空段）带 `w:sectPr`（`w:type` 缺省
+=nextPage），所以第 2 页是**分节符**开的；标题自己没有 `w:pageBreakBefore`，而 `PageBreaker` 只对
+`item.pageBreakBefore` 归零段前距（那里的注释早就写了"也该管节首"，但代码一直没实现）。
+
+**已修**：`A4Paginator.sectionStart(batch, batches)` 给"分节符开出来的那一页的第一项"打
+`PageBreaker.Item.sectionStart`，`PageBreaker` 对它不画 before。文档第一节的第一段排除——那一页不是
+被分页符推上来的，段前距照旧画（Host 两条断言把这两侧都钉住）。第 2 页因此少计 24.0 px。
+
+**没修的那一半，理由是不确定**：7 个真 `w:pageBreakBefore` 的章标题，声明 before=1 行=24.0 px，
+Word 在页顶实际给的只有 3.13 px（p4/p15/p24：上一页末段 after=10 pt）或 16.73 px
+（p7/p20/p22/p26：上一页末段 after=0）——**Word 从不给 24 px**，但这 7 页的差别只与"上一页末段有没有
+after 空间"相关，规则没定死之前不改 `pageBreakBefore` 的现有行为（第 0 节第 3 条：不许为了让页码对上
+而调参）。要补的真值：页顶上方那一段到底等于 max(上一页 after, 本段 before)、还是被上一页 after 挤掉。
+
+同一条账上还挂着三笔，都量到了但都没动：
+
+1. **黑体标题行高偏高**：用"下一行顶 - 声明 after"反推 Word 的黑体单行高，14pt/1.25 得 23.7~26.0px、
+   15pt/1.25 得 25.5~28.8px、18pt/1.25 得 31.7~34.0px，约 1.02~1.13 em x 倍数；而我方 HEAD 是
+   27.455/29.416/35.3 px，cand（拿宋体 1.31335 em 去套黑体）是 30.24/32.40/38.88 px。34 条标题段
+   约多算 150 px，且这条正是"实测行高不能拿宋体的比值套所有中文脸"的证据——要单独量黑体再进表。
+2. **`w:contextualSpacing` 118 次全为 true，解析器 0 处处理**（111 处在表格单元格，7 处在正文，
+   其中 3 段声明 beforeLines=50 = 我方计的 12 px）。Word 的语义是同样式相邻段不加间距，也就是这 12 px
+   我们多半多算了；需要真值确认哪些相邻对被抑制。
+3. **`w:beforeAutospacing/w:afterAutospacing` 共 85 个 `w:spacing`（63 个 true）**，全部在表格单元格内，
+   与 `before=100 after=100 line=300` 成对出现；我们照 5pt+5pt 记账，属性本身不解析。
+
 
 ## 13. 发版重跑记录（`parity-gate.ps1`，一条命令一行结果）
 
