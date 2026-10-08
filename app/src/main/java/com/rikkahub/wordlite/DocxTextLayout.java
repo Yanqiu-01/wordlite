@@ -95,9 +95,8 @@ public final class DocxTextLayout {
         }
         Spacing spacing = null;
         if (text.length() > 0) {
-            LineHeight lh = lineHeightOf(paragraph);
-            spacing = new Spacing(f, 1f, lh.pt,
-                    wordAscentFraction(paragraph), lineGridPitchTwips, lh.measured);
+            spacing = new Spacing(f, 1f, wordSingleLineHeightPt(paragraph),
+                    wordAscentFraction(paragraph), lineGridPitchTwips, lineHeightMeasured(paragraph));
             text.setSpan(spacing, 0, text.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
             applyAutoSpace(text, f);
             // The leader is built with the styled text (applyTabLeaders) so that the reading view
@@ -717,8 +716,8 @@ public final class DocxTextLayout {
      * how Word picks the tallest line box per-line for "auto" line spacing.
      */
     private static float wordSingleLineHeightPt(DocxDocument.ParagraphBlock p) {
-        // 口径选择在 lineHeightOf（本轮这一族走 Word 实测 em，其余走字体表），扫描本身在 WordLineHeights.tallest。
-        return lineHeightOf(p).pt;
+        // 扫描本身在 WordLineHeights.tallest（纯 Java，Host 侧测得到），这里只负责喂字体度量。
+        return WordLineHeights.tallest(p, METRICS, effectiveDefaultFamily(p)).pt;
     }
 
     /**
@@ -727,29 +726,8 @@ public final class DocxTextLayout {
      * 行为一个字节都不改——这条改动必须可逆，不许顺手把没量过的字体一起改了。
      */
     static boolean lineHeightMeasured(DocxDocument.ParagraphBlock p) {
-        // 与 wordSingleLineHeightPt 同一次判定（lineHeightOf）：谁撑起行高与行高多少必须出自同一次比较。
-        return lineHeightOf(p).measured;
-    }
-
-    /** 一次扫描给两个结论：这一段行高多少 pt，以及这个数是不是 Word 实测 em 撑起来的。 */
-    private static final class LineHeight {
-        final float pt;
-        final boolean measured;
-        LineHeight(float pt, boolean measured) { this.pt = pt; this.measured = measured; }
-    }
-
-    /**
-     * 行高的口径按段选一次，只扫一遍 run：
-     *   本轮这一族（带 w:line + lineRule=auto + 不吃文档网格，且撑起行高那张脸在 Word 实测表里）
-     *   走 Word 实测 em；其余段落照旧走 WordLineHeights.tallest 的字体表口径，与改动前一字不差。
-     *   两件事必须一次扫出来：谁撑起行高与行高多少必须出自同一次比较（见 WordLineHeights.tallest）。
-     */
-    private static LineHeight lineHeightOf(DocxDocument.ParagraphBlock p) {
-        String fallback = effectiveDefaultFamily(p);
-        float measured = WordLineHeights.measuredFamilyPt(p, METRICS, fallback);
-        if (measured > 0f) return new LineHeight(measured, true);
-        return new LineHeight(WordLineHeights.tallest(p, METRICS, fallback).pt,
-                WordLineHeights.carries(p, METRICS, fallback));
+        // 与 wordSingleLineHeightPt 共用同一次扫描：谁的 pt × 比值最高谁说了算，不是比值单独最大。
+        return WordLineHeights.carries(p, METRICS, effectiveDefaultFamily(p));
     }
 
     /** 把 FontManager 的字体度量喂给纯 Java 的行高扫描。 */
@@ -1228,11 +1206,10 @@ public final class DocxTextLayout {
                                                   float pxPerPoint) {
         if (text == null || text.length() == 0 || paragraph == null) return;
         if (paragraph.format.lineSpacingTwips > 0) {
-            LineHeight lh = lineHeightOf(paragraph);
             float scale = pxPerPoint / PageGeometry.points(1f);
             text.setSpan(new Spacing(paragraph.format, scale,
-                            lh.pt, wordAscentFraction(paragraph), -1,
-                            lh.measured),
+                            wordSingleLineHeightPt(paragraph), wordAscentFraction(paragraph), -1,
+                            lineHeightMeasured(paragraph)),
                     0, text.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
         }
     }
