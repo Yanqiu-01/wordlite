@@ -310,6 +310,45 @@ public final class ZeroRateAudit {
                     && f.retrievalReason.contains("零共同词"),
                     "F：可比对象一篇都没进语料，0.00% 被标成未完成，不许读成这篇干净");
 
+            // ---- D2：连接根本没建成。真机那一轮就是这一档，而它要的下一步与"可比正文 0 篇"相反 ----
+            String liveBase = "http://127.0.0.1:" + server.getAddress().getPort();
+            pointAll("http://127.0.0.1:1");
+            requests.clear();
+            DuplicateEngine.Report dead = scan(new TextCorpus(), true, engines(ALL_ENGINES));
+            dump("D2 联网：九个源的地址全部指向没人监听的端口（手机没有网络出口：连接层就失败，站点一个字都没答）", dead, 0);
+            check(requests.isEmpty(), "D2：连接没建成，桩一次请求都没收到——这一档不是站点拒绝回答");
+            check(dead.hostsAsked >= DuplicateEngine.MIN_HOSTS_FOR_NO_ROUTE && dead.hostsReached == 0
+                            && dead.hostsUnreachable == dead.hostsAsked,
+                    "D2：连通那本账记成 " + dead.hostsAsked + " 个里通了 " + dead.hostsReached + " 个");
+            check(DuplicateEngine.noNetworkExit(dead),
+                    "D2：这一轮认成手机没有出口，而不是可比正文 0 篇");
+            check(dead.retrievalReason != null
+                            && dead.retrievalReason.startsWith("手机这次没能连上任何检索源")
+                            && dead.retrievalReason.contains("个检索源里通了 0 个"),
+                    "D2：那一句先说没连上，数字跟在原因后面：" + dead.retrievalReason);
+            check(dead.retrievalReason != null && dead.retrievalReason.contains("phone-gateway"),
+                    "D2：那一句紧跟一步能救回来的：连 WLAN/移动数据，或跑 tools/phone-gateway.ps1");
+            check(ReportStore.STATE_UNFINISHED.equals(state(dead))
+                            && !ReportStore.recordFor(dead, "audit.docx").metricsValid(),
+                    "D2：状态是未完成查重，比率不印给用户");
+            check(!DuplicateEngine.noNetworkExit(null), "D2：报告为空时不猜这一档");
+            DuplicateEngine.Report half = new DuplicateEngine.Report();
+            half.hostsAsked = 10; half.hostsReached = 3; half.hostsUnreachable = 7;
+            check("10 个检索源里通了 3 个，其余 7 个连接没建成".equals(DuplicateEngine.hostTallyLine(half)),
+                    "D2：通了 3 个与通了 0 个是两句相反的话：" + DuplicateEngine.hostTallyLine(half));
+            check(!DuplicateEngine.noNetworkExit(half),
+                    "D2：只要有一个源答过话就不算没有出口——那一步是换问法，不是修网线");
+            check(DuplicateEngine.reachOf(new ApiClient.Failure("网络连接失败: Connection refused", 0)) < 0
+                            && DuplicateEngine.reachOf(new ApiClient.Failure("请求超时", 0)) < 0
+                            && DuplicateEngine.reachOf(new ApiClient.Failure("试过的路都没通：2", 0)) < 0,
+                    "D2：拨不上、超时、选路用尽三类全部记成没通");
+            check(DuplicateEngine.reachOf(new ApiClient.Failure("HTTP 403", 403)) > 0
+                            && DuplicateEngine.reachOf(new ApiClient.Failure("HTTP 429", 429)) > 0,
+                    "D2：403/429 是答了话在挡人，不许算成没通");
+            check(DuplicateEngine.reachOf(new ApiClient.Failure("已取消", 0)) == 0,
+                    "D2：取消两边都不记，免得把用户自己停掉算成站点故障");
+            pointAll(liveBase);
+
             mode = "ontopic";
             requests.clear();
             ArrayList<String> single = new ArrayList<String>();
@@ -364,7 +403,12 @@ public final class ZeroRateAudit {
             return thread;
         }));
         server.start();
-        String base = "http://127.0.0.1:" + server.getAddress().getPort();
+        pointAll("http://127.0.0.1:" + server.getAddress().getPort());
+        return server;
+    }
+
+    /** 九个源一次性指向同一个地址：端口换成没人监听的那一个，就是"手机没有出口"那一档。 */
+    private static void pointAll(String base) {
         PaperSources.setEndpoint("cnki", base + "/cnki");
         PaperSources.setEndpoint("cqvip", base + "/cqvip");
         PaperSources.setEndpoint("wanfang", base + "/wanfang");
@@ -374,7 +418,6 @@ public final class ZeroRateAudit {
         PaperSources.setEndpoint("semantic-scholar", base + "/semantic-scholar");
         PaperSources.setEndpoint("europepmc", base + "/europepmc/search");
         PaperSources.setEndpoint("arxiv", base + "/arxiv");
-        return server;
     }
 
     /** 这一路要不要报错：mixed 只留 crossref 活口，error 全灭，其余全 200。状态与响应体分开算。 */
