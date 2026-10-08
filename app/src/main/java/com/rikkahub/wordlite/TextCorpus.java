@@ -28,6 +28,10 @@ public final class TextCorpus {
      *
      * 停在 0.50 而不去 0.45：0.45 还能再多认回约 5 个点，但头顶空档只剩 0.09，而文库上了规模之后
      * 偶发撞车要吃的正是这一档。等真实文库够大、负例天花板仍压在 0.36 以下，再往 0.45 走。
+     *
+     * 袋口径通道（SIMILAR_BAG_DICE）进产品之后，上面那对 19.2% / 26.4% 变成 50.2% / 53.8%：两档都被
+     * 袋口径接走一大截，这一档单独挣到的从 7.2 个点薄成 3.7 个点。它没有被取代——袋口径在 pruned /
+     * split-commas 两档反过来低于三元组，两条判据各管一种改写形状，谁也不许拆谁。
      */
     public static final float SIMILAR_DICE = 0.50f;
     /** 长短悬殊时改用的三元组包含率下限：整句原文嵌进改写过的长句。标定台上这一列不构成约束——
@@ -142,6 +146,28 @@ public final class TextCorpus {
     }
 
     /**
+     * 第三条判据：字符袋 Dice 的下限（D2 落地）。它不借上面任何一档——0.72 是量出来的：同一批 20 段
+     * 真人负例在袋口径下能摸到的最高值是 0.577，地板 = 天花板 + 0.14（与 SIMILAR_DICE 同一条规矩），
+     * 取整到 0.72。为什么值得为它多开一条通道：逐字替换 25% 那一档，三元组 Dice 只剩 0.42，逐句过线率
+     * 24.1%，而袋口径 100%（表在 docs/paraphrase-robustness.md 的 D2）。
+     *
+     * 它只作 OR 增补，一条现判据也不替换：同一批样本上袋口径在 pruned / split-commas 两档反而更低
+     * （82.9% / 16.8% 对三元组的 96.3% / 32.6%），顺序证据丢了就是丢了。落点跟包含率那条一样，
+     * 只报两边实际共享的那几段（clipToSharedBlocks），改写过的字不许跟着红。
+     */
+    public static final float SIMILAR_BAG_DICE = 0.72f;
+    /** 抗改写实测台（RewriteRobustnessRegression -Drrbag）扫这一档用的活值，产品路径一次也不碰。 */
+    private static float bagDiceFloor = SIMILAR_BAG_DICE;
+
+    static void overrideBagFloor(float dice) {
+        bagDiceFloor = dice;
+    }
+
+    static void restoreBagFloor() {
+        bagDiceFloor = SIMILAR_BAG_DICE;
+    }
+
+    /**
      * 包含率命中的落点要裁到两边实际共享的那一段。一段共享块最短要长到这个长度（折叠串的单位数）：
      * MIN_SHARED_GRAMS 枚首尾相接的三元组正好盖住 5 个字符，再短只是撞上了同一个术语，不是一段抄来的话。
      */
@@ -193,6 +219,8 @@ public final class TextCorpus {
         final long[] signature;
         final int sourceIndex;
         final int chars;
+        /** 字符袋，第一次被袋口径问到才算（见 bestMatch）。一篇文献进来未必会被问到，不必都算。 */
+        char[] bag;
         Entry(String key, long[] grams, long[] signature, int sourceIndex, int chars) {
             this.key = key;
             this.grams = grams;
@@ -208,6 +236,8 @@ public final class TextCorpus {
         int[] map;
         long[] grams;
         long[] signature;
+        /** 同上：袋口径用到才算一次。 */
+        char[] bag;
         int chars;
         int start, end;
     }
@@ -772,7 +802,10 @@ public final class TextCorpus {
         int bestId = -1;
         boolean bestExact = false;
         boolean bestViaContainment = false;
+        boolean bestViaBag = false;
         int evaluated = 0, passed = 0;
+        /* 袋口径的查询侧袋子：一个片段算一次，压在下面那个循环里就不会变成 400 次排序。 */
+        char[] queryBag = null;
         /* 候选裁剪按两条通道里更宽的那一档：Dice 那条（LENGTH_BOUND_FLOOR 与活值 diceFloor 取小）和
            包含率那条自己的地板。连 Dice 上界都够不到任何一条线的候选，算一次真实交集也是白费。 */
         float reachFloor = Math.min(Math.min(LENGTH_BOUND_FLOOR, containmentDiceFloor), diceFloor);
@@ -814,6 +847,19 @@ public final class TextCorpus {
                 score = Math.max(dice, containment * 0.8f);
                 similar = true;
             }
+            /* 前两条判据都没收下这一对，才问顺序无关的那一条：字几乎都换了、换不掉的还是那批字。
+               分值不抬——这一档报出去的仍是字面三元组的 Dice，改写越重报出的分越低，因为分值不许
+               超过字面证据。落点跟着走 clipToSharedBlocks：只红两边真重合的那几段。 */
+            boolean viaBag = false;
+            if (!similar) {
+                if (queryBag == null) queryBag = frag.bag = bagOfKey(frag.key);
+                if (candidate.bag == null) candidate.bag = bagOfKey(candidate.key);
+                if (bagReach(queryBag, candidate.bag) >= bagDiceFloor
+                        && bagDiceOf(queryBag, candidate.bag) >= bagDiceFloor) {
+                    viaBag = true;
+                    similar = true;
+                }
+            }
             if (!similar) continue;
             /* 过了线的候选数。裁剪只在"这一个片段只跟一篇对得上"时才是安全的，见下面调用处。 */
             passed++;
@@ -822,6 +868,7 @@ public final class TextCorpus {
             bestId = entryId;
             bestExact = exact;
             bestViaContainment = viaContainment;
+            bestViaBag = viaBag;
             if (bestScore >= 0.999f) break;
         }
         if (bestId < 0) return false;
@@ -836,7 +883,8 @@ public final class TextCorpus {
            都过了线（同篇的相邻两句、或两篇各一句），那这个片段本身就是拼出来的：只裁进赢的那一句，
            另一句就连证据一起没了——抄两段只报一段比多报更糟。这种片段整段报，宁可多红也不许漏。
            TextCorpusRegression.merging() 钉的就是这条。 */
-        if (bestViaContainment && passed == 1) clipToSharedBlocks(frag, entries.get(bestId).key, blocks, out);
+        if ((bestViaContainment || bestViaBag) && passed == 1)
+            clipToSharedBlocks(frag, entries.get(bestId).key, blocks, out);
         return true;
     }
 
@@ -1408,6 +1456,54 @@ public final class TextCorpus {
         long[] second = gramsOf(right);
         if (first.length == 0 || second.length == 0) return 0f;
         return (float) (2d * intersectCount(first, second) / (first.length + second.length));
+    }
+
+    /** 字符袋：比较串里出现过的字，已排序去重。集合口径，不看次数。 */
+    static char[] bagOf(String text) {
+        return bagOfKey(compactOf(text));
+    }
+
+    /** 同上，但拿的是已经折好的比较串：Entry.key / Frag.key 本来就是折叠串，不必再折一遍。 */
+    static char[] bagOfKey(String key) {
+        if (key == null || key.length() == 0) return new char[0];
+        char[] bag = key.toCharArray();
+        Arrays.sort(bag);
+        int n = 0;
+        for (int i = 0; i < bag.length; i++) {
+            if (n > 0 && bag[n - 1] == bag[i]) continue;
+            bag[n++] = bag[i];
+        }
+        return n == bag.length ? bag : Arrays.copyOf(bag, n);
+    }
+
+    /**
+     * 字符袋 Dice = 2|A∩B| / (|A|+|B|)。它存在的理由是衰减指数：逐字替换 s 之后三元组 Dice 约掉到
+     * (1-s)^3（s=0.25 时 0.42，够不到 SIMILAR_DICE），袋口径只掉到 2(1-s)/(2-s)（同一档 0.86）。代价是
+     * 顺序证据全丢，所以天花板必须单独量：同一批 20 段真人负例实测最高 0.577（三元组口径是 0.358），
+     * 地板就按同一条规矩加在天花板之上——见 SIMILAR_BAG_DICE 与 docs/paraphrase-robustness.md 的 D2。
+     */
+    static float bagDice(String a, String b) {
+        return bagDiceOf(bagOf(a), bagOf(b));
+    }
+
+    /** 两个已经折好的袋之间的距离。bestMatch 把袋记在 Entry/Frag 上，一篇算一次，不反复排序。 */
+    static float bagDiceOf(char[] first, char[] second) {
+        if (first.length == 0 || second.length == 0) return 0f;
+        int i = 0, j = 0, shared = 0;
+        while (i < first.length && j < second.length) {
+            int by = Character.compare(first[i], second[j]);
+            if (by == 0) { shared++; i++; j++; } else if (by < 0) i++; else j++;
+        }
+        return (float) (2d * shared / (first.length + second.length));
+    }
+
+    /**
+     * 袋口径还够不够得着地板：两个袋的 Dice 上界是 2·min/(|A|+|B|)，够不到就不必去数交集。
+     * 这一档同时是长度闸门——袋 Dice 一旦要求到 0.72，两边的字数天然落在约 1.8 倍以内。
+     */
+    static float bagReach(char[] first, char[] second) {
+        if (first.length == 0 || second.length == 0) return 0f;
+        return 2f * Math.min(first.length, second.length) / (first.length + second.length);
     }
 
     /** normalize 之后再去掉空白与不可见字符的比较串。 */

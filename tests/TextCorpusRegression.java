@@ -35,6 +35,7 @@ public final class TextCorpusRegression {
         normalization();
         splitting();
         similarity();
+        bagChannel();
         matching();
         fingerprints();
         merging();
@@ -211,6 +212,82 @@ public final class TextCorpusRegression {
         check(two.byEngine.size() == 2, "byEngine lists both engines");
         check(overlapPairs(report.hits) == 0 && overlapPairs(two.hits) == 0,
                 "命中区间两两不重叠：来源榜与「按检索源分布」那两张表都建立在这一点上");
+    }
+
+    /**
+     * 第三条判据：字符袋（D2 落地）。钉四件事——度量本身、它换来的那次命中、关掉它那次命中就消失
+     * （证明这条命中确实归它，不是别的通道顺手收的）、以及它的落点只红两边真重合的那几段。
+     */
+    private static void bagChannel() {
+        String base = "城市道路交通拥堵的治理需要把停车管理、公共交通优先和路网信号配时这三项措施放在一起来考虑，"
+                + "单独推行其中任何一项都难以在三年之内看到效果。";
+        String swapped = "城区路网交通阻塞的管控必须把车位管制、公共交通优先和绿灯配时这三项措施放在一起来权衡，"
+                + "孤立地推行其中任何一项都很难在三年之内看到效果。";
+        float gram = TextCorpus.dice(base, swapped);
+        float bag = TextCorpus.bagDice(base, swapped);
+        System.out.println("BAG CASE 三元组 Dice=" + gram + " 袋 Dice=" + bag
+                + "（地板 " + TextCorpus.SIMILAR_BAG_DICE + "）");
+        check(gram < TextCorpus.SIMILAR_DICE, "这一对必须是三元组判据漏掉的那一档，实测 Dice " + gram);
+        check(bag >= TextCorpus.SIMILAR_BAG_DICE, "这一对必须过袋口径的地板，实测袋 Dice " + bag);
+        // 度量本身的性质：相同为 1、无关为 0、对称、去重、上界。地板压在天花板之上那条在
+        // RewriteRobustnessRegression 的 bagStudy 里钉，这里只管实现对不对。
+        check(TextCorpus.bagDice(base, base) == 1f, "同一个袋的距离是 1");
+        check(TextCorpus.bagDice("昨天的晚餐是红烧肉和清炒时蔬", "图 7 展示了拟合优度") < 0.3f,
+                "两句话题无关时袋口径也必须低");
+        check(TextCorpus.bagDice(base, swapped) == TextCorpus.bagDice(swapped, base), "袋口径对称");
+        check(TextCorpus.bagOf("重复重复的字字啊啊啊").length == 5, "字符袋去重：九个位置五种字");
+        check(TextCorpus.bagOf("重复 重复\t的字字啊啊啊\n").length == 5, "空白与不可见字符进不了袋");
+        // 标点留在袋里：天花板 0.577 是带着标点量出来的，口径不许在实现里偷偷改。
+        check(TextCorpus.bagOf("abc。、").length == 5, "标点照常进袋，与实测天花板的口径一致");
+        char[] big = TextCorpus.bagOf(base + base + swapped);
+        char[] small = TextCorpus.bagOf(swapped);
+        check(TextCorpus.bagDiceOf(big, small) <= TextCorpus.bagReach(big, small) + 1e-6f,
+                "袋 Dice 不许超过它自己的上界");
+        // 端到端：这一对必须报出来，而且分值仍是字面三元组的 Dice（改写越重报出的分越低，不许虚高）。
+        TextCorpus corpus = new TextCorpus();
+        TextCorpus.Source paper = source("bag-1", "城市交通治理研究", "wanfang");
+        corpus.add(paper, base);
+        String query = "本文的第一节先交代研究背景与数据来源。" + swapped + "第二节给出模型的推导过程与参数设置。";
+        TextCorpus.Report on = corpus.match(query, null);
+        check(!on.hits.isEmpty(), "改写过的句子必须被袋口径认出来");
+        TextCorpus.Hit hit = null;
+        for (int i = 0; i < on.hits.size(); i++) if (on.hits.get(i).source == paper) hit = on.hits.get(i);
+        check(hit != null, "袋口径的命中要署得出来源");
+        check(hit != null && hit.score < TextCorpus.SIMILAR_DICE,
+                "这条命中的分值仍是字面 Dice（" + (hit == null ? 0f : hit.score) + "），不许拿袋口径的分顶上去");
+        TextCorpus.overrideBagFloor(1.01f);
+        TextCorpus.Report off;
+        try {
+            off = corpus.match(query, null);
+        } finally {
+            TextCorpus.restoreBagFloor();
+        }
+        boolean offSawIt = false;
+        for (int i = 0; i < off.hits.size(); i++) if (off.hits.get(i).source == paper) offSawIt = true;
+        check(!offSawIt, "关掉袋口径这一对就查不出来——开着才查得出，证明这条命中归袋口径这条通道");
+        // 落点：只许红两边真重合的那几段。改写掉的 23 个字一个都不许跟着红。
+        String flagged = "";
+        for (int i = 0; i < on.hits.size(); i++) {
+            TextCorpus.Hit each = on.hits.get(i);
+            if (each.source == paper) flagged += query.substring(each.start, each.end);
+        }
+        System.out.println("BAG SPAN 改写句 " + swapped.length() + " 字，红在正文里的是 " + flagged.length()
+                + " 字：" + flagged);
+        check(flagged.contains("公共交通优先") && flagged.contains("三年之内看到效果"),
+                "没被改写的那几段必须落在命中里");
+        // 改写掉的词不许整块红。"很难"那两个字会跟着红是 MERGE_GAP=2 并段的结果——两边各自验过一段
+        // 逐字公共块、间隔只有两个字时并成一条，这是 1.1.1 就定下的落点口径，不是袋口径新引入的。
+        check(!flagged.contains("孤立地") && !flagged.contains("车位管制") && !flagged.contains("权衡")
+                && !flagged.contains("城区路网") && !flagged.contains("管控"),
+                "改写掉的词不许整块红：" + flagged);
+        check(flagged.length() <= swapped.length() - 18,
+                "整句 " + swapped.length() + " 字最多只许红 " + (swapped.length() - 18) + " 字，实测 "
+                        + flagged.length() + " 字：自己写的与改写掉的字必须留在红区之外");
+        // 负例：同领域、同一套术语、说的是另一件事——三元组与袋都不许过线。
+        TextCorpus negative = new TextCorpus();
+        negative.add(source("bag-2", "另一篇交通论文", "wanfang"), base);
+        check(negative.match("城区路网的投资强度在过去十年里持续上升，公共交通的客运分担率却停滞不前，"
+                + "这两条曲线背后的政策逻辑完全不同。", null).hits.isEmpty(), "同领域另一件事不许被袋口径撞车");
     }
 
     /** 指纹带：与断句无关的连续重复，短于最短匹配长度的巧合不算重复。 */

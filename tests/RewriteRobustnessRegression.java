@@ -45,6 +45,15 @@ public final class RewriteRobustnessRegression {
     private static final String[] CONT_CASES = {
         "pruned", "split-commas", "merge-pairs", "spliced", "verbatim", "sub-char-25",
     };
+    /** -Drrbag=1 时扫袋口径那一档（TextCorpus.SIMILAR_BAG_DICE）；第一行 1.01 等于把这条通道关掉。 */
+    private static final boolean BAG = System.getProperty("rrbag") != null;
+    /** 袋口径管的是"字几乎换光、剩下那批字还在"，所以扫的口径以逐字替换为主，再带上拆句与原文当对照。 */
+    private static final String[] BAG_SWEEP_CASES = {
+        "verbatim", "pruned", "split-commas", "merge-pairs", "sub-char-10", "sub-char-25",
+        "sub-char-50", "local-edit-16", "spliced",
+    };
+    private static final float[] BAG_SWEEP_FLOORS = { 1.01f, 0.90f, 0.80f, 0.76f, 0.72f, 0.68f, 0.64f,
+            0.60f, 0.56f };
     private static final String[] SWEEP_CASES = {
         "verbatim", "synonym", "sub-char-10", "sub-char-25", "pruned", "split-commas", "spliced",
     };
@@ -223,14 +232,16 @@ public final class RewriteRobustnessRegression {
         printTable(scores);
         // 诊断模式（-Drrs / -Drrroc / -Drrcont）不跑地板：这几台是拿来查明原因的，
         // 让一条地板断言半路把进程掐掉，就永远看不到后面的分布表了。
-        if (SWEEP || ROC || CONT) {
+        if (SWEEP || ROC || CONT || BAG) {
             if (SWEEP) sweep(copies, fillers, sources, corpus);
             if (ROC) roc(copies, fillers, sources, corpus);
             if (CONT) containmentSweep(copies, fillers, sources, corpus);
+            if (BAG) bagSweep(copies, fillers, sources, corpus);
             return;
         }
         embedding(copies, fillers, sources, corpus);
         floors(scores, copies, fillers, sources, corpus);
+        bagStudy(copies, fillers);
         System.out.println("RewriteRobustnessRegression OK: " + count + " assertions"
                 + " (copies=" + copies.size() + ", corpusChars=" + corpusChars
                 + ", droppedCitationLines=" + droppedCitations + ")");
@@ -357,7 +368,8 @@ public final class RewriteRobustnessRegression {
         recall(scores, "split-commas", 99.4d); // 0.55->0.50 之后 98.1，带子分块修复之后 99.4，1.1.2 之后 99.5
         recall(scores, "merge-pairs", 99.5d);  // 1.1.1 的多候选守卫之后 99.4，1.1.2 之后 99.6
         recall(scores, "sub-char-10", 99d);
-        recall(scores, "sub-char-25", 26d);
+        // 袋口径进产品之前是 26.4%，之后 53.8%。地板从 26 提到 50：这条通道哪天被改窄，这条先红。
+        recall(scores, "sub-char-25", 50d);
         recall(scores, "local-edit-16", 99d);
         recall(scores, "local-edit-25", 99d);
         recall(scores, "spliced", 99d);
@@ -368,11 +380,234 @@ public final class RewriteRobustnessRegression {
                     + " 实测 " + percent(scores[i].attribution));
         // 五、0.50 这一档换来了什么。这条断言是这次改阈值的证据本身：
         // 0.55 与 0.50 在原文口径上逐位相同，只有换成逐字替换才分得开，差值必须看得见。
+        // 地板 6 → 3 是袋口径进产品之后的实测结果（四个数都印在 THRESHOLD GAIN 那一行）：同一档逐字替换，
+        // 0.55 那边 19.2% → 50.2%，0.50 这边 26.4% → 53.8%，两条都被袋口径接走一大截，三元组阈值单独
+        // 能挣的只剩 3.7 个点。袋口径自己的 27.4 个点由 bagGain 钉住，这一条继续钉三元组阈值那一档。
         Score at55 = measureAt("sub-char-25", 0.55f, SIMILAR_CONTAINMENT_AT_TEST, copies, fillers, sources, corpus);
         double gain = by(scores, "sub-char-25").recall - at55.recall;
-        check(gain >= 6d, "0.50 相对 0.55 的抗改写召回增益要看得见，实测 " + percent(gain)
+        check(gain >= 3d, "0.50 相对 0.55 的抗改写召回增益要看得见，实测 " + percent(gain)
                 + "；掉了说明阈值被改回去了或者口径变了");
         check(at55.noiseChars == 0, "0.55 那一档同样不许有噪声");
+        TextCorpus.overrideBagFloor(BAG_FLOOR_OFF);
+        Score at55BagOff;
+        try {
+            at55BagOff = measureAt("sub-char-25", 0.55f, SIMILAR_CONTAINMENT_AT_TEST,
+                    copies, fillers, sources, corpus);
+        } finally {
+            TextCorpus.restoreBagFloor();
+        }
+        System.out.println("THRESHOLD GAIN sub-char-25 0.55 " + percent(at55BagOff.recall) + " → "
+                + percent(at55.recall) + "（袋口径开）→ 0.50 " + percent(by(scores, "sub-char-25").recall)
+                + "（+" + percent(gain) + "）");
+        bagGain(scores, copies, fillers, sources, corpus);
+    }
+
+    /**
+     * 袋口径自己那条通道的证据（D2 落地）。三件事一次量完：把它关掉，看它到底挣了多少字；
+     * 把它的地板压到实测天花板（0.577）之下，看这台实测台看不看得见误标——看不见就说明
+     * 上面那一串"噪声为零"是瞎出来的；以及它在别的口径上不许倒扣召回。
+     */
+    private static void bagGain(Score[] scores, ArrayList<String> copies, ArrayList<String> fillers,
+                               ArrayList<TextCorpus.Source> sources, TextCorpus corpus) {
+        TextCorpus.overrideBagFloor(BAG_FLOOR_OFF);
+        Score off;
+        try {
+            off = measureAt("sub-char-25", TextCorpus.SIMILAR_DICE, TextCorpus.SIMILAR_CONTAINMENT,
+                    copies, fillers, sources, corpus);
+        } finally {
+            TextCorpus.restoreBagFloor();
+        }
+        double delta = by(scores, "sub-char-25").recall - off.recall;
+        check(delta >= 25d, "袋口径在 sub-char-25 上至少要挣回 25 个点，实测 " + percent(delta)
+                + "；挣不到就说明这条通道被改窄了，或者它本来就不该在产品里");
+        check(off.noiseChars == 0, "关掉袋口径同样不许有噪声，实测 " + off.noiseChars + " 字");
+        // 这台实测台看得见袋口径的误标：地板压到负例天花板 0.577 之下必须撞出误标来。
+        TextCorpus.overrideBagFloor(0.55f);
+        int blind;
+        try {
+            blind = measureAt("verbatim", TextCorpus.SIMILAR_DICE, TextCorpus.SIMILAR_CONTAINMENT,
+                    copies, fillers, sources, corpus).noiseChars;
+        } finally {
+            TextCorpus.restoreBagFloor();
+        }
+        check(blind > 0, "袋口径的地板压到 0.55（实测天花板 0.577 之下）时必须能看见误标，看见 "
+                + blind + " 字；看不见说明这条通道的噪声根本量不到，那一串零不作数");
+        // 别的口径一口字都不许多丢：袋口径只作 OR 增补，关掉它召回可以变差，开着它不许变差。
+        String[] wider = { "verbatim", "synonym", "pruned", "split-commas", "merge-pairs", "spliced" };
+        TextCorpus.overrideBagFloor(BAG_FLOOR_OFF);
+        try {
+            for (int i = 0; i < wider.length; i++) {
+                Score baseline = measureAt(wider[i], TextCorpus.SIMILAR_DICE,
+                        TextCorpus.SIMILAR_CONTAINMENT, copies, fillers, sources, corpus);
+                check(by(scores, wider[i]).recall >= baseline.recall - 0.001d, "袋口径开着不许比关掉少认："
+                        + wider[i] + " 关掉 " + percent(baseline.recall) + "，开着 "
+                        + percent(by(scores, wider[i]).recall));
+            }
+        } finally {
+            TextCorpus.restoreBagFloor();
+        }
+        System.out.println("BAG GAIN sub-char-25 关掉袋口径 " + percent(off.recall) + " → 开着 "
+                + percent(by(scores, "sub-char-25").recall) + "（+" + percent(delta) + "），"
+                + "地板压到 0.55 的误标 " + blind + " 字");
+    }
+
+    /** 把袋口径那一档抬到 1 以上就等于关掉这条通道：袋 Dice 最高只能到 1。 */
+    private static final float BAG_FLOOR_OFF = 1.01f;
+
+    // ---- 顺序无关度量自己的天花板（D2 的第一步：先量它，量不出来就不落地） ----
+
+    /** 地板压在天花板之上多少。三元组那条通道用的就是这一档（0.358 → 0.50）。 */
+    private static final float MARGIN_OVER_CEILING = 0.14f;
+    /** 袋口径要不要落地，看这几档：现行判据漏得最狠的几档必须被它碰到，否则它没有存在的理由。 */
+    private static final String[] BAG_CASES = { "verbatim", "synonym", "local-edit-16", "sub-char-10",
+            "sub-char-25", "sub-char-50", "pruned", "split-commas" };
+
+    /**
+     * 两条顺序无关度量的负例天花板，以及每一档改写的潜在召回。
+     *
+     * 负例是同一份语料里**没进库**的段落句子：同领域、同一支笔、同一套术语，这台机器能拿到的最狠负例。
+     * 天花板 + {@link #MARGIN_OVER_CEILING} 就是它若要落地时的地板——这个规矩不是新发明的，现行 0.50
+     * 的 Dice 地板就是这么定出来的（同批负例三元组最高 0.358）。潜在召回那一列量的是"改写后的句子与库里
+     * 原句的最高分够不够那条地板"：够不到，说明这个度量也救不回那批字，D2 直接作废，不改产品判据。
+     */
+    private static void bagStudy(ArrayList<String> copies, ArrayList<String> fillers) {
+        ArrayList<String> library = longSentences(copies);
+        ArrayList<String> negatives = longSentences(fillers);
+        check(library.size() >= 20 && negatives.size() >= 20,
+                "袋口径样本不足：库句 " + library.size() + " 句，负例 " + negatives.size() + " 句");
+        float bagCeiling = 0f, functionCeiling = 0f;
+        int bagLeak = 0;
+        for (int i = 0; i < negatives.size(); i++) {
+            String negative = negatives.get(i);
+            for (int j = 0; j < library.size(); j++) {
+                String entry = library.get(j);
+                float bag = TextCorpus.bagDice(negative, entry);
+                float fn = functionDice(negative, entry);
+                if (bag > bagCeiling) bagCeiling = bag;
+                if (bag >= TextCorpus.SIMILAR_BAG_DICE) bagLeak++;
+                if (fn > functionCeiling) functionCeiling = fn;
+            }
+        }
+        float bagFloor = bagCeiling + MARGIN_OVER_CEILING;
+        float functionFloor = functionCeiling + MARGIN_OVER_CEILING;
+        System.out.println("");
+        System.out.println("| 顺序无关度量 | 负例天花板 | 地板（天花板+" + MARGIN_OVER_CEILING + "） |");
+        System.out.println("| --- | --- | --- |");
+        System.out.println("| 字符袋 Dice | " + round3(bagCeiling) + " | " + round3(bagFloor) + " |");
+        System.out.println("| 虚词二元组 Dice | " + round3(functionCeiling) + " | " + round3(functionFloor) + " |");
+        // 产品地板必须真的压在实测天花板之上，而且对数与地板要对得上：这条断言是这条通道的安全边界本身。
+        check(bagLeak == 0, "负例对不许有一对过产品地板 " + TextCorpus.SIMILAR_BAG_DICE + "，实测 "
+                + bagLeak + " 对（天花板 " + round3(bagCeiling) + "）");
+        check(TextCorpus.SIMILAR_BAG_DICE >= bagFloor && TextCorpus.SIMILAR_BAG_DICE <= bagFloor + 0.005f,
+                "产品地板必须停在实测天花板 + " + MARGIN_OVER_CEILING + " 这一档上：实测天花板 "
+                        + round3(bagCeiling) + " 应得 " + round3(bagFloor) + "，产品值 "
+                        + TextCorpus.SIMILAR_BAG_DICE);
+        // 虚词那条死在自己的天花板上：加完 0.14 之后地板超过 1，谁也过不了线，所以它不进产品。
+        check(functionFloor > 1f, "虚词骨架的地板（" + round3(functionFloor) + "）算到 1 以上，这条判据"
+                + "实测作废；它若哪天又变得可用，先重测这批负例再谈落地");
+
+        System.out.println("");
+        System.out.println("| 口径 | 句数 | 现行三元组过线率 | 袋过线率 | 虚词过线率 |");
+        System.out.println("| --- | --- | --- | --- | --- |");
+        float[] bagPass = new float[BAG_CASES.length];
+        for (int c = 0; c < BAG_CASES.length; c++) {
+            Mutator mutator = mutator(BAG_CASES[c]);
+            int total = 0, gram = 0, bag = 0, fn = 0;
+            for (int i = 0; i < copies.size(); i++) {
+                for (String raw : sentencesOf(mutator.run(copies.get(i)))) {
+                    String sentence = stripTail(raw);
+                    if (valid(sentence) < TextCorpus.MIN_SENTENCE_CHARS) continue;
+                    total++;
+                    float bestGram = 0f, bestBag = 0f, bestFn = 0f;
+                    for (int j = 0; j < library.size(); j++) {
+                        String entry = library.get(j);
+                        float value = TextCorpus.dice(sentence, entry);
+                        if (value > bestGram) bestGram = value;
+                        value = TextCorpus.bagDice(sentence, entry);
+                        if (value > bestBag) bestBag = value;
+                        value = functionDice(sentence, entry);
+                        if (value > bestFn) bestFn = value;
+                    }
+                    if (bestGram >= TextCorpus.SIMILAR_DICE) gram++;
+                    if (bestBag >= bagFloor) bag++;
+                    if (bestFn >= functionFloor) fn++;
+                }
+            }
+            check(total >= 20, BAG_CASES[c] + " 的句数不足，袋口径这一列没有统计意义：" + total);
+            bagPass[c] = bag * 100f / total;
+            System.out.println("| " + BAG_CASES[c] + " | " + total + " | " + percent(gram * 100d / total)
+                    + " | " + percent(bag * 100d / total) + " | " + percent(fn * 100d / total) + " |");
+            if ("verbatim".equals(BAG_CASES[c]))
+                check(bagPass[c] >= 100f, "原文口径必须句句过袋口径的线，实测 " + percent(bagPass[c])
+                        + "；过不了说明袋口径的实现或地板定错了");
+            if ("sub-char-25".equals(BAG_CASES[c]))
+                check(bagPass[c] >= 90f, "袋口径存在的理由就是够到 sub-char-25 那批字，实测过线 "
+                        + percent(bagPass[c]) + "；够不到这条判据就不该进产品");
+        }
+        System.out.println("");
+        System.out.println("BAG CEILING 袋 " + round3(bagCeiling) + " 虚词 " + round3(functionCeiling)
+                + "，地板分别在 " + round3(bagFloor) + " / " + round3(functionFloor));
+    }
+
+    /** 参与袋口径比较的句子：长度够现行最低句长的原句。 */
+    private static ArrayList<String> longSentences(ArrayList<String> paragraphs) {
+        ArrayList<String> out = new ArrayList<String>();
+        for (int i = 0; i < paragraphs.size(); i++)
+            for (String raw : sentencesOf(paragraphs.get(i))) {
+                String sentence = stripTail(raw);
+                if (valid(sentence) >= TextCorpus.MIN_SENTENCE_CHARS) out.add(sentence);
+            }
+        return out;
+    }
+
+    private static String round3(float value) {
+        return String.valueOf(Math.round(value * 1000f) / 1000f);
+    }
+
+    // ---- 虚词骨架：一条被实测否掉的判据，所以它只活在这台实测里，不进产品代码 ----
+
+    /** 中文虚词闭集（写死而不是引分词器：这条路只要"哪些字是虚词"，一部词典动辄几 MB）。 */
+    private static final String FUNCTION_CHARS = "的了是而则以并但且把被将对给从到也都就还";
+
+    /**
+     * 虚词骨架的二元组 Dice（Stein 等的停用词 n-gram 走的就是这条路）。它死在自己的天花板 1.0 上：
+     * 中文虚词就那十几个字，随便两句同领域的长句都能凑出同样的骨架，"地板 = 天花板 + 0.14" 直接算到
+     * 1.14，也就是谁也过不了线。留着这两个函数是为了让那条结论随时可以被重新量一遍，而不是因为它能用。
+     */
+    private static float functionDice(String a, String b) {
+        int[] first = sequenceGrams(functionSequence(a)), second = sequenceGrams(functionSequence(b));
+        if (first.length == 0 || second.length == 0) return 0f;
+        int i = 0, j = 0, shared = 0;
+        while (i < first.length && j < second.length) {
+            if (first[i] == second[j]) { shared++; i++; j++; } else if (first[i] < second[j]) i++; else j++;
+        }
+        return (float) (2d * shared / (first.length + second.length));
+    }
+
+    /** 只留虚词、顺序保留：一条句子折成它的虚词骨架。 */
+    private static String functionSequence(String text) {
+        String key = TextCorpus.compactOf(text);
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < key.length(); i++)
+            if (FUNCTION_CHARS.indexOf(key.charAt(i)) >= 0) out.append(key.charAt(i));
+        return out.toString();
+    }
+
+    /** 骨架串切成相邻字符对（够不到两个字时退回单字），排序去重。 */
+    private static int[] sequenceGrams(String sequence) {
+        if (sequence.length() == 0) return new int[0];
+        int count = sequence.length() >= 2 ? sequence.length() - 1 : 1;
+        int[] grams = new int[count];
+        if (count == 1) grams[0] = sequence.charAt(0);
+        else for (int i = 0; i + 1 < sequence.length(); i++)
+            grams[i] = (sequence.charAt(i) << 16) | sequence.charAt(i + 1);
+        java.util.Arrays.sort(grams);
+        int n = 0;
+        for (int i = 0; i < grams.length; i++) {
+            if (n > 0 && grams[n - 1] == grams[i]) continue;
+            grams[n++] = grams[i];
+        }
+        return n == grams.length ? grams : java.util.Arrays.copyOf(grams, n);
     }
 
     /** 产品值之外再测一遍：临时覆盖阈值、测完立刻还原。 */
@@ -460,6 +695,38 @@ public final class RewriteRobustnessRegression {
                 }
                 System.out.println(row);
             }
+        }
+    }
+
+    /** 袋口径那一档逐档扫：第一行是关掉这条通道（1.01，袋 Dice 最高只能到 1），也就是改之前的产品行为。 */
+    private static void bagSweep(ArrayList<String> copies, ArrayList<String> fillers,
+                                ArrayList<TextCorpus.Source> sources, TextCorpus corpus) {
+        float[] floors = floatProperty("rrbagfloor", BAG_SWEEP_FLOORS);
+        System.out.println();
+        System.out.println("| 袋 Dice 地板 | " + join(BAG_SWEEP_CASES) + " | 嵌入带内 | 嵌入带外 | 噪声 |");
+        System.out.print("| --- |");
+        for (int i = 0; i < BAG_SWEEP_CASES.length; i++) System.out.print(" --- |");
+        System.out.println(" --- | --- | --- |");
+        for (int f = 0; f < floors.length; f++) {
+            StringBuilder row = new StringBuilder();
+            row.append("| ").append(floors[f] == BAG_FLOOR_OFF ? "关掉（1.01）" : String.valueOf(floors[f]))
+                    .append(" |");
+            int noise = 0;
+            TextCorpus.overrideBagFloor(floors[f]);
+            try {
+                for (int i = 0; i < BAG_SWEEP_CASES.length; i++) {
+                    Score score = measureOnce(BAG_SWEEP_CASES[i], copies, fillers, sources, corpus);
+                    row.append(" ").append(percent(score.recall)).append(" |");
+                    noise += score.noiseChars;
+                }
+                int[] n = embeddingNumbers(copies, fillers, corpus);
+                row.append(" ").append(n[1]).append('/').append(n[0]).append(" |")
+                        .append(" ").append(n[3]).append(" |")
+                        .append(" ").append(noise).append(" |");
+            } finally {
+                TextCorpus.restoreBagFloor();
+            }
+            System.out.println(row);
         }
     }
 
