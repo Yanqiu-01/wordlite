@@ -59,6 +59,14 @@ public final class AigcNgramModel {
         public double intercept, bias, oovLog2 = -24d, windowThreshold = Double.NaN;
         public int windowChars = 24, windowStride = 8, windowMinChars = 12;
         public double publicValidAuc = Double.NaN, holdoutAuc = Double.NaN, holdoutAucParagraph = Double.NaN;
+        // 三档留出各量各的：公共留出 / 公共留出里的学术配对档 / 真稿独立留出。只有第三档能开这个开关。
+        public double academicAuc = Double.NaN, crossDomainMean = Double.NaN, crossDomainWorst = Double.NaN;
+        /** 真稿留出里"与 H1 同领域同主题逐段配对"那一档单独对 H1 的 AUC：域与主题都按住之后的成绩。 */
+        public double holdoutPairTopicMatchedAuc = Double.NaN;
+        /** 真稿留出上只看句子长短（别的都不看）的 AUC：用来盯留出集自身的构造偏置。 */
+        public double holdoutLengthOnlyAuc = Double.NaN;
+        public String crossDomainNote = "";
+        public int exportedFeatures = -1;
         public double holdoutHumanFpPerMille = Double.NaN, holdoutMachineHitPercent = Double.NaN;
         public double templateWindowHit = Double.NaN, humanWindowHit = Double.NaN;
         public boolean calibrated, windowCalibrated;
@@ -93,6 +101,13 @@ public final class AigcNgramModel {
     }
 
     private static boolean loadAttempted;
+
+    /** 清单里的浮点数：训练台没量到的档位写 nan，装载不许因此炸。 */
+    private static double num(String v) {
+        String t = v == null ? "" : v.trim();
+        if (t.length() == 0 || "nan".equalsIgnoreCase(t) || "None".equals(t)) return Double.NaN;
+        return Double.parseDouble(t);
+    }
 
     /**
      * 从随包资源装载一次。读不到只当"没有模型"：查重不许因为字库缺失中断，界面也不许因此
@@ -138,20 +153,27 @@ public final class AigcNgramModel {
             else if ("provenance".equals(k)) manifest.provenance = v;
             else if ("ngram_min".equals(k)) manifest.ngramMin = Integer.parseInt(v);
             else if ("ngram_max".equals(k)) manifest.ngramMax = Integer.parseInt(v);
-            else if ("intercept".equals(k)) manifest.intercept = Double.parseDouble(v);
-            else if ("bias".equals(k)) manifest.bias = Double.parseDouble(v);
-            else if ("oov_log2".equals(k)) manifest.oovLog2 = Double.parseDouble(v);
+            else if ("intercept".equals(k)) manifest.intercept = num(v);
+            else if ("bias".equals(k)) manifest.bias = num(v);
+            else if ("oov_log2".equals(k)) manifest.oovLog2 = num(v);
             else if ("window_chars".equals(k)) manifest.windowChars = Integer.parseInt(v);
             else if ("window_stride".equals(k)) manifest.windowStride = Integer.parseInt(v);
             else if ("window_min_chars".equals(k)) manifest.windowMinChars = Integer.parseInt(v);
-            else if ("window_threshold".equals(k)) manifest.windowThreshold = Double.parseDouble(v);
-            else if ("public_valid_auc".equals(k)) manifest.publicValidAuc = Double.parseDouble(v);
-            else if ("holdout_auc".equals(k)) manifest.holdoutAuc = Double.parseDouble(v);
-            else if ("holdout_auc_paragraph".equals(k)) manifest.holdoutAucParagraph = Double.parseDouble(v);
-            else if ("holdout_human_fp_per_mille".equals(k)) manifest.holdoutHumanFpPerMille = Double.parseDouble(v);
-            else if ("holdout_machine_hit_percent".equals(k)) manifest.holdoutMachineHitPercent = Double.parseDouble(v);
-            else if ("template_window_hit".equals(k)) manifest.templateWindowHit = Double.parseDouble(v);
-            else if ("human_window_hit".equals(k)) manifest.humanWindowHit = Double.parseDouble(v);
+            else if ("window_threshold".equals(k)) manifest.windowThreshold = num(v);
+            else if ("public_valid_auc".equals(k)) manifest.publicValidAuc = num(v);
+            else if ("academic_auc".equals(k)) manifest.academicAuc = num(v);
+            else if ("cross_domain_mean".equals(k)) manifest.crossDomainMean = num(v);
+            else if ("cross_domain_worst".equals(k)) manifest.crossDomainWorst = num(v);
+            else if ("cross_domain_note".equals(k)) manifest.crossDomainNote = v;
+            else if ("exported_features".equals(k)) manifest.exportedFeatures = Integer.parseInt(v);
+            else if ("holdout_auc".equals(k)) manifest.holdoutAuc = num(v);
+            else if ("holdout_auc_paragraph".equals(k)) manifest.holdoutAucParagraph = num(v);
+            else if ("holdout_human_fp_per_mille".equals(k)) manifest.holdoutHumanFpPerMille = num(v);
+            else if ("holdout_machine_hit_percent".equals(k)) manifest.holdoutMachineHitPercent = num(v);
+            else if ("holdout_pair_topic_matched_auc".equals(k)) manifest.holdoutPairTopicMatchedAuc = num(v);
+            else if ("holdout_length_only_auc".equals(k)) manifest.holdoutLengthOnlyAuc = num(v);
+            else if ("template_window_hit".equals(k)) manifest.templateWindowHit = num(v);
+            else if ("human_window_hit".equals(k)) manifest.humanWindowHit = num(v);
             else if ("calibrated".equals(k)) manifest.calibrated = "true".equals(v);
             else if ("window_calibrated".equals(k)) manifest.windowCalibrated = "true".equals(v);
         }
@@ -373,7 +395,7 @@ public final class AigcNgramModel {
         return h == 0L ? 1L : h;
     }
 
-    // ---------------------------------------------------------------- 出厂闸门与自述
+    // ---------------------------------------------------------------- 出厂开关与自述
 
     /** 句级打分够不够格对外给数：清单说达标 **且** 那两个实测数真的过线，才算达标。 */
     public static boolean calibrated() {

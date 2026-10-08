@@ -1,40 +1,52 @@
 # Wordlite 离线 AIGC 模型清单：一行一个键值，Java 侧 AigcNgramModel 直接读这份
 # 列：key<TAB>value　　#开头是注释
-model_version	ngram-lr-2026-10-09
+model_version	ngram-lr-2026-10-09b
 created	2026-10-09
 what	字符 2/3/4-gram + 词表 + 逻辑回归（CPU 训练，手机侧纯手写打分，无 ONNX、无新依赖）；另附字级 1/2/3-gram 频率表做滑窗困惑度代理
-trained_on	hc3zh（CC-BY-SA-4.0，HC3 中文：真人答案 22,231 条 / ChatGPT 答案 17,383 条，百科·开放问答·法律·医学·金融·心理·NLPCC）；prhpp（Apache-2.0，PR-HPPT 中文学术摘要：label 0 作者原文 739 篇，label 1 同一篇的 ChatGPT 润色 739 篇（配对））；prhpp_te（Apache-2.0，同一批的官方 test 划分（仍按标题分组切分））；prhppgen（Apache-2.0，ChatGPT 整篇生成的中文摘要 100 篇（只有机器侧））；pangda（MIT，中文检索短句 + ChatGPT 逐条改写（短问句域，只取前 30,000 行、每行 2 条改写））
-not_used	QiYuan-tech/LLM-Detector（中文，7 个国产模型 + GPT-4 与真人答案配对）：要登录接受条款，匿名取回 401；liud169/ChatGPT-detector（Reddit 英文）：同上，匿名 401；krisfu/Chinese-Corpus-DetectGPT：同上，匿名 401；HaochenWang/TreeBench：名字叫 TreeBench，内容实为 ScienceQA 图文题（TSV 里是 base64 图片），不是人写/机写语料；haoxianc/shamimhasan8_ai-vs-human-text-dataset：正文是 'AI-generated content sample 1: ...' 这类占位模板，会把模板当特征学，弃用；dmitva/human_ai_generated_text（CC-BY-4.0，3.8 GB 英文）：匿名可下但体积过大，本轮中文模型不需要
-split	按来源行/标题分组随机十等分，第 0 份留出；同一条样本的人写与机器版本落进同一组
-independent_holdout	仓库内人工标注真稿：真人 H1 学位论文正文 + H2 已发表摘要逐字摘录 + H3 知网片段 + X1 轻度润色 + 钉子户，机器 M-RAW / M-EVADE / M-DOMAIN；这批一个字都没进训练
-provenance	公共语料侧留出 AUC 0.8352（拟合 0.9443，13897 句）；真稿独立留出 AUC(机器>真人)=0.558，段级 0.5757，真人误报 3.205 句/千句，机器侧过线 0.27%；出厂门槛 0.85 与 2 句/千句，两条都不过，故 calibrated=false，界面不印任何 AIGC 百分比
+trained_on	hc3zh（CC-BY-SA-4.0，HC3 中文：真人答案 22,231 条 / ChatGPT 答案 17,383 条，百科·开放问答·法律·医学·金融·心理·NLPCC）；prhpp（Apache-2.0，PR-HPPT 中文学术摘要：label 0 作者原文 739 篇，label 1 同一篇的 ChatGPT 润色 739 篇（配对））；prhpp_te（Apache-2.0，同一批的官方 test 划分（仍按标题分组切分））；prhppgen（Apache-2.0，ChatGPT 整篇生成的中文摘要 100 篇（只有机器侧））；pangda（MIT，中文检索短句 + ChatGPT 逐条改写（短问句域，只取前 30,000 行、每行 2 条改写））；setask8zh（MIT（镜像卡声明；上游 GitHub 取不到，见 not_used），SemEval-2024 Task 8 中文子任务训练集：真人 6,000 / chatGPT 2,970 / davinci 2,964（网络社区口语域，不是学术域））；anxzh（MIT，中文 AI 检测集（MIT）：THUCNews 真人新闻 7,971 + 同一批的 AI 润色稿 C4 1,949 + 现代模型整篇稿 parallel_* 7,804（gpt-4.1-mini / gpt-5(cursor) / gemini-2.5-flash / claude-haiku-4.5 / Kimi-K2 / deepseek-v3.2） + C3 改写 1,265 + auto_* 1,346 + Human 3,535；HC3 重复副本与 C2 人机混合稿不进训练）
+not_used	TUPE（任务书指定的多语平行学术语料，arXiv 2305.09992）：对不上号，取不到：arXiv 2305.09992 打开是《A Fusion Model: Towards a Virtual, Physical and Cognitive Integration and its Principles》（VR/AR 融合模型），与 AI 文本检测无关；arXiv 检索 ti:"TUPE" 只命中一篇非线性扩散方程论文，all:"Text Under Pinch" 零命中；OpenAlex title.search:TUPE 全是英国劳动法（TUPE transfers）；HuggingFace datasets?search=TUPE 零命中；Semantic Scholar 检索返回 HTTP 429；SemEval-2024 Task 8 上游仓库 mbzuai-nlp/SemEval2024-task8：许可核对不上：api.github.com 与 github.com 从本机出口一律 HTTP 451，raw.githubusercontent.com 与 codeload 一律 404（同一个 raw 域名对 octocat/Hello-World 返回 200，所以不是网络不通）。中文侧只用 HF 镜像 anyangsong/SemEval2024-Task8-SubtaskA（数据集卡声明 license: MIT；另一镜像 d0rj/SemEval2024-task8 声明 apache-2.0），仓库里只放派生统计量；anyangsong/COLING2025-MGT-Detection-Task1 中文（MIT，已取回 chinese_train.jsonl 39.6 MB）：内容与上游重复：train 前 4,000 行 source 字段只有 hc3（3,073）与 m4gt（927），就是 HC3 与 SemEval-2024 Task 8 的重新打包，进了训练等于同一条句子数两遍；AnxForever 的 val.csv / test.csv 与 anx 里的 hc3_human·hc3_chatgpt 副本、C2 人机混合稿：公共留出用我们自己的分组十等分，官方划分不叠加；hc3_* 与上游 HC3 逐字重复；C2 是人写开头 + 机器续写（带 [SEP]），逐句归属分不清，整条丢；COLING-2025 MGT-Detection Task 1 官方 test 中文那份（镜像 anyangsong/COLING2025-MGT-Detection-Task1，test_set_chinese_with_label.jsonl 178,161,905 字节，已取回）：不进训练，两条理由：镜像卡自称 Unofficial Mirror，上游仓库从本机一律 451/404，许可核对不了；而且它是别人比赛的考题。只当外部对照量一次（tools/build-aigc-model.py external）：63,009 篇 → 1,222,872 计分句，与出厂这份训练集逐字重合 0 句，句级 AUC 0.6240，真人误报 36.68 句/千句——换一把外部的尺子同样印不出百分比；QiYuan-tech/LLM-Detector（中文，7 个国产模型 + GPT-4 与真人答案配对）：要登录接受条款，匿名取回 401；liud169/ChatGPT-detector（Reddit 英文）：同上，匿名 401；krisfu/Chinese-Corpus-DetectGPT：同上，匿名 401；HaochenWang/TreeBench：名字叫 TreeBench，内容实为 ScienceQA 图文题（TSV 里是 base64 图片），不是人写/机写语料；haoxianc/shamimhasan8_ai-vs-human-text-dataset：正文是 'AI-generated content sample 1: ...' 这类占位模板，会把模板当特征学，弃用；dmitva/human_ai_generated_text（CC-BY-4.0，3.8 GB 英文）：匿名可下但体积过大，本轮中文模型不需要
+split	按来源行/标题分组随机十等分，第 0 份留出；同一条样本的人写与机器版本落进同一组；另把与公共留出逐字相同的训练句从拟合侧剔掉（跨语料重复，见 counts 行）
+independent_holdout	仓库内人工标注真稿：真人 H1 学位论文正文 + H2 已发表摘要逐字摘录 + H3 知网片段 + X1 轻度润色 + HH 最难判的真人句，机器 M-RAW / M-EVADE / M-DOMAIN；这批一个字都没进训练
+provenance	三档留出分开量（同一套权重、同一个偏置，只差在考哪批题）：① 公共留出 AUC 0.8091（1200 句，真人误报 4.386 句/千句）；② 学术留出 AUC 0.8091（1200 句，真人误报 4.386 句/千句）；③ 真稿独立留出 AUC(机器>真人)=0.5556，段级 0.5739，真人误报 3.205 句/千句，机器侧过线 0.27%。跨域留出：无（这份配置的公共侧只有一个域，撤掉就没题可考，逐域明细见 per_domain_public）。出厂门槛只认第三档：AUC >= 0.85 且真人误报 <= 2 句/千句；有一条或两条不过，calibrated=false，界面不印任何 AIGC 百分比。
 ngram_min	2
 ngram_max	4
 exported_features	20000
-vocab_size	60018
+vocab_size	58170
 min_df	5
-intercept	0.186353
-bias	-2.9600
+intercept	0.198865
+bias	-2.9200
 oov_log2	-30.6637
 window_chars	24
 window_stride	8
 window_min_chars	12
 window_threshold	2.0987
 freq_table	单字 2555 / 二字 20370 / 三字 10291（只由公开真人语料估计）
-public_valid_auc	0.8352
-holdout_auc	0.5580
-holdout_auc_paragraph	0.5757
+public_valid_auc	0.8091
+public_human_fp_per_mille	4.386
+academic_auc	0.8091
+academic_human_fp_per_mille	4.386
+cross_domain_mean	nan
+cross_domain_note	无：这份配置的公共侧只有一个域（学术摘要配对档），轮流撤掉整个域之后没题可考
+cross_domain_worst	nan
+cross_domain_lodo	{}
+per_domain_public	{"academic-abstract": {"auc": 0.8091, "human": 456, "machine": 744, "fp_per_mille_at_045": 4.386}}
+counts	计分句 13897（拟合侧剔掉与公共留出逐字相同的 372 句）；配置 B-prhpp-only
+holdout_auc	0.5556
+holdout_auc_paragraph	0.5739
 holdout_human_fp_per_mille	3.205
 holdout_machine_hit_percent	0.27
+holdout_length_only_auc	0.3280
+holdout_pair_topic_matched_auc	0.5791
+holdout_domain_gap	模型词表被点亮的比例：公共留出 32.10% / 真稿 25.39%；每句命中特征中位数 公共 29 / 真稿 20
 window_threshold_curve	[{"public_percentile": 0.1, "threshold_bits": 2.099, "template_segment_hit": 0.0, "human_segment_hit": 0.0, "human_window": 0.0, "machine_window": 0.0}, {"public_percentile": 1.0, "threshold_bits": 2.831, "template_segment_hit": 0.0, "human_segment_hit": 0.0, "human_window": 0.0, "machine_window": 0.0}, {"public_percentile": 5.0, "threshold_bits": 3.526, "template_segment_hit": 0.0114, "human_segment_hit": 0.0118, "human_window": 0.054, "machine_window": 0.06}, {"public_percentile": 25.0, "threshold_bits": 4.491, "template_segment_hit": 0.1591, "human_segment_hit": 0.3176, "human_window": 6.551, "machine_window": 4.031}, {"public_percentile": 50.0, "threshold_bits": 5.186, "template_segment_hit": 0.3409, "human_segment_hit": 0.6, "human_window": 17.07, "machine_window": 9.266}]
 template_window_hit	0.0000
 human_window_hit	0.0000
 calibrated	false
 window_calibrated	false
-golden	高度-速率维成像时,差分干涉层析成像合成孔径雷达获取的观测数据在基线-时间平面非均匀分布.	human	0.0386
-golden	若直接对观测数据进行两维傅里叶变换来恢复散射体高度-速率维像,则因强副瓣存在,成像效果不理想.	human	0.0369
-golden	该文将差分干涉层析成像合成孔径雷达高度-速率维成像问题归结为2维积分方程的逆问题,提出了一种采用Backus-Gilbert算法实现差分干涉SAR层析成像的新方法,并使用Tikhonov正则化获得逆问题的正则解.	human	0.0735
-golden	在高度-速率维成像时，差分干涉层析成像合成孔径雷达获取的观测数据在基线-时间平面上呈非均匀分布。	machine	0.0475
-golden	如果直接对观测数据进行两维傅里叶变换来恢复散射体的高度-速率维成像，由于存在强副瓣，成像效果并不理想。	machine	0.0562
-golden	为了解决这个问题，本文将差分干涉层析成像合成孔径雷达高度-速率维成像问题归结为2维积分方程的逆问题，并提出了一种采用Backus-Gilbert算法的新方法来实现差分干涉SAR层析成像，同时使用Tikhonov正则化方法获得逆问题的正则解。	machine	0.3085
+golden	高度-速率维成像时,差分干涉层析成像合成孔径雷达获取的观测数据在基线-时间平面非均匀分布.	human	0.0443
+golden	若直接对观测数据进行两维傅里叶变换来恢复散射体高度-速率维像,则因强副瓣存在,成像效果不理想.	human	0.0498
+golden	该文将差分干涉层析成像合成孔径雷达高度-速率维成像问题归结为2维积分方程的逆问题,提出了一种采用Backus-Gilbert算法实现差分干涉SAR层析成像的新方法,并使用Tikhonov正则化获得逆问题的正则解.	human	0.1374
+golden	在高度-速率维成像时，差分干涉层析成像合成孔径雷达获取的观测数据在基线-时间平面上呈非均匀分布。	machine	0.0495
+golden	如果直接对观测数据进行两维傅里叶变换来恢复散射体的高度-速率维成像，由于存在强副瓣，成像效果并不理想。	machine	0.0536
+golden	为了解决这个问题，本文将差分干涉层析成像合成孔径雷达高度-速率维成像问题归结为2维积分方程的逆问题，并提出了一种采用Backus-Gilbert算法的新方法来实现差分干涉SAR层析成像，同时使用Tikhonov正则化方法获得逆问题的正则解。	machine	0.3980
 golden_bits	高度-速率维成像时,差分干涉层析成像合成孔径雷达获取的观测数据在基线-时间平面非均匀分布.	3.1468

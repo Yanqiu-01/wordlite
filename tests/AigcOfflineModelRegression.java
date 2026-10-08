@@ -12,14 +12,14 @@ import java.util.Arrays;
 import java.util.Locale;
 
 /**
- * 离线字符 n-gram 模型这一路的回归：随包文件装得上、两侧算的是同一个数、出厂闸门确实关着。
+ * 离线字符 n-gram 模型这一路的回归：随包文件装得上、两侧算的是同一个数、出厂开关确实关着。
  *
  * 三件事各自成档，混在一起就分不清是哪一条被改坏了：
  * ① 口径一致：黄金样本由训练台（{@code tools/build-aigc-model.py}）算出，Java 必须复算到同一位小数，
  *    否则说明两侧的 normalize/compact/次线性词频/归一化漂了——权重文件就成了哑弹。
  * ② 独立留出：在仓库里那批人工标注真稿上重算一遍 AUC 与真人误报（这批一个字都没进训练），
  *    数字必须和清单里写的一致，且必须仍然低于出厂门槛——门槛不过就不许印百分比，这条不许松。
- * ③ 闸门本身：清单写 calibrated=true 但实测数不过线时仍然不许用；数过线时才走模型路径，
+ * ③ 开关本身：清单写 calibrated=true 但实测数不过线时仍然不许用；数过线时才走模型路径，
  *    且印出来的那一句必须带上"是哪个模型、在哪些数据上量的"。
  *
  * 缺权重文件、缺语料一律判失败（{@link #check}直接抛），不静默跳过。
@@ -54,6 +54,7 @@ public final class AigcOfflineModelRegression {
         if (args.length > 1) corpusDir = args[1];
         loadsAndRefuses();
         goldenParity();
+        threeTierManifest();
         independentHoldout();
         productFilterHoldout();
         windowChannel();
@@ -69,7 +70,12 @@ public final class AigcOfflineModelRegression {
         long t0 = System.currentTimeMillis();
         AigcNgramModel model = installShipped();
         long ms = System.currentTimeMillis() - t0;
-        check(model.weightRows() == 20000, "权重表装载 20,000 条（实际 " + model.weightRows() + "）");
+        check(model.weightRows() == model.manifest().exportedFeatures,
+                "权重表装载 " + model.weightRows() + " 条，与清单写的 exported_features "
+                        + model.manifest().exportedFeatures + " 一致");
+        check(model.weightRows() >= 2000 && model.weightRows() <= AigcNgramModel.MAX_WEIGHT_ROWS,
+                "导出特征 " + model.weightRows() + " 条在 2,000 ~ 开销上限 " + AigcNgramModel.MAX_WEIGHT_ROWS
+                        + " 之间，手机侧装载得起");
         check(model.freqRows() > 20000 && model.freqRows() < AigcNgramModel.MAX_FREQ_ROWS,
                 "字频表装载 " + model.freqRows() + " 条，低于开销上限 " + AigcNgramModel.MAX_FREQ_ROWS);
         check(model.tableSlots() <= 1 << 20, "哈希表槽位 " + model.tableSlots() + "，一兆槽位以内");
@@ -110,10 +116,56 @@ public final class AigcOfflineModelRegression {
         }
     }
 
+    // ---------------------------------------------------------------- ①b 清单把三档留出分开写
+
+    /** 公共留出 / 学术留出 / 真稿独立留出：三档各量各的，清单里三档都要有数。 */
+    private static void threeTierManifest() throws Exception {
+        AigcNgramModel.Manifest mf = AigcNgramModel.current().manifest();
+        check(!Double.isNaN(mf.publicValidAuc), "清单里有公共留出 AUC " + round(mf.publicValidAuc, 4));
+        check(!Double.isNaN(mf.academicAuc), "清单里有学术留出 AUC " + round(mf.academicAuc, 4));
+        check(!Double.isNaN(mf.holdoutAuc), "清单里有真稿独立留出 AUC " + round(mf.holdoutAuc, 4));
+        check(!Double.isNaN(mf.crossDomainMean) && !Double.isNaN(mf.crossDomainWorst)
+                        || mf.crossDomainNote.length() > 0,
+                "跨域留出（轮流撤掉整个域再考它）要么给数（均值 " + round(mf.crossDomainMean, 4)
+                        + "），要么清单里写明为什么没有：" + mf.crossDomainNote);
+        check(mf.provenance.contains("三档留出") && mf.provenance.contains("真稿独立留出"),
+                "provenance 那句话把三档分开写，公共留出的高分不许冒充产品能力");
+        check(mf.provenance.contains("出厂门槛只认第三档"), "清单写明出厂门槛只认真稿那一档");
+        check(!Double.isNaN(mf.holdoutPairTopicMatchedAuc),
+                "清单里另记一笔：域与主题都按住的那一对（H1 真人论文 vs M-DOMAIN 同领域同主题机器稿）AUC "
+                        + round(mf.holdoutPairTopicMatchedAuc, 4) + "——整池分数会被大户摊平，这一对才贴产品口径");
+        check(!Double.isNaN(mf.holdoutLengthOnlyAuc),
+                "清单里还记了只看句子长短的 AUC " + round(mf.holdoutLengthOnlyAuc, 4)
+                        + "：这是量留出集自身构造偏置的尺（机器句偏短），拿它当模型成绩是不许的");
+    }
+
     // ---------------------------------------------------------------- ② 真稿独立留出
+
+    private static final java.util.HashMap<String, ArrayList<Double>> SCORES_BY_TIER =
+            new java.util.HashMap<String, ArrayList<Double>>();
+    private static final java.util.HashMap<String, ArrayList<Double>> LENGTHS_BY_TIER =
+            new java.util.HashMap<String, ArrayList<Double>>();
+
+    private static ArrayList<Double> perTierScores(String code) {
+        ArrayList<Double> v = SCORES_BY_TIER.get(code);
+        return v == null ? new ArrayList<Double>() : v;
+    }
+
+    private static ArrayList<Double> tierLengths(String side) {
+        boolean machine = "machine".equals(side);
+        ArrayList<Double> out = new ArrayList<Double>();
+        for (String[] t : HOLDOUT) {
+            if (("1".equals(t[2])) != machine) continue;
+            ArrayList<Double> v = LENGTHS_BY_TIER.get(t[0]);
+            if (v != null) out.addAll(v);
+        }
+        return out;
+    }
 
     private static void independentHoldout() throws Exception {
         AigcNgramModel model = AigcNgramModel.current();
+        SCORES_BY_TIER.clear();
+        LENGTHS_BY_TIER.clear();
         ArrayList<Double> human = new ArrayList<Double>(), machine = new ArrayList<Double>();
         StringBuilder perTier = new StringBuilder();
         double fpSum = 0d; int humanTotal = 0, machineTotal = 0, machineHit = 0;
@@ -134,6 +186,9 @@ public final class AigcOfflineModelRegression {
                 }
             }
             if (scores.isEmpty()) continue;
+            SCORES_BY_TIER.put(tier[0], scores);
+            LENGTHS_BY_TIER.put(tier[0],
+                    sentenceCompactLengths(read(corpusDir + "/" + tier[1]).toArray(new String[0])));
             (isMachine ? machine : human).addAll(scores);
             perTier.append(String.format(Locale.ROOT, "%n     %-10s %-3s n=%-4d 均值 %.3f 最高 %.3f",
                     tier[0], isMachine ? "机器" : "真人", scores.size(), mean / scores.size(), max));
@@ -144,8 +199,19 @@ public final class AigcOfflineModelRegression {
                 humanTotal, machineTotal, auc, fpPerMille, 100d * machineHit / Math.max(1, machineTotal), perTier);
         check(humanTotal >= 400 && machineTotal >= 200,
                 "独立留出规模够（真人 " + humanTotal + " 句 / 机器 " + machineTotal + " 句）");
-        check(auc < AigcNgramModel.GATE_HOLDOUT_AUC,
-                "真稿独立留出 AUC " + round(auc, 4) + " 低于出厂门槛 " + AigcNgramModel.GATE_HOLDOUT_AUC + "，所以不许印百分比");
+        assertGateAgreesWithMeasurement("Java 句级口径", auc, fpPerMille);
+        double pairAuc = auc(perTierScores("M-DOMAIN"), perTierScores("H1"));
+        System.out.printf(Locale.ROOT, "     同领域同主题那一对：H1 %d 句 vs M-DOMAIN %d 句，AUC %.4f（整池 %.4f）%n",
+                perTierScores("H1").size(), perTierScores("M-DOMAIN").size(), pairAuc, auc);
+        check(Math.abs(pairAuc - model.manifest().holdoutPairTopicMatchedAuc) <= 0.12d,
+                "Java 复算 H1 vs M-DOMAIN 那一对 AUC " + round(pairAuc, 4) + " 与清单写的 "
+                        + round(model.manifest().holdoutPairTopicMatchedAuc, 4) + " 差 ≤ 0.12");
+        double lenAuc = auc(tierLengths("machine"), tierLengths("human"));
+        System.out.printf(Locale.ROOT, "     只看句长（不看内容）的 AUC %.4f（清单写的 %s）%n",
+                lenAuc, round(model.manifest().holdoutLengthOnlyAuc, 4));
+        check(Math.abs(lenAuc - model.manifest().holdoutLengthOnlyAuc) <= 0.15d,
+                "Java 复算只看句长的 AUC " + round(lenAuc, 4) + " 与清单写的 "
+                        + round(model.manifest().holdoutLengthOnlyAuc, 4) + " 差 ≤ 0.15（留出集偏置这笔账两侧要对得上）");
         check(Math.abs(auc - model.manifest().holdoutAuc) <= 0.12d,
                 "Java 复算 AUC " + round(auc, 4) + " 与清单写的 " + model.manifest().holdoutAuc
                         + " 差 ≤ 0.12（切句口径差异之外没有别的漂移）");
@@ -195,12 +261,21 @@ public final class AigcOfflineModelRegression {
                 100d * machineHit / Math.max(1, machine.size()), perTier);
         check(human.size() >= 400 && machine.size() >= 200,
                 "产品打分口径下真稿留出仍有 " + human.size() + " 真人句 / " + machine.size() + " 机器句");
-        check(auc < AigcNgramModel.GATE_HOLDOUT_AUC,
-                "产品打分口径的 AUC " + round(auc, 4) + " 同样低于出厂门槛 "
-                        + AigcNgramModel.GATE_HOLDOUT_AUC + "，两种口径都不许印百分比");
-        check(fpPerMille > AigcNgramModel.GATE_HUMAN_FP_PER_MILLE,
-                "产品打分口径的真人误报 " + round(fpPerMille, 2) + " 句/千句仍高于门槛 "
-                        + AigcNgramModel.GATE_HUMAN_FP_PER_MILLE + " 句/千句");
+        assertGateAgreesWithMeasurement("产品打分口径", auc, fpPerMille);
+    }
+
+    /**
+     * 出厂开关只认实测数：过线就必须开，没过线就必须关。这一条不写死"今天没过线"，
+     * 因为将来语料补上、真稿 AUC 真的过 0.85 时，判据应该反过来把门打开。
+     */
+    private static void assertGateAgreesWithMeasurement(String caliber, double auc, double fpPerMille) {
+        boolean passes = auc >= AigcNgramModel.GATE_HOLDOUT_AUC
+                && fpPerMille <= AigcNgramModel.GATE_HUMAN_FP_PER_MILLE;
+        check(AigcNgramModel.calibrated() == passes,
+                caliber + "：实测 AUC " + round(auc, 4) + "（门槛 " + AigcNgramModel.GATE_HOLDOUT_AUC
+                        + "）、真人误报 " + round(fpPerMille, 2) + " 句/千句（门槛 "
+                        + AigcNgramModel.GATE_HUMAN_FP_PER_MILLE + "）→ calibrated() 应为 " + passes
+                        + "（开关跟实测数走，不跟清单里的旗子走）");
     }
 
     /** 逐字照标定台的段落门槛：trim 后丢空行与 # 注释，normalize 长度不足 120 字的整段不进。 */
@@ -250,19 +325,28 @@ public final class AigcOfflineModelRegression {
         for (String line : read(corpusDir + "/aigc-cartoon.txt")) if (model.windowHit(TextCorpus.compactOf(line))) hits++;
         check(hits == 0, "通道未达标时 windowHit() 一个都不报（" + hits + "），不许把窗口算进可疑字数");
     }
-    // ---------------------------------------------------------------- ④ 闸门与接线
+    // ---------------------------------------------------------------- ④ 开关与接线
 
     private static void gateAndWiring() throws Exception {
         String manifest = readText(assetDir + "/aigc-model.tsv");
-        // 清单自说自话"已标定"，但实测数没过线：仍然不许用（闸门信数字，不信旗子）
+        // 清单自说自话"已标定"，但实测数没过线：仍然不许用（开关认实测数，不认清单里的旗子）
         installWith(rewrite(manifest, "calibrated", "true"));
         check(!AigcNgramModel.calibrated(),
                 "清单把 calibrated 改成 true 但实测 AUC 只有 " + AigcNgramModel.current().manifest().holdoutAuc
                         + " 时仍然判不达标");
-        check(!AigcNgramModel.engaged(), "闸门没开，检测链路不会去问模型要分");
+        check(!AigcNgramModel.engaged(), "开关没开，检测链路不会去问模型要分");
         AigcDetector.Result off = AigcDetector.detect(firstParagraph(corpusDir + "/aigc-label-machine-domain.txt"));
         check(off.modelSentences == 0, "模型未达标时 modelSentences=0（实际 " + off.modelSentences + "）");
         check(off.verdict.indexOf("判据未标定") >= 0, "报告口径仍然是那句认错的话（判据未标定）");
+
+        // 公共留出 / 学术留出 / 跨域三栏全部刷成 0.96~0.9999：只要真稿那一档没过线，开关必须还是关的。
+        // 本轮量出来 r(公共留出, 真稿) = -0.2275，那三栏的高分连方向都不保证，更不能拿来开门。
+        installWith(rewrite(rewrite(rewrite(rewrite(manifest,
+                        "public_valid_auc", "0.9999"), "academic_auc", "0.9999"),
+                "cross_domain_mean", "0.9800"), "cross_domain_worst", "0.9600"));
+        check(!AigcNgramModel.calibrated(),
+                "公共/学术/跨域三栏都改成 0.96~0.9999 之后开关仍然关着——出厂只认 ③ 真稿那一档（实测 "
+                        + AigcNgramModel.current().manifest().holdoutAuc + "）");
 
         // 假装一份"数真的过线"的清单：模型路径必须真的能跑起来，而且必须自报家门
         String fake = rewrite(rewrite(rewrite(rewrite(rewrite(rewrite(manifest,
@@ -302,7 +386,7 @@ public final class AigcOfflineModelRegression {
     private static void uninstallAndClose() throws Exception {
         AigcNgramModel.uninstall();
         check(AigcNgramModel.current() == null, "卸载之后没有模型在场");
-        check(!AigcNgramModel.engaged() && !AigcNgramModel.calibrated(), "没有模型时闸门一律关");
+        check(!AigcNgramModel.engaged() && !AigcNgramModel.calibrated(), "没有模型时开关一律关");
         AigcDetector.Result r = AigcDetector.detect(firstParagraph(corpusDir + "/real-prose.txt"));
         check(r.verdict.indexOf("判据未标定") >= 0 && r.verdict.indexOf("%") < 0,
                 "没模型时报告既不印百分号也不装作量到了");
@@ -357,6 +441,20 @@ public final class AigcOfflineModelRegression {
             if (((String) lines.get(i)).length() > 40) return (String) lines.get(i);
         }
         return (String) lines.get(0);
+    }
+
+    /** 计分句折行去空白之后的字符数：与 Python 侧量句长同一个口径。 */
+    private static ArrayList<Double> sentenceCompactLengths(String[] paragraphs) {
+        ArrayList<Double> out = new ArrayList<Double>();
+        for (int i = 0; i < paragraphs.length; i++) {
+            if (paragraphs[i].trim().length() == 0) continue;
+            AigcDetector.Result r = AigcDetector.detect(paragraphs[i]);
+            for (int k = 0; k < r.sentences.size(); k++) {
+                AigcDetector.Sentence s = r.sentences.get(k);
+                out.add(Double.valueOf(TextCorpus.compactOf(paragraphs[i].substring(s.start, s.end)).length()));
+            }
+        }
+        return out;
     }
 
     /** 用应用自己的切句口径把一批自然段切成计分句，再逐句问模型要分。 */

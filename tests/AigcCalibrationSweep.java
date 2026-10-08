@@ -728,7 +728,7 @@ public final class AigcCalibrationSweep {
         return out;
     }
 
-    /** 过线的句子数。档位列会被 400 字样本闸门压成常数，句级过线占比才看得出旋钮的梯度。 */
+    /** 过线的句子数。档位列会被 400 字样本下限压成常数，句级过线占比才看得出旋钮的梯度。 */
     private static int over(List<Run> runs, double gate) {
         int out = 0;
         for (int i = 0; i < runs.size(); i++)
@@ -831,7 +831,7 @@ public final class AigcCalibrationSweep {
 
     // ---------------------------------------------------------------- MARGIN
 
-    /** 最像机写的真人句子：逐条打它与门槛的距离。这几条之后要落进 aigc-hard-human.txt 当钉子户断言。 */
+    /** 最像机写的真人句子：逐条打它与门槛的距离。这几条之后要落进 aigc-hard-human.txt 当断言用的固定句。 */
     private static void margin(List<Doc> human, Table shipped) {
         ArrayList<double[]> rows = new ArrayList<double[]>();
         ArrayList<String> lines = new ArrayList<String>();
@@ -876,13 +876,13 @@ public final class AigcCalibrationSweep {
         nails(shipped);
     }
 
-    /** 钉子户清单（tests/corpus/aigc-hard-human.txt）逐条复检：这几句一旦被推到门槛之上就是回归。 */
+    /** 高分留出句清单（tests/corpus/aigc-hard-human.txt）逐条复检：这几句一旦被推到门槛之上就是回归。 */
     private static void nails(Table shipped) {
         List<String> nails;
         try {
             nails = loadCartoon("tests/corpus/aigc-hard-human.txt");
         } catch (Exception missing) {
-            System.out.println("NAIL note=没有 tests/corpus/aigc-hard-human.txt，跳过钉子户复检");
+            System.out.println("NAIL note=没有 tests/corpus/aigc-hard-human.txt，跳过高分留出句复检");
             return;
         }
         if (nails.isEmpty()) return;
@@ -904,7 +904,7 @@ public final class AigcCalibrationSweep {
         }
         System.out.println("NAIL lines=" + nails.size() + " over-gate=" + over
                 + " worst=" + fmt3(worst) + " margin=" + signed(AigcDetector.SEGMENT_FLAG_GATE - worst)
-                + (over == 0 ? " OK" : " 回归：钉子户越线"));
+                + (over == 0 ? " OK" : " 回归：高分留出句越线"));
     }
 
     /** 各组最强那条证据的贡献：句分为什么这么高，一眼能看出来。 */

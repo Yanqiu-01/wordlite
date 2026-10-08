@@ -40,7 +40,7 @@ java -Dfile.encoding=UTF-8 -cp "artifacts/build/aigc-check/test-classes;artifact
 | M1 | `LocalRewriter` 的改写体 | 本仓库离线降重写出来的句子 | **明确不用**：与同段真人句的配对胜率 6.4%，低于抛硬币，它比真人还不像机器 |
 | M2 | `tests/corpus/aigc-frames.txt` + H1 的真人句 | 按"总分总 + 首先/其次/最后"骨架把真人句拼起来，74 篇 | 只能当**旁证**：分离度来自构造（见下面 `OVERLAP`） |
 | M3 | `tests/corpus/aigc-cartoon.txt` | 20 段漫画式机写稿（每段九十字上下） | 只能测"像不像想象中的机器腔"，每段过不了 400 字样本门槛，所以另有 `LONG3` |
-| 钉子户 | `tests/corpus/aigc-hard-human.txt` | `MARGIN` 行挑出来的真人最高五句 | 回归夹具：`AigcRegression.hardHuman()` 直接读它 |
+| 高分留出句 | `tests/corpus/aigc-hard-human.txt` | `MARGIN` 行挑出来的真人最高五句 | 回归夹具：`AigcRegression.hardHuman()` 直接读它 |
 
 产物第一段的 `OVERLAP` 行不是日志，是**免责条款**：骨架表 30 个词里 28 个本身就命中打分特征
 （`综上所述` 同时进 `TEMPLATE` 和 `CONNECTIVE`，`通过`/`可以` 在连接词表里）。所以 M2 的召回是
@@ -186,7 +186,7 @@ PICK best-in-budget cliche=0.400 frame=0.250 rhythm=0.150 lexis=0.100 margin=+0.
 
 **所以套话组的取值上限是 0.40，落表 0.35 是主动退的一档，不是标定出来的拐点。**
 
-## MARGIN 钉子户：最像机写的真人句子离门槛多远
+## MARGIN 高分留出句：最像机写的真人句子离门槛多远
 
 ```
 NAIL lines=5 over-gate=0 worst=0.366 margin=+0.084 OK
@@ -273,7 +273,7 @@ GRADE TEMPLATE  ORDER-ONLY overlap=true human-rate=20.8/1000 machine-minus-human
 `tests/AigcRegression.java` 157 条断言（0.5.4 是 70 条）。新增的 `coefficients()` / `features()` /
 `segments()` / `tiers()` / `hardHuman()` 五组分别钉住：系数改一条分数必须跟着变且 `restore` 后复原、
 每条特征能单独算且中英分族不串表、区间恒等式与"不跨自然段/不跨排除区/族切换即断"、五档边界与
-"单句不成档"、真人钉子户不过线。改系数之后必须重跑：
+"单句不成档"、真人高分留出句不过线。改系数之后必须重跑：
 
 ```
 SUMMARY 157 assertions passed (scores are a relative tendency, not an authoritative AI verdict).
@@ -286,12 +286,12 @@ SUMMARY 157 assertions passed (scores are a relative tendency, not an authoritat
 
 拿着外部依据（`docs/oss-aigc-detection.md` 第二节：humanizer-zh-academic 的 16 条中文学术 AI 模式 +
 AIGC-Detector-Rewriter-Skill 的风险模式清单）把判据从 11 条扩到 33 条，再重拟合一次。划分是干净的：
-拟合只用 M-RAW + H1/H2/H3，M-EVADE、M-DOMAIN、X1、钉子户一律留出。新特征的逐条定义、出处与单独 AUC
+拟合只用 M-RAW + H1/H2/H3，M-EVADE、M-DOMAIN、X1、高分留出句一律留出。新特征的逐条定义、出处与单独 AUC
 写在 `artifacts/agent-aigc/CALIBRATION.md`，这里只留换号那一步的账。
 
 - 33 条里方向经标注语料验证为正（AUC ≥ 0.55 且两侧都有触发）的只有 4 条：`BURST` 0.590、
   `SHAPE_REPEAT` 0.763、`SENT_LEN_SYMMETRY` 0.588、`OPENING_ECHO` 0.577。9 条两侧都不触发，其余分不到方向或方向为反。
-- 拟合台选出的保守表（`OPENING_ECHO 0.15 + SHAPE_REPEAT 0.15`）：拟合侧句级 AUC 0.901，**留出侧句级 0.750000、段级 0.700**，
+- 训练台选出的保守表（`OPENING_ECHO 0.15 + SHAPE_REPEAT 0.15`）：拟合侧句级 AUC 0.901，**留出侧句级 0.750000、段级 0.700**，
   0.30~0.60 七个门槛下真人误报都是 0/498；但在 0.450 门槛下它留出档机器侧 0/104 一句都没打中，
   领域配对档还是反的（M-DOMAIN vs H2 = 0.212、M-EVADE vs H2 = 0.285）。
 - 真正能打中句子的天花板表（`BURST/OPENING_ECHO/SHAPE_REPEAT` 各 0.40 等五条）：拟合侧 29/158 机器句过线、
