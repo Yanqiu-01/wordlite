@@ -43,14 +43,39 @@ function Test-PortOpen([int]$number) {
     } catch { return $false } finally { $client.Close() }
 }
 
-# 端口开着不代表它是代理：Docker 也爱占 1080。所以拿应用真正要打的那个海外源问一句，
+# 端口开着不代表它是代理：Docker 也爱占 1080。所以拿应用真正要打的源挨个问一句，
 # 能走 CONNECT 才算数（这一步和手机上的用法完全一样：HTTP 代理 + HTTPS 目标）。
-function Test-PortCarries([int]$number) {
-    try {
-        $r = Invoke-WebRequest -Uri "https://api.openalex.org/works?per-page=1" `
-            -Proxy ("http://127.0.0.1:" + $number) -TimeoutSec 12 -UseBasicParsing
-        return ($r.StatusCode -ge 200 -and $r.StatusCode -lt 300)
-    } catch { return $false }
+#
+# 判据只能是"有没有拿到源站回的 HTTP 状态码"，不能是"状态码好不好看"。这里栽过一次：
+# 只拿 api.openalex.org 试并且只认 2xx，而 OpenAlex 对匿名流量一律回 429，
+# 于是 7897 明明是通的（同一时刻 curl 走它拿到 google 204、github 200）却被判成
+# "不是可用代理"，脚本自己把唯一一条出路判了死刑，手机端检索跟着全部落空。
+# 429/403/404 都是源站答了话——包已经原样带出去了，这正是这里要证明的事。
+$CarryProbes = @(
+    "https://kns.cnki.net/kns8s/defaultresult/index",
+    "https://api.github.com/zen",
+    "https://www.google.com/generate_204"
+)
+function Test-PortCarries([int]$number, [ref]$why) {
+    foreach ($u in $CarryProbes) {
+        try {
+            $r = Invoke-WebRequest -Uri $u -Proxy ("http://127.0.0.1:" + $number) `
+                -TimeoutSec 12 -UseBasicParsing -ErrorAction Stop
+            $why.Value = ("{0} 回 {1}" -f ([uri]$u).Host, $r.StatusCode)
+            return $true
+        } catch {
+            $resp = $null
+            if ($_.Exception.PSObject.Properties.Name -contains "Response") { $resp = $_.Exception.Response }
+            if ($null -ne $resp) {
+                $code = if ($resp.PSObject.Properties.Name -contains "StatusCode") { [int]$resp.StatusCode } else { 0 }
+                $why.Value = ("{0} 回 {1}" -f ([uri]$u).Host, $code)
+                return $true
+            }
+            # 传输层失败：这个端口没把包带出去，换下一个探测地址。
+        }
+    }
+    $why.Value = "三个地址都没走到源站"
+    return $false
 }
 
 function Find-ProxyPort {
@@ -59,11 +84,12 @@ function Find-ProxyPort {
             Write-Host ("  {0,-6} 没在监听" -f $candidate) -ForegroundColor DarkGray
             continue
         }
-        if (Test-PortCarries $candidate) {
-            Write-Host ("  {0,-6} 开着，且能把 HTTPS 带出去" -f $candidate) -ForegroundColor Green
+        $why = ""
+        if (Test-PortCarries $candidate ([ref]$why)) {
+            Write-Host ("  {0,-6} 开着，能把 HTTPS 带出去（{1}）" -f $candidate, $why) -ForegroundColor Green
             return $candidate
         }
-        Write-Host ("  {0,-6} 开着，但它不是可用代理（CONNECT 走不通，可能被防火墙拦或压根是别的服务）" -f $candidate) -ForegroundColor Yellow
+        Write-Host ("  {0,-6} 开着，但不是可用代理（{1}）" -f $candidate, $why) -ForegroundColor Yellow
     }
     return 0
 }
@@ -80,7 +106,14 @@ function Ensure-Reverse([int]$number) {
 Write-Host "== 电脑侧代理 ==" -ForegroundColor Cyan
 $found = $Port
 if ($found -le 0) { $found = Find-ProxyPort }
-elseif (-not (Test-PortCarries $found)) { Write-Host ("  {0} 不能把 HTTPS 带出去" -f $found) -ForegroundColor Yellow }
+else {
+    $why = ""
+    if (-not (Test-PortCarries $found ([ref]$why))) {
+        Write-Host ("  {0} 不能把 HTTPS 带出去（{1}）" -f $found, $why) -ForegroundColor Yellow
+    } else {
+        Write-Host ("  {0,-6} 指定端口可用（{1}）" -f $found, $why) -ForegroundColor Green
+    }
+}
 
 Write-Host "== USB 反代 ==" -ForegroundColor Cyan
 $listed = ReverseList
@@ -106,9 +139,9 @@ if ($Watch) {
     Write-Host "== 守着反代（Ctrl+C 退出）==" -ForegroundColor Cyan
     while ($true) {
         Start-Sleep -Seconds 5
-        $now = ReverseList
+        $now = @(ReverseList | ForEach-Object { ("" + $_ -split " ")[0] })
         $wanted = @("tcp:7897", "tcp:7890")
-        $gone = @($wanted | Where-Object { $have -notcontains $_ })
+        $gone = @($wanted | Where-Object { $now -notcontains $_ })
         if ($gone.Count -gt 0) {
             Write-Host ("  {0} 断了（拔线或 adb 重启），补上" -f ($gone -join ", ")) -ForegroundColor Yellow
             Ensure-Reverse $found
