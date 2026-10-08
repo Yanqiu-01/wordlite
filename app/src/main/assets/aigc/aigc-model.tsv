@@ -1,0 +1,40 @@
+# Wordlite 离线 AIGC 模型清单：一行一个键值，Java 侧 AigcNgramModel 直接读这份
+# 列：key<TAB>value　　#开头是注释
+model_version	ngram-lr-2026-10-09
+created	2026-10-09
+what	字符 2/3/4-gram + 词表 + 逻辑回归（CPU 训练，手机侧纯手写打分，无 ONNX、无新依赖）；另附字级 1/2/3-gram 频率表做滑窗困惑度代理
+trained_on	hc3zh（CC-BY-SA-4.0，HC3 中文：真人答案 22,231 条 / ChatGPT 答案 17,383 条，百科·开放问答·法律·医学·金融·心理·NLPCC）；prhpp（Apache-2.0，PR-HPPT 中文学术摘要：label 0 作者原文 739 篇，label 1 同一篇的 ChatGPT 润色 739 篇（配对））；prhpp_te（Apache-2.0，同一批的官方 test 划分（仍按标题分组切分））；prhppgen（Apache-2.0，ChatGPT 整篇生成的中文摘要 100 篇（只有机器侧））；pangda（MIT，中文检索短句 + ChatGPT 逐条改写（短问句域，只取前 30,000 行、每行 2 条改写））
+not_used	QiYuan-tech/LLM-Detector（中文，7 个国产模型 + GPT-4 与真人答案配对）：要登录接受条款，匿名取回 401；liud169/ChatGPT-detector（Reddit 英文）：同上，匿名 401；krisfu/Chinese-Corpus-DetectGPT：同上，匿名 401；HaochenWang/TreeBench：名字叫 TreeBench，内容实为 ScienceQA 图文题（TSV 里是 base64 图片），不是人写/机写语料；haoxianc/shamimhasan8_ai-vs-human-text-dataset：正文是 'AI-generated content sample 1: ...' 这类占位模板，会把模板当特征学，弃用；dmitva/human_ai_generated_text（CC-BY-4.0，3.8 GB 英文）：匿名可下但体积过大，本轮中文模型不需要
+split	按来源行/标题分组随机十等分，第 0 份留出；同一条样本的人写与机器版本落进同一组
+independent_holdout	仓库内人工标注真稿：真人 H1 学位论文正文 + H2 已发表摘要逐字摘录 + H3 知网片段 + X1 轻度润色 + 钉子户，机器 M-RAW / M-EVADE / M-DOMAIN；这批一个字都没进训练
+provenance	公共语料侧留出 AUC 0.8352（拟合 0.9443，13897 句）；真稿独立留出 AUC(机器>真人)=0.558，段级 0.5757，真人误报 3.205 句/千句，机器侧过线 0.27%；出厂门槛 0.85 与 2 句/千句，两条都不过，故 calibrated=false，界面不印任何 AIGC 百分比
+ngram_min	2
+ngram_max	4
+exported_features	20000
+vocab_size	60018
+min_df	5
+intercept	0.186353
+bias	-2.9600
+oov_log2	-30.6637
+window_chars	24
+window_stride	8
+window_min_chars	12
+window_threshold	2.0987
+freq_table	单字 2555 / 二字 20370 / 三字 10291（只由公开真人语料估计）
+public_valid_auc	0.8352
+holdout_auc	0.5580
+holdout_auc_paragraph	0.5757
+holdout_human_fp_per_mille	3.205
+holdout_machine_hit_percent	0.27
+window_threshold_curve	[{"public_percentile": 0.1, "threshold_bits": 2.099, "template_segment_hit": 0.0, "human_segment_hit": 0.0, "human_window": 0.0, "machine_window": 0.0}, {"public_percentile": 1.0, "threshold_bits": 2.831, "template_segment_hit": 0.0, "human_segment_hit": 0.0, "human_window": 0.0, "machine_window": 0.0}, {"public_percentile": 5.0, "threshold_bits": 3.526, "template_segment_hit": 0.0114, "human_segment_hit": 0.0118, "human_window": 0.054, "machine_window": 0.06}, {"public_percentile": 25.0, "threshold_bits": 4.491, "template_segment_hit": 0.1591, "human_segment_hit": 0.3176, "human_window": 6.551, "machine_window": 4.031}, {"public_percentile": 50.0, "threshold_bits": 5.186, "template_segment_hit": 0.3409, "human_segment_hit": 0.6, "human_window": 17.07, "machine_window": 9.266}]
+template_window_hit	0.0000
+human_window_hit	0.0000
+calibrated	false
+window_calibrated	false
+golden	高度-速率维成像时,差分干涉层析成像合成孔径雷达获取的观测数据在基线-时间平面非均匀分布.	human	0.0386
+golden	若直接对观测数据进行两维傅里叶变换来恢复散射体高度-速率维像,则因强副瓣存在,成像效果不理想.	human	0.0369
+golden	该文将差分干涉层析成像合成孔径雷达高度-速率维成像问题归结为2维积分方程的逆问题,提出了一种采用Backus-Gilbert算法实现差分干涉SAR层析成像的新方法,并使用Tikhonov正则化获得逆问题的正则解.	human	0.0735
+golden	在高度-速率维成像时，差分干涉层析成像合成孔径雷达获取的观测数据在基线-时间平面上呈非均匀分布。	machine	0.0475
+golden	如果直接对观测数据进行两维傅里叶变换来恢复散射体的高度-速率维成像，由于存在强副瓣，成像效果并不理想。	machine	0.0562
+golden	为了解决这个问题，本文将差分干涉层析成像合成孔径雷达高度-速率维成像问题归结为2维积分方程的逆问题，并提出了一种采用Backus-Gilbert算法的新方法来实现差分干涉SAR层析成像，同时使用Tikhonov正则化方法获得逆问题的正则解。	machine	0.3085
+golden_bits	高度-速率维成像时,差分干涉层析成像合成孔径雷达获取的观测数据在基线-时间平面非均匀分布.	3.1468

@@ -99,13 +99,10 @@ public final class DocxTextLayout {
                     wordAscentFraction(paragraph), lineGridPitchTwips, lineHeightMeasured(paragraph));
             text.setSpan(spacing, 0, text.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
             applyAutoSpace(text, f);
-            int tabAt = text.toString().indexOf('\t');
-            if (f.rightTabTwips > 0 && tabAt >= 0) {
-                // Only the tab itself is a leader. Covering the whole paragraph
-                // would replace the heading text with dots.
-                text.setSpan(new LeaderTab(f.rightTabTwips, f.tabLeader, left),
-                        tabAt, tabAt + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            }
+            // The leader is built with the styled text (applyTabLeaders) so that the reading view
+            // and the editor get it as well; that helper is idempotent, so this is only a guard
+            // for paragraphs that reach measure() with a hand-built SpannableStringBuilder.
+            applyTabLeaders(text, paragraph, PageGeometry.points(1f));
         }
 
         TextPaint paint = new TextPaint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
@@ -652,6 +649,7 @@ public final class DocxTextLayout {
         if (cursor < value.length()) apply(text, cursor, value.length(), paragraph.baseRunStyle, pxPerPoint);
         for (DocxDocument.RangeStyle rs : paragraph.editedStyles)
             if (rs.end > rs.start && rs.start >= 0 && rs.end <= text.length()) apply(text, rs.start, rs.end, rs.style, pxPerPoint);
+        applyTabLeaders(text, paragraph, pxPerPoint);
         return text;
     }
 
@@ -679,6 +677,7 @@ public final class DocxTextLayout {
                 start = i;
             }
         }
+        applyTabLeaders(text, paragraph, PageGeometry.points(1f));
         return text;
     }
 
@@ -1319,6 +1318,14 @@ public final class DocxTextLayout {
     /**
      * Line-box demand of the raised and lowered runs on one line, in document
      * pixels. Zero keeps the paragraph's own box, so plain text never grows.
+     *
+     * The two kinds of raised text are not the same question and Word bills them
+     * differently, which the lab in artifacts/agent-layout-fix/lab measured line by line:
+     * a w:vertAlign run competes with the box of its own face at the size it declares and its
+     * baseline shift buys it nothing, while text raised by w:position (same size, lifted) does
+     * push the row. So a citation superscript or a formula subscript written at the body size -
+     * every vertAlign run in tests/samples/input-liu.docx - never grows a row here, exactly as in
+     * Word, and the row only grows when the script run is bigger than its paragraph.
      */
     private static int[] scriptSpace(CharSequence text, int start, int end) {
         int ascent = 0, descent = 0;
@@ -1329,7 +1336,7 @@ public final class DocxTextLayout {
             // full size, so the ordinary line box already contains them.
             if (span.isUnicode()) continue;
             float base = span.baseSizePx();
-            ScriptGeometry g = ScriptGeometry.of(span.isSuperscript(), metricsFor(span.family()));
+            ScriptGeometry g = ScriptGeometry.declared(metricsFor(span.family()));
             ascent = Math.max(ascent, Math.round(g.ascentPx(base)));
             descent = Math.max(descent, Math.round(g.descentPx(base)));
         }
@@ -1481,20 +1488,37 @@ public final class DocxTextLayout {
     }
 
     /**
-     * Word TOC leader: a right-aligned tab fills the gap with dots and pins
-     * the page number to the declared tab stop.
-     */
-    /**
-     * Word TOC leader: a right-aligned tab fills the gap with dots and pins the page number so
-     * that it ENDS on the declared stop. Reserving only the heading leaves the number starting at
+     * Word TOC leader: a right-aligned tab fills the gap with dots and pins the run that follows it
+     * so that it ENDS on the declared stop. Reserving only the heading leaves the number starting at
      * the stop and hanging past it, which is what Word does not do.
+     *
+     * The run a right stop right-aligns ends at the NEXT tab, not at the end of the paragraph, and a
+     * stop is not spent once per paragraph. Word 16.0 on "<num><TAB><title><TAB><page>"
+     * (artifacts/agent-layout-fix/toc1/word2tab: its own PDF plus a character dump of the same page,
+     * entry 1.1; page x = the 84.9pt margin + the values below): line 1 is the number, dots from
+     * 120.02pt to 438.07pt, the title ending on the 493.17pt stop. Nothing fits behind the stop, so
+     * the page number falls to line 2, where the tab sits at the left indent (104.60pt), draws dots
+     * 105.02..486.07pt, and the number ends on that SAME stop again (493.42pt).
+     *
+     * StaticLayout measures a span once and never says which line it landed on, so the first tab is
+     * measured from the paragraph start and every tab after it is measured as if its own line began
+     * at the paragraph indent -- exactly where Word's overflow puts it: after the first tab the cursor
+     * sits on the stop, and the only stop ahead of it is on the next line.
+     *
+     * scale converts 96-DPI document units into the pixels of whoever lays this out: 1.0 for the
+     * paged view and the reading view, the fit-to-screen factor for the editor.
      */
     private static final class LeaderTab extends ReplacementSpan {
         private final int stopPx;
         private final char leader;
+        private final int runEnd;   // exclusive: the next tab, or the end of the paragraph
+        private final boolean ownLine;  // measured from this tab' own line start, not the paragraph start
         private float gap = 1f;   // laid-out dot run, from the heading end to the number start
-        LeaderTab(int stopTwips, String leaderName, float indentPx) {
-            stopPx = Math.max(1, Math.round(PageGeometry.twips(stopTwips) - indentPx));
+        LeaderTab(int stopTwips, String leaderName, float indentPx, float scale, int runEnd,
+                  boolean ownLine) {
+            stopPx = Math.max(1, Math.round(PageGeometry.twips(stopTwips) * scale - indentPx));
+            this.runEnd = Math.max(0, runEnd);
+            this.ownLine = ownLine;
             leader = "dot".equalsIgnoreCase(leaderName) ? '.'
                     : "underscore".equalsIgnoreCase(leaderName) ? '_'
                     : "hyphen".equalsIgnoreCase(leaderName) ? '-'
@@ -1502,9 +1526,10 @@ public final class DocxTextLayout {
         }
         @Override public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
             if (fm != null) paint.getFontMetricsInt(fm);
-            float heading = spannedWidth(text, (TextPaint) paint, 0, start);
-            // Everything after the tab is the page number: a right tab right-aligns it on the stop.
-            float number = spannedWidth(text, (TextPaint) paint, end, text.length());
+            float heading = ownLine ? 0f : spannedWidth(text, (TextPaint) paint, 0, start);
+            // What the stop right-aligns is this tab' own run: up to the next tab, or to the end.
+            float number = spannedWidth(text, (TextPaint) paint, end, Math.min(runEnd, text.length()));
+            if (number < 0.5f) { gap = 1f; return 1; }   // nothing follows this tab: Word spends no room on it
             gap = Math.max(1f, stopPx - heading - number);
             return Math.round(gap);
         }
@@ -1516,6 +1541,34 @@ public final class DocxTextLayout {
             float limit = x + gap;
             for (float cursor = x; cursor + width <= limit; cursor += width)
                 canvas.drawText(String.valueOf(leader), cursor, y, paint);
+        }
+    }
+
+    /**
+     * Attaches the leaders. Word owns a leader to a tab STOP rather than to a paragraph, so every tab
+     * in the line has to be placed: the first one right-aligns its own run (up to the next tab) on the
+     * declared stop, and a tab behind it gets that same stop on a line of its own, dots and all.
+     *
+     * Both styledText builders call this, so the paged view, the reading view and the editor get the
+     * same dots on the same stop. Before, only measure() had them and the reading view put TOC page
+     * numbers on Android's own default tab stop with no dots at all -- that is the report of "the
+     * numbers in the table of contents sit in the wrong place".
+     */
+    static void applyTabLeaders(SpannableStringBuilder text, DocxDocument.ParagraphBlock paragraph,
+                                float pxPerPoint) {
+        DocxDocument.ParagraphFormat f = paragraph == null ? null : paragraph.format;
+        if (text == null || text.length() == 0 || f == null || f.rightTabTwips <= 0) return;
+        float scale = pxPerPoint <= 0f ? 1f : pxPerPoint / PageGeometry.points(1f);
+        float indentPx = PageGeometry.twips(f.leftIndentTwips == -1 ? 0 : f.leftIndentTwips) * scale;
+        String value = text.toString();
+        boolean firstTab = true;
+        for (int at = value.indexOf('\t'); at >= 0; at = value.indexOf('\t', at + 1)) {
+            if (text.getSpans(at, at + 1, LeaderTab.class).length > 0) continue;
+            int next = value.indexOf('\t', at + 1);
+            int runEnd = next >= 0 ? next : value.length();
+            text.setSpan(new LeaderTab(f.rightTabTwips, f.tabLeader, indentPx, scale, runEnd, !firstTab),
+                    at, at + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            firstTab = false;
         }
     }
 

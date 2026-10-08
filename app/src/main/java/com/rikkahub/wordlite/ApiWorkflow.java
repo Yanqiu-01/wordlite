@@ -238,6 +238,8 @@ public final class ApiWorkflow {
             if (selection.text.trim().isEmpty()) throw new IllegalArgumentException("文档没有正文内容");
         } catch (IllegalArgumentException error) { toast(error.getMessage()); return; }
         final DocxDocument document = host.document();
+        // 随包的离线 AIGC 模型在查重线程外装载一次；不达标时 engaged() 为 false，一个百分比都不印。
+        AigcNgramModel.loadFromAssets(activity);
         final ApiClient.Task task = begin(aigcOnly ? "AIGC 检测" : useWeb ? "联网查重" : "本机查重");
         final EngineSettings options = engine.copy();
         final boolean wantWeb = useWeb && options.web && !aigcOnly;
@@ -347,6 +349,7 @@ public final class ApiWorkflow {
             box.addView(label(DuplicateEngine.AIGC_SCORE_LABEL + " " + aigcScore, 11));
         box.addView(label(result.detectedAt + "  ·  用时 " + (result.elapsedMillis / 1000L) + " 秒", 11));
         for (String note : result.notes) box.addView(label("提示：" + note, 11));
+        downloadables(box, result);
         if (scanShowsDuplicates) for (final TextCorpus.Hit hit : result.hits) {
             TextView snippet = label(snippetText(hit), 14);
             snippet.setPadding(0, dp(10), 0, dp(10)); snippet.setTextIsSelectable(true);
@@ -374,6 +377,59 @@ public final class ApiWorkflow {
         new AlertDialog.Builder(activity).setTitle("查重结果").setView(scroll).setNegativeButton("关闭", null)
                 .setPositiveButton("导出报告", (dialog, which) -> scanReport()).show();
     }
+    /**
+     * 结果页的"下进自建库"那一格：只列现在**只有摘要可比**、但检索源挂着可下载 PDF 的候选。
+     * 点一下就下载 + 走 CorpusImport 进自建库——自建库与联网正文进的是同一个语料、同一条判据，
+     * 所以这一条不是装饰：它把这 N 篇从"摘要级"抬到"正文级"。
+     */
+    private void downloadables(LinearLayout box, DuplicateEngine.Report result) {
+        if (result == null || result.downloadables.isEmpty()) return;
+        box.addView(label("可以下进自建库的开放获取全文 " + result.downloadables.size()
+                + " 篇（现在只有摘要可比；下进来后按正文比对）", 13));
+        for (final DuplicateEngine.Downloadable pick : result.downloadables) {
+            TextView row = label("下载进自建库：" + pick.title + "\n" + engineTitle(pick.engine)
+                    + " · " + PaperSources.linkLabel(pick.url), 13);
+            row.setPadding(0, dp(10), 0, dp(10));
+            row.setOnClickListener(view -> importFromUrl(pick));
+            box.addView(row);
+        }
+    }
+
+    /** 下载一篇开放获取 PDF 并导入自建库。下载与导入的成败都在最后那句提示里，一个字都不吹。 */
+    private void importFromUrl(final DuplicateEngine.Downloadable pick) {
+        if (job != null) { toast("有任务在跑，稍后再试"); return; }
+        new AlertDialog.Builder(activity).setTitle("下进自建库")
+                .setMessage(pick.title + "\n\n下载这篇开放获取 PDF 并导入自建库？导入后它按正文参与下一次比对。")
+                .setPositiveButton("下载", (dialog, which) -> {
+                    final ApiClient.Task task = begin("下载 " + pick.title);
+                    final EngineSettings options = engine.copy();
+                    worker = new Thread(() -> {
+                        String line;
+                        try {
+                            PaperSources.Limits limits = new PaperSources.Limits();
+                            limits.timeoutSeconds = options.timeoutSeconds;
+                            limits.proxy = options.proxy;
+                            CorpusImport.Batch batch = CorpusImport.download(library,
+                                    java.util.Collections.singletonList(
+                                            new CorpusImport.Pick(pick.title, pick.url)),
+                                    url -> PaperSources.downloadPdf(url, limits, task), null, task::cancelled);
+                            CorpusImport.Receipt receipt = batch.receipts.isEmpty() ? null : batch.receipts.get(0);
+                            line = receipt == null ? "没下载到内容" : receipt.imported()
+                                    ? "已下进自建库：" + receipt.storedName + " · " + receipt.chars + " 字 / "
+                                            + receipt.pages + " 页，下次查重按正文比对"
+                                    : receipt.message;
+                        } catch (Exception error) {
+                            line = "下载失败：" + (error.getMessage() == null || error.getMessage().isEmpty()
+                                    ? "未知错误" : error.getMessage());
+                        }
+                        final String result = line;
+                        complete(task, () -> toast(result));
+                    }, "wordlite-corpus-download");
+                    worker.start();
+                })
+                .setNegativeButton("取消", null).show();
+    }
+
     private String snippetText(TextCorpus.Hit hit) {
         TextCorpus.Source source = hit.source;
         String title = source == null || source.title.isEmpty() ? "相似片段" : source.title;

@@ -58,6 +58,16 @@ public final class PdfRegression {
         check(contents.contains("/Subtype /Text") && contents.contains("/Prev " + xref), "standard comment and valid incremental predecessor");
         new File(args[0]).getParentFile().mkdirs();
         try (FileOutputStream file = new FileOutputStream(args[0])) { file.write(output); }
+        /* CID \u5b57\u4f53\u53ea\u5e26\u5185\u5d4c cmap\u3001\u6ca1\u6709 ToUnicode \u7684\u90a3\u4e00\u65cf\uff08\u4e2d\u6587\u671f\u520a PDF \u5e38\u89c1\uff09\u3002
+           \u5939\u5177\u7531 tests/make_cid_cmap_fixture.py \u751f\u6210\uff0c\u771f\u503c\u7531\u6784\u9020\u51b3\u5b9a\u3002 */
+        PdfFile.Extracted cmap = PdfFile.extractText(java.nio.file.Files.readAllBytes(
+                new File("tests/fixture-cidcmap.pdf").toPath()));
+        check(cmap.text.contains("\u94dc\u710a\u5b54\u9699") && !cmap.undecodable && cmap.pages == 1,
+                "\u53ea\u6709\u5185\u5d4c\u5b57\u4f53 cmap \u7684 CID \u5b57\u4f53\u4e5f\u80fd\u628a\u5b57\u62fc\u51fa\u6765\uff08\u6ca1\u6709 ToUnicode\uff09");
+        PdfFile.Extracted partial = PdfFile.extractText(java.nio.file.Files.readAllBytes(
+                new File("tests/fixture-cidcmap-partial.pdf").toPath()));
+        check(partial.text.equals("\u94dc\u710a\n") && partial.undecodable && partial.undecodableGlyphs == 2,
+                "\u5b57\u5f62\u53f7\u5bf9\u4e0d\u4e0a cmap \u7684\u90a3\u4e24\u4e2a\u5b57\u4e0d\u731c\u5b57\uff0c\u53ea\u628a\u5b83\u4eec\u6309\u4e2a\u6570\u8bb0\u8fdb\u8d26");
         System.out.println("SUMMARY " + checks + " PDF range/metadata assertions passed; Android native rendering not simulated");
     }
 }

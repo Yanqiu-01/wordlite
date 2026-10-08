@@ -74,6 +74,10 @@ public final class PdfFile {
         public int imageBlocks;
         public boolean undecodable;
         public boolean truncated;
+        /** 有文字流却映射不出字的字形码个数：这些字一个字都没进正文，是"少字"的账，不是空白页。 */
+        public int undecodableGlyphs;
+        /** 那些映射不出字的字体叫什么（最多三个短名）：导入回执与报告用它说清"少的是哪一路字"。 */
+        public String undecodableFonts = "";
     }
 
     /** 抽正文。不是 PDF / 已加密 / 结构坏了抛 IOException；"没有文字层"用 textOps == 0 表示。 */
@@ -119,32 +123,66 @@ public final class PdfFile {
         float penX;
         float penY;
         boolean reachedLimit;
+        private final java.util.HashSet<String> noted = new java.util.HashSet<String>();
         PageState(StringBuilder text, Extracted out, int limit) { this.text = text; this.out = out; this.limit = limit; }
+        /** 记一个读不出字的字体名，最多三个，总长不超过 120：这一串要跟着回执进报告。 */
+        void noteFont(String name) {
+            String font = name == null ? "" : name.trim();
+            if (font.isEmpty() || noted.contains(font) || noted.size() >= 3) return;
+            noted.add(font);
+            String line = out.undecodableFonts;
+            if (line.length() + font.length() + 2 > 120) return;
+            out.undecodableFonts = line.length() == 0 ? font : line + ", " + font;
+        }
     }
 
-    /** 一个字体怎么把字节变成字符：优先 ToUnicode，其次 /Encoding 名字对应的现成字符集。 */
+    /**
+     * 一个字体怎么把字节变成字符。三条路按可信度排：
+     * ToUnicode（或随 PDF 一起发出来的 /Encoding CMap 流）写死了码到字，最可信；
+     * 它没覆盖到的码交给字体自己内嵌的 cmap（字形号 → 字）；
+     * 两条都没有才退到 /Encoding 名字对应的现成字符集。
+     */
     private static final class Font {
         Map<Integer, String> toUnicode;
+        /** 内嵌 TrueType 的 cmap 倒排表：字形号 → Unicode，没有内嵌时为 null。 */
+        int[] glyphs;
+        /** /CIDToGIDMap 给了流时的那张表；null 且 below 的 identity 为真时按"码即字形号"用。 */
+        int[] cidToGid;
         Charset charset;
         boolean twoByte;
         boolean missing;
+        int unmapped;
+        String name = "";
         String decode(byte[] raw) {
             if (raw == null || raw.length == 0) return "";
-            if (toUnicode != null && !toUnicode.isEmpty()) {
+            int step = twoByte ? 2 : 1;
+            if (toUnicode != null || glyphs != null) {
                 StringBuilder out = new StringBuilder();
-                int step = twoByte ? 2 : 1;
                 for (int i = 0; i + step <= raw.length; i += step) {
                     int code = 0;
                     for (int k = 0; k < step; k++) code = (code << 8) | (raw[i + k] & 255);
-                    String mapped = toUnicode.get(Integer.valueOf(code));
-                    if (mapped == null) { missing = true; continue; }
+                    String mapped = lookup(code);
+                    if (mapped == null) { missing = true; unmapped++; continue; }
                     out.append(mapped);
                 }
                 return out.toString();
             }
-            if (charset == null) { missing = true; return ""; }
+            if (charset == null) { missing = true; unmapped += raw.length / step; return ""; }
             if (twoByte && raw.length % 2 != 0) return new String(raw, 0, raw.length - 1, charset);
             return new String(raw, charset);
+        }
+        /** 码 → 字：先问 ToUnicode，它没写这个码才问字体自带的 cmap。两个都没有返回 null。 */
+        private String lookup(int code) {
+            if (toUnicode != null) {
+                String mapped = toUnicode.get(Integer.valueOf(code));
+                if (mapped != null) return mapped;
+            }
+            if (glyphs == null || glyphs.length == 0) return null;
+            int gid = code;
+            if (cidToGid != null) gid = code >= 0 && code < cidToGid.length ? cidToGid[code] : 0;
+            if (gid <= 0 || gid >= glyphs.length) return null;
+            int unicode = glyphs[gid];
+            return unicode <= 0 || unicode > 0xFFFF ? null : String.valueOf((char) unicode);
         }
     }
 
@@ -157,6 +195,8 @@ public final class PdfFile {
 
         final byte[] data;
         final Map<Integer, Object> objects = new HashMap<Integer, Object>();
+        /** 内嵌字体的 cmap 倒排表缓存：一份 PDF 里同一个子集字体常被几十页共用，解一次就够。 */
+        final Map<Object, int[]> glyphMaps = new HashMap<Object, int[]>();
 
         Document(byte[] data) { this.data = data; scan(); expandObjectStreams(); }
 
@@ -502,6 +542,14 @@ public final class PdfFile {
             state.out.textOps++;   // 数的是"真的画了字"的算子，扫描版恒为 0
             if (font == null) { state.out.undecodable = true; return; }
             String decoded = font.decode(raw);
+            /* 映射不出的字形按个记账并留下字体名：一份 PDF 抽出来 1,846 字而真值是 9,914 字时，
+               报告必须说得出少的那 8,000 个字卡在哪个字体上，而不是只留一个 undecodable=true。 */
+            if (font.unmapped > 0) {
+                state.out.undecodable = true;
+                state.out.undecodableGlyphs += font.unmapped;
+                font.unmapped = 0;
+                state.noteFont(font.name);
+            }
             if (decoded.length() == 0) { state.out.undecodable |= font.missing; return; }
             if (state.lineY != null && Math.abs(state.penY - state.lineY.floatValue()) > 0.75f) state.text.append('\n');
             state.lineY = Float.valueOf(state.penY);
@@ -514,13 +562,29 @@ public final class PdfFile {
             Dict fonts = resources == null ? null : dictOf(resources.values.get("Font"));
             Dict descriptor = fonts == null ? null : dictOf(fonts.values.get(key));
             if (descriptor == null) { font.missing = true; return font; }
+            String base = nameOf(descriptor.values.get("BaseFont"));
+            font.name = base == null || base.trim().isEmpty() ? key : base.trim();
             font.twoByte = "Type0".equals(nameOf(descriptor.values.get("Subtype")));
+            /* Type0（CID）字体把内嵌字体与 /CIDToGIDMap 挂在 DescendantFonts 那一层，ToUnicode 挂在 Type0 这一层。
+               只看 Type0 就永远够不着字体自带的 cmap——实测一份 6 页期刊 PDF 里 2,886 个字就是这么丢的。 */
+            Dict cidFont = descendantOf(descriptor);
+            Dict holder = cidFont == null ? descriptor : cidFont;
             Object toUnicode = resolve(descriptor.values.get("ToUnicode"));
             if (toUnicode instanceof StreamObj) {
                 byte[] bytes = contentOf((StreamObj) toUnicode);
-                if (bytes != null) font.toUnicode = ToUnicode.parse(new String(bytes, StandardCharsets.ISO_8859_1));
+                if (bytes != null) font.toUnicode = mapOrNull(ToUnicode.parse(new String(bytes, StandardCharsets.ISO_8859_1)));
             }
-            String encoding = nameOf(descriptor.values.get("Encoding"));
+            Object encodingValue = resolve(descriptor.values.get("Encoding"));
+            if (!(encodingValue instanceof Name) && encodingValue != null) {
+                /* /Encoding 也可以是一张随 PDF 发出来的 CMap（流或字典）：它自己就写着码 → 字，
+                   比按名字猜字符集准，GBK-EUC-H 这一族就是这么发的。 */
+                byte[] bytes = encodingValue instanceof StreamObj ? contentOf((StreamObj) encodingValue) : null;
+                if (bytes != null) {
+                    Map<Integer, String> coded = mapOrNull(ToUnicode.parse(new String(bytes, StandardCharsets.ISO_8859_1)));
+                    if (coded != null) font.toUnicode = mergeMaps(font.toUnicode, coded);
+                }
+            }
+            String encoding = nameOf(encodingValue);
             if (encoding != null) {
                 String upper = encoding.toUpperCase(java.util.Locale.US);
                 if (upper.indexOf("UCS2") >= 0 || upper.indexOf("UTF16") >= 0) font.charset = Charset.forName("UTF-16BE");
@@ -531,7 +595,58 @@ public final class PdfFile {
                 else if (upper.indexOf("MACROMAN") >= 0) font.charset = charset("MacRoman");
                 else if (!font.twoByte) font.charset = Charset.forName("ISO-8859-1");
             } else if (!font.twoByte) font.charset = Charset.forName("ISO-8859-1");
+            if (font.twoByte) {
+                /* 字形号从哪来：/CIDToGIDMap 缺省或 /Identity 时码就是字形号；给了流就读那张流。
+                   是别的东西就不猜——猜错是把一个字变成另一个字，比读不出更糟。 */
+                Object map = resolve(holder.values.get("CIDToGIDMap"));
+                boolean identity = map == null || "Identity".equals(nameOf(map));
+                if (!identity && map instanceof StreamObj) font.cidToGid = cidToGid((StreamObj) map);
+                if (identity || font.cidToGid != null) font.glyphs = glyphMap(holder);
+            }
             return font;
+        }
+
+        /** Type0 的下一层：CIDFontType0/2 那个字典。没有返回 null。 */
+        private Dict descendantOf(Dict type0) {
+            Object list = resolve(type0.values.get("DescendantFonts"));
+            if (!(list instanceof List) || ((List<?>) list).isEmpty()) return null;
+            return dictOf(((List<?>) list).get(0));
+        }
+
+        /** 内嵌 TrueType 自带的 cmap 倒排成"字形号 → 字"。同一份字体文件在本份 PDF 里只解一次。 */
+        private int[] glyphMap(Dict cidFont) {
+            Dict descriptor = dictOf(cidFont.values.get("FontDescriptor"));
+            if (descriptor == null) return null;
+            Object file = resolve(descriptor.values.get("FontFile2"));
+            if (!(file instanceof StreamObj)) return null;   // CIDFontType0 的 CFF 字符集不在 FontFile2 里
+            int[] cached = glyphMaps.get(file);
+            if (cached != null) return cached.length == 0 ? null : cached;
+            int[] parsed = TrueTypeCmap.glyphToUnicode(contentOf((StreamObj) file));
+            glyphMaps.put(file, parsed == null ? NO_GLYPH_MAP : parsed);
+            return parsed;
+        }
+
+        /** /CIDToGIDMap 的流：每个 CID 一个大端两字节字形号。读不出返回 null，绝不猜。 */
+        private int[] cidToGid(StreamObj stream) {
+            byte[] bytes = contentOf(stream);
+            if (bytes == null || bytes.length < 4 || bytes.length > 8 * 1024 * 1024) return null;
+            int[] out = new int[bytes.length / 2];
+            for (int i = 0; i < out.length; i++)
+                out[i] = ((bytes[i * 2] & 255) << 8) | (bytes[i * 2 + 1] & 255);
+            return out;
+        }
+
+        private static Map<Integer, String> mapOrNull(Map<Integer, String> map) {
+            return map == null || map.isEmpty() ? null : map;
+        }
+        /** 已有的映射赢：ToUnicode 是这份 PDF 自己写下的码表，CMap 流只是补它漏掉的码。 */
+        private static Map<Integer, String> mergeMaps(Map<Integer, String> own, Map<Integer, String> extra) {
+            if (own == null) return extra;
+            if (extra == null) return own;
+            Map<Integer, String> out = new HashMap<Integer, String>(own);
+            for (Map.Entry<Integer, String> entry : extra.entrySet())
+                if (!out.containsKey(entry.getKey())) out.put(entry.getKey(), entry.getValue());
+            return out;
         }
 
         private static Charset charset(String name) {
@@ -597,6 +712,141 @@ public final class PdfFile {
         final Dict dict;
         final byte[] raw;
         StreamObj(Dict dict, byte[] raw) { this.dict = dict; this.raw = raw; }
+    }
+
+    /** 缓存里"解过了，解不出"的记号：不写它，一份十几 MB 的字体每页都要重解一遍。 */
+    private static final int[] NO_GLYPH_MAP = new int[0];
+
+    /**
+     * 内嵌 TrueType 的 cmap 倒排表：字体写的是"字 → 字形号"，CID 字体要的反而是"字形号 → 字"。
+     * 只读 cmap 的 0/4/6/12 四种格式，子表按 (3,10) → (3,1) → (0,3) → (3,0) → (1,0) 挑第一个在的。
+     * 只在这份 PDF 自己的字体里找映射：它没写 cmap 就返回 null，一个字都不猜——
+     * 猜错是把"铜"印成"钩"，比老实说读不出坏得多。
+     */
+    static final class TrueTypeCmap {
+        private static final int LIMIT = 24 * 1024 * 1024;
+        private TrueTypeCmap() { }
+
+        /** 字形号 → Unicode（0 = 不知道）。解不出返回 null。 */
+        static int[] glyphToUnicode(byte[] font) {
+            if (font == null || font.length < 16 || font.length > LIMIT) return null;
+            int cmap = table(font, 'c', 'm', 'a', 'p');
+            if (cmap < 0 || cmap + 4 > font.length) return null;
+            int subtables = u16(font, cmap + 2);
+            int chosen = -1;
+            for (int pass = 0; pass < PREFERENCE.length && chosen < 0; pass++)
+                for (int i = 0; i < subtables; i++) {
+                    int at = cmap + 4 + i * 8;
+                    if (at + 8 > font.length) break;
+                    if (PREFERENCE[pass][0] != u16(font, at) || PREFERENCE[pass][1] != u16(font, at + 2)) continue;
+                    int sub = cmap + (int) u32(font, at + 4);
+                    if (sub >= 0 && sub + 2 <= font.length) chosen = sub;
+                }
+            if (chosen < 0) return null;
+            Map<Integer, Integer> codeToGlyph = read(font, chosen);
+            if (codeToGlyph == null || codeToGlyph.isEmpty()) return null;
+            int[] out = new int[65536];
+            ArrayList<Integer> codes = new ArrayList<Integer>(codeToGlyph.keySet());
+            java.util.Collections.sort(codes);   // 同一个字形被几个字共用时，取码位最小的那个：两次解析必须给同一个字
+            for (Integer key : codes) {
+                int unicode = key.intValue(), gid = codeToGlyph.get(key).intValue();
+                if (unicode <= 0 || unicode > 0xFFFF || gid <= 0 || gid >= out.length || out[gid] != 0) continue;
+                out[gid] = unicode;
+            }
+            return out;
+        }
+
+        private static final int[][] PREFERENCE = { { 3, 10 }, { 3, 1 }, { 0, 3 }, { 3, 0 }, { 1, 0 }, { 0, 4 } };
+
+        /** cmap 子表正文：格式 0/4/6/12 认，别的不猜。 */
+        private static Map<Integer, Integer> read(byte[] f, int sub) {
+            Map<Integer, Integer> out = new HashMap<Integer, Integer>();
+            int format = u16(f, sub);
+            if (format == 4) return format4(f, sub);
+            if (format == 12) return format12(f, sub);
+            if (format == 6) {
+                int first = u16(f, sub + 6), count = u16(f, sub + 8);
+                for (int i = 0; i < count; i++) {
+                    int at = sub + 10 + i * 2;
+                    if (at + 2 > f.length) break;
+                    int gid = u16(f, at);
+                    if (gid != 0) out.put(Integer.valueOf(first + i), Integer.valueOf(gid));
+                }
+                return out;
+            }
+            if (format == 0) {
+                for (int i = 0; i < 256 && sub + 6 + i < f.length; i++) {
+                    int gid = f[sub + 6 + i] & 255;
+                    if (gid != 0) out.put(Integer.valueOf(i), Integer.valueOf(gid));
+                }
+                return out;
+            }
+            return out;
+        }
+
+        private static Map<Integer, Integer> format4(byte[] f, int sub) {
+            Map<Integer, Integer> out = new HashMap<Integer, Integer>();
+            if (sub + 16 > f.length) return out;
+            int segments = u16(f, sub + 6) / 2;
+            if (segments <= 0 || segments > 4096) return out;
+            /* endCode[] 与 startCode[] 之间还夹着一个 reservedPad（2 字节），少读它就是每个字都错位。 */
+            int ends = sub + 14, starts = ends + segments * 2 + 2, deltas = starts + segments * 2,
+                    ranges = deltas + segments * 2;
+            if (ranges + segments * 2 > f.length) return out;
+            for (int i = 0; i < segments; i++) {
+                int end = u16(f, ends + i * 2), start = u16(f, starts + i * 2);
+                int delta = (short) u16(f, deltas + i * 2);
+                int offset = u16(f, ranges + i * 2);
+                for (int code = start; code <= end && code < 0xFFFF; code++) {
+                    int gid;
+                    if (offset == 0) gid = (code + delta) & 0xFFFF;
+                    else {
+                        int at = ranges + i * 2 + offset + (code - start) * 2;
+                        if (at + 2 > f.length) break;
+                        gid = u16(f, at);
+                        if (gid != 0) gid = (gid + delta) & 0xFFFF;
+                    }
+                    if (gid != 0) out.put(Integer.valueOf(code), Integer.valueOf(gid));
+                }
+            }
+            return out;
+        }
+
+        private static Map<Integer, Integer> format12(byte[] f, int sub) {
+            Map<Integer, Integer> out = new HashMap<Integer, Integer>();
+            if (sub + 16 > f.length) return out;
+            long groups = u32(f, sub + 12);
+            if (groups <= 0 || groups > 200000) return out;
+            for (int i = 0; i < groups; i++) {
+                int at = sub + 16 + i * 12;
+                if (at + 12 > f.length) break;
+                long start = u32(f, at), end = u32(f, at + 4), glyph = u32(f, at + 8);
+                if (end < start || end - start > 65535) continue;
+                for (long code = start; code <= end; code++) {
+                    if (code > 0xFFFF || glyph + (code - start) > 0xFFFF) break;
+                    out.put(Integer.valueOf((int) code), Integer.valueOf((int) (glyph + (code - start))));
+                }
+            }
+            return out;
+        }
+
+        private static int table(byte[] f, char a, char b, char c, char d) {
+            int count = u16(f, 4);
+            if (count <= 0 || count > 256) return -1;
+            for (int i = 0; i < count; i++) {
+                int at = 12 + i * 16;
+                if (at + 16 > f.length) return -1;
+                if (f[at] != (byte) a || f[at + 1] != (byte) b || f[at + 2] != (byte) c || f[at + 3] != (byte) d)
+                    continue;
+                return (int) u32(f, at + 8);
+            }
+            return -1;
+        }
+        private static int u16(byte[] b, int at) { return ((b[at] & 255) << 8) | (b[at + 1] & 255); }
+        private static long u32(byte[] b, int at) {
+            return ((long) (b[at] & 255) << 24) | ((b[at + 1] & 255) << 16) | ((b[at + 2] & 255) << 8)
+                    | (b[at + 3] & 255);
+        }
     }
 
     /** ToUnicode CMap 只认 bfchar / bfrange 两种映射：导出侧写的就是 bfchar，生产 PDF 也基本不出这个范围。 */

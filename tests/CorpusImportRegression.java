@@ -39,6 +39,7 @@ public final class CorpusImportRegression {
         interruptedBatch();
         tornIndex();
         pdfIntoCorpus();
+        downloadedPicks();
         writerRoundTrip();
         libraryApiStillWorks();
         deleteRecursively(new File(ROOT));
@@ -511,6 +512,38 @@ public final class CorpusImportRegression {
         ArrayList<CorpusImport.Source> out = new ArrayList<CorpusImport.Source>();
         for (int i = 0; i < sources.length; i++) out.add(sources[i]);
         return out;
+    }
+
+    // ---- \u4e00\u952e\u628a\u5f00\u653e\u83b7\u53d6\u5168\u6587\u4e0b\u8fdb\u81ea\u5efa\u5e93 ----
+
+    /** \u4e0b\u8f7d\u5165\u5e93\u4e0e\u666e\u901a\u5bfc\u5165\u5171\u7528\u90a3\u4e09\u6761\u89c4\u77e9\uff1a\u4e00\u4e2a\u6587\u4ef6\u4e00\u6761\u56de\u6267\uff0c\u574f\u94fe\u63a5\u4e0d\u8bb8\u62d6\u57ae\u6574\u6279\u3002 */
+    private static void downloadedPicks() throws Exception {
+        deleteRecursively(libraryDir("download"));   // \u4e0a\u4e00\u6b21\u5931\u8d25\u7684\u65e7\u5e93\u4e0d\u80fd\u628a\u8fd9\u4e00\u6279\u5224\u6210\u91cd\u590d
+        LocalLibrary library = new LocalLibrary(libraryDir("download"));
+        final byte[] pdf = readAll(new File("tests/fixture-cn.pdf"));
+        CorpusImport.Batch batch = CorpusImport.download(library, java.util.Arrays.asList(
+                new CorpusImport.Pick("\u5f00\u653e\u83b7\u53d6\u6837\u4f8b", "https://journal.example.org/a.pdf"),
+                new CorpusImport.Pick("\u7a7a\u8fd4\u56de", "https://journal.example.org/empty.pdf"),
+                new CorpusImport.Pick("\u94fe\u63a5\u574f\u4e86", "https://journal.example.org/boom.pdf")),
+                new CorpusImport.Fetch() {
+                    public byte[] get(String url) throws Exception {
+                        if (url.endsWith("empty.pdf")) return new byte[0];
+                        if (url.endsWith("boom.pdf")) throw new java.io.IOException("\u8fde\u4e0d\u4e0a");
+                        return pdf;
+                    }
+                }, null, null);
+        check(batch.total == 3 && batch.receipts.size() == 3, "\u4e09\u6761\u94fe\u63a5\u4e09\u6761\u56de\u6267\uff0c\u4e00\u6761\u574f\u7684\u4e0d\u8bb8\u5e26\u8d70\u5176\u5b83\u4e24\u6761");
+        CorpusImport.Receipt ok = batch.receipts.get(0);
+        check(ok.imported() && ok.storedName.equals("\u5f00\u653e\u83b7\u53d6\u6837\u4f8b.pdf") && ok.chars == 468
+                        && ok.pages == 2, "\u4e0b\u56de\u6765\u7684 PDF \u6309\u666e\u901a PDF \u5165\u5e93\uff1a\u9898\u540d\u8865 .pdf\u3001\u5b57\u6570\u4e0e\u9875\u6570\u7167\u5b9e\u586b");
+        check(batch.receipts.get(1).status == CorpusImport.Status.FAILED
+                        && batch.receipts.get(1).message.equals("\u6ca1\u4e0b\u8f7d\u5230\u5185\u5bb9"), "\u7a7a\u8fd4\u56de\u5355\u72ec\u62a5\u201c\u6ca1\u4e0b\u8f7d\u5230\u5185\u5bb9\u201d");
+        check(batch.receipts.get(2).message.contains("\u8fde\u4e0d\u4e0a"), "\u4e0b\u8f7d\u5931\u8d25\u628a\u539f\u56e0\u5e26\u56de\u6765\uff0c\u4e0d\u9759\u9ed8\u8df3\u8fc7");
+        CorpusImport.Batch empty = CorpusImport.download(library,
+                new java.util.ArrayList<CorpusImport.Pick>(),
+                new CorpusImport.Fetch() { public byte[] get(String url) { return new byte[0]; } },
+                null, null);
+        check(empty.total == 0 && empty.receipts.isEmpty(), "\u6ca1\u6709\u5019\u9009\u65f6\u53ea\u7ed9\u4e00\u4efd\u7a7a\u56de\u6267\uff0c\u4e0d\u62a5\u9519");
     }
 
     private static CorpusImport.Source source(String name, String text) throws Exception {

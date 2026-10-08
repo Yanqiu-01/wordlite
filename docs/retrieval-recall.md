@@ -236,3 +236,78 @@
 不在本轮范围——真要抬这一路的天花板，抬的是这两条，不是翻页。另有一笔没能证伪的账：报告按 DOI/标题指纹
 跨源合并了 2 篇，万方那唯一 1 条题录若与知网同篇，就会在"逐源入库"里缺席；要把它分清得让
 `DuplicateEngine` 打出合并来源，超出本轮边界。
+
+
+## 2026-10-09：正文级材料从开放获取那一侧补进来（改了什么、实测多少）
+
+**这一轮改的是材料来源，一个字没动判据。** 0.72 那条地板、摘要层那张卡、`hasComparableEvidence()`
+的口径全部原样；`DuplicateEngine.java` 只动了 `MAX_FULL_TEXTS`（6 → 10）和把全文抓取的留档出口接进第二阶段。
+
+改的四件事：
+
+1. `.pdf` 不再被丢掉（`PaperSources.fullText`）：以 `.pdf` 结尾、以及玛格泰克那种
+   `downloadArticleFile.do?attachType=PDF&id=…` 的下载口，一律交给 app 自己的 `PdfFile` 解析。
+   改前 `fullText()` 第一行就把它们 return ""，而 `LocalLibrary` 早就在用同一个解析器。
+2. 一份 PDF 的下载上限单开一档：`HttpTransport.MAX_PDF_BODY = 6 MB`（检索响应仍按 2 MB 整份要，
+   超了照旧报"响应过大"）。PDF 读满就收工并把 `capped` 标出来——半份 PDF 照样能抽出前面几页，
+   半份 JSON 只会解出一个假答案，所以两种待遇分开。
+3. OpenAlex 这一路只问开放获取条目（`filter=…,open_access.is_oa:true`）并带 `mailto=` 落款；
+   检索式按文字分岔：中文砍到 16 字以内（它把每个词都当必须命中，一长串没有空格的窗口命中数实测
+   0/0/0/0/0/1/0/0，砍到一段是 6/18/0/13/626/…），拉丁文照旧问 5 个词。链接按"能不能真下到文件"排：
+   白名单期刊官网自建站 > 其它 HTTPS 直链 > 其它 http > `doi.org` 跳转壳（实测末位那条抓回来是
+   2,733 B 的跳转页、0 字）。白名单内的站允许走 http 取 PDF，白名单外一律 HTTPS。
+4. 结果页多一栏"可以下进自建库的开放获取全文 N 篇"（`DuplicateEngine.Report.downloadables`，
+   上限 10 条，只列**还只有摘要可比**但挂着 PDF 直链的候选）：点一下走 `CorpusImport.download`
+   → 与本地导 PDF 同一条入库路、同一个 `TextCorpus`，所以它是真把这几篇从摘要级抬到正文级。
+
+**真跑两轮 `tests/samples/input-liu.docx`（23,674 字 / 可比 19,967 字，perEngine=12 windows=12，
+全直连、无代理，`artifacts/agent-corpus2/live-liu.txt` 与 `-live-liu2.txt`）**：
+
+| 指标 | 轮 1 | 轮 2 | 改前 |
+| --- | --- | --- | --- |
+| 可比正文（抓到开放获取全文） | **5 篇** | **6 篇** | 0 篇 |
+| 只有摘要可比 / 只有题录 | 44 / 11 | 42 / 12 | — |
+| 入库候选（跨源合并后） | 60 → 49 | 60 → 48 | — |
+| 检索窗口 | 计划 12，问到 10 | 计划 12，问到 9 | — |
+| 检索覆盖 | 5,315 / 19,967 = 26.62% | 4,568 / 19,967 = 22.88% | — |
+| 头条比 / 重复字数 / 命中 | 0.13% / 20 字 / 1 | 0.13% / 20 字 / 1 | 0.00% |
+| 摘要层 | 0 / 314 句 = 0.00% | 同 | — |
+| 一轮流量 | — | PDF 10,863,370 B + 检索响应 5,549,054 B = **16.4 MB** | — |
+| 耗时 | 157.9 s | 123.3 s | — |
+
+那一发 0.13% 是唯一一条 score=1.000 的逐字命中（20 个字符："Transient Liquid Phase…"），
+撞上的是知网题录里这篇论文自己的条目。**正文级材料有了 5-6 篇，头条仍然只有 0.13%**：抓回来的
+是《机械工程学报》《中国科学》这一族期刊的 OA 论文，与本稿（哈工大硕士论文）不是同一篇，
+句级判据不该报它们——这正是判据在正常干活。
+
+**流量账**：4 次 PDF 下载 = 10,863,370 B，单份 740,712 / 2,961,037 / 3,298,087 / 3,863,534 B，
+抽出 14,561 / 30,608 / 10,570 / 9,863 字。上一组估的"一轮 4-8 MB"偏低：现在的候选里 3 MB 一份的
+PDF 是常态，额度 10 次 × 上限 6 MB = 最坏 60 MB，实测这一轮 4 次 PDF 就 10.6 MB。
+`MAX_FULL_TEXTS=10` 的真实代价按实测外推约 25 MB 量级，不是 8 MB。
+
+**非零那一发**（判据活的证据，走的是自建库那条路，不联网）：把《机械工程学报》
+（`artifacts/agent-corpus/corpus/zidong-cjmenet.pdf`，931,814 B → app 自己解析 18,977 字 / 759 句）
+里的 11 句话插进样稿（`artifacts/agent-corpus2/input-liu-planted.docx`，24,201 字），
+`CorpusImport.run` 入库 → `LocalLibrary.index` → `DuplicateEngine.scan`：
+**头条 3.14%（重复 515 / 可比 16,424 字），5 处命中，最高 score=0.764**；
+同一个库对没插句子的原稿是 0.00%、0 命中。
+
+**PDF 取字量：1,846 对 9,414 查清了，不是扫描、也不全是解析漏了**
+（`artifacts/agent-corpus/corpus/scichina.pdf`，716,958 B / 6 页，`textOps=4,735`）：
+
+- 这份 PDF 里的中文有 **54.2%**（5,101 / 9,414 字）写在 5 个 FZ*-GB1-0 字体里，这些字体
+  既**没内嵌**（`FontDescriptor` 里连 `FontFile2/3` 都没有）也**没有 ToUnicode**，编码是 `Identity-H`：
+  文件里根本没有码→字的表。
+- 剩下那些内嵌了字体（`FontFile2`）的子集，实测**8 份 FontFile2 全部没有 cmap 表**，
+  而它们的 ToUnicode 只覆盖 ASCII 和标点——SimSun 那份的 ToUnicode 整张表就 1 条映射（`<0323> → <2015>`）。
+- PyMuPDF 的 9,414 是它拿自己打包的中日韩字体/码表替这份 PDF 补的，那些数据不在这个文件里。
+  要复刻只能随包发一张 Adobe-GB1 CID→Unicode 表（约 3 万条），本轮没有做这个决定。
+- 真正修掉的是两处能修的：① `PdfFile.TrueTypeCmap.format4` 少读了 `endCode[]` 与 `startCode[]`
+  之间那 2 字节 `reservedPad`，整张表错位（修前连自造夹具都解错）；② Type0 字体现在会下探
+  `DescendantFonts` 取内嵌字体的 cmap，并认随 PDF 发出的 `/Encoding` CMap 流。
+  夹具 `tests/fixture-cidcmap.pdf`（只有 cmap、没有 ToUnicode）解出真值 4 个字，
+  `tests/fixture-cidcmap-partial.pdf` 里对不上 cmap 的 2 个字**不猜**，按个数记进
+  `undecodableGlyphs` 并带上字体名，回执与留档行都说得出"读不出字形 N 个（字体名）"。
+
+没修的两条，各自是谁的账：① 非内嵌 CJK 字体要 CID→Unicode 表才能救（要发数据，需产品点头）；
+② `CIDFontType0` 的 CFF 字符集（`FontFile3`）没读，读它等于再写一个 CFF 解析器。

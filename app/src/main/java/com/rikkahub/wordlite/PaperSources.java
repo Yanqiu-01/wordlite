@@ -447,9 +447,12 @@ public final class PaperSources {
     static String queryFor(String engine, String phrase, int perEngine) throws IOException {
         String name = key(engine), query = encode(phrase);
         StringBuilder out = new StringBuilder();
-        if (name.equals("openalex")) out.append("filter=").append(encode("title_and_abstract.search:" + narrowing(phrase, 5, 60)))
+        if (name.equals("openalex")) out.append("filter=").append(encode("title_and_abstract.search:" + openAlexTerm(phrase)))
+                .append(",open_access.is_oa:true")
                 .append("&per-page=").append(perEngine)
-                .append("&select=id,doi,title,authorships,publication_year,open_access,best_oa_location,abstract_inverted_index");
+                /* mailto 是 OpenAlex  polite pool 的规矩：不改变返回内容，只是让这批匿名请求有个落款。 */
+                .append("&mailto=").append(encode(POLITE_MAILTO))
+                .append("&select=id,doi,title,language,authorships,publication_year,open_access,best_oa_location,abstract_inverted_index");
         else if (name.equals("crossref")) out.append("query.bibliographic=").append(query).append("&rows=").append(perEngine);
         else if (name.equals("semantic-scholar")) out.append("query=").append(query).append("&limit=").append(perEngine)
                 .append("&fields=title,abstract,year,authors,externalIds,openAccessPdf");
@@ -460,6 +463,28 @@ public final class PaperSources {
         else out.append("q=").append(query).append("&limit=").append(perEngine);
         return out.toString();
     }
+    /** 检索请求的落款邮箱：OpenAlex / Crossref 都要求匿名池里带上一个能找着我们的地址。 */
+    static final String POLITE_MAILTO = "wordlite.checker@protonmail.com";
+
+    /**
+     * OpenAlex 这一路的检索词。它把 filter 里每个词都当成**必须命中**的条件，而中文一扇窗口在检索式里
+     * 常常是一长串没有空格的连续字——实测本稿的 8 扇窗口按"前 5 段"问出去，命中数是 0/0/0/0/0/1/0/0
+     * （2026-10-09，live），换成"取最前面那一段、不超过 16 字"是 6/18/0/13/626/…，其中带 pdf_url 的
+     * 从 0 条变成每式 1-9 条。拉丁文照旧问 5 个词：那边一个词就是真空格隔开的一个词，砍到一个反而没方向。
+     */
+    static String openAlexTerm(String phrase) {
+        String value = phrase == null ? "" : phrase.trim();
+        if (value.isEmpty()) return "";
+        return hasCjk(value) ? narrowing(value, 1, 16) : narrowing(value, 5, 60);
+    }
+    private static boolean hasCjk(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c >= 0x3040 && c <= 0x9FFF) return true;
+        }
+        return false;
+    }
+
     /**
      * 国家哲社文献中心的检索式必须写成带字段码的表达式，裸词一律返回 0 条。题名/关键词优先、摘要兜底，
      * 表达式自身的引号和括号从短语里去掉，免得检索式被检索词改写。
@@ -487,27 +512,269 @@ public final class PaperSources {
         catch (UnsupportedEncodingException error) { throw new IOException("检索短语无法编码"); }
     }
 
+    /* ---- 开放获取全文：一条链接背后可能是 HTML，也可能是一份 PDF ---- */
+
+    /**
+     * 自己建站发 PDF 的期刊官网。挑它们有两个理由：一是这些站直接给 PDF，不经跳转壳；
+     * 二是实测命中率比聚合器高——2026-10-09 抽样 6 次成 4 次（其中机械工程学报那份 931,814 B，
+     * 本机解出 18,977 字 / 14 页），而盲抓聚合平台 12 次只成 4 次。名单里没有的域名照样能下，
+     * 只是排在它们后面、且必须走 HTTPS。
+     */
+    static final String[] OA_PDF_HOSTS = { "cjmenet.com.cn", "engine.scichina.com", "scichina.com",
+            "sciengine.com", "front-sci.com", "viserdata.com", "opticsjournal.net", "hanspub.org", "jos.org.cn" };
+
+    /** 一次全文抓取的结果与"没拿到字时它到底是什么"。 */
+    static final class PdfFetch {
+        byte[] bytes = new byte[0];
+        String text = "";
+        String shape = "not-tried";
+        String error = "";
+        String fonts = "";
+        int status = -1, pages, glyphs, chars;
+        boolean capped;
+        long millis;
+    }
+
     /** Open-access full text, fetched only when the candidate really advertises it; failures yield "". */
     public static String fullText(Candidate candidate, Limits limits, ApiClient.Cancellation cancellation) throws IOException {
         if (candidate == null) return "";
         String url = candidate.fullTextUrl == null ? "" : candidate.fullTextUrl.trim();
-        if (url.isEmpty() || pdf(url)) return "";
+        if (url.isEmpty()) return "";
+        String engine = candidate.source == null || candidate.source.engine == null ? "" : candidate.source.engine;
+        /* .pdf 结尾的链接以前是直接丢掉的，而 app 自己有 PDF 解析：开放获取源给的正文十有七八就是 .pdf，
+           丢掉它等于把唯一能拿到中文正文的一路堵死。现在交给 PdfFile 解，解不出才回空。 */
+        if (pdfLink(url)) {
+            PdfFetch got = fetchPdf(url, limits, cancellation);
+            recordFetch(limits, engine, url, got);
+            return got.text;
+        }
         try {
             ApiClient.Response response = HttpTransport.get(url, null,
                     limits == null ? 20 : limits.timeoutSeconds, HttpTransport.MAX_FULL_TEXT, cancellation,
                     proxyFor(limits));
             String body = response.body == null ? "" : response.body;
-            if (binary(body)) return "";
+            if (binary(body)) {
+                recordText(limits, engine, url, response, 0, "binary-body", "响应是二进制，没当正文读");
+                return "";
+            }
             String text = body.indexOf('<') >= 0 ? Xml.stripTags(body) : collapse(body);
+            String shape = shapeOf(body, text.trim().isEmpty() ? 0 : 1, -1L);
+            recordText(limits, engine, url, response, text.length(),
+                    text.trim().isEmpty() ? "text-empty" : ("text-" + shape), text.length() + " chars");
             return text.length() > MAX_TEXT ? text.substring(0, MAX_TEXT) : text;
-        } catch (IOException ignored) { return ""; }
-        catch (RuntimeException ignored) { return ""; }
+        } catch (IOException error) {
+            recordFetchFailure(limits, engine, url, error);
+            return "";
+        } catch (RuntimeException error) {
+            recordFetchFailure(limits, engine, url, error);
+            return "";
+        }
     }
-    private static boolean pdf(String url) {
-        String path = url;
+
+    /**
+     * 下一份 PDF 并抽出正文。每一步不成都不抛出去——全文抓取一次都不许拖垮整轮检测——
+     * 但"为什么没字"必须留在 shape 里：pdf-no-text-layer 是扫描件，pdf-undecodable 是字体映射不出，
+     * not-a-pdf 是链接挂羊头卖狗肉，fetch-failed 是这条路没通，形状不同用户能做的下一步也不同。
+     */
+    static PdfFetch fetchPdf(String url, Limits limits, ApiClient.Cancellation cancellation) {
+        PdfFetch out = new PdfFetch();
+        long began = System.currentTimeMillis();
+        HttpTransport.Fetched got;
+        try {
+            Map<String, String> headers = new LinkedHashMap<String, String>();
+            headers.put("Accept", "application/pdf, application/octet-stream;q=0.8, */*;q=0.5");
+            got = HttpTransport.getPdf(url, headers, seconds(limits), HttpTransport.MAX_PDF_BODY, cancellation,
+                    proxyFor(limits), plainHttpAllowed(url));
+        } catch (IOException error) {
+            out.shape = "fetch-failed";
+            out.error = clipLine(error.getMessage(), 60);
+            out.millis = System.currentTimeMillis() - began;
+            return out;
+        } catch (RuntimeException error) {
+            out.shape = "fetch-failed";
+            out.error = clipLine(error.getMessage(), 60);
+            out.millis = System.currentTimeMillis() - began;
+            return out;
+        }
+        out.status = got.status;
+        out.bytes = got.bytes == null ? new byte[0] : got.bytes;
+        out.capped = got.capped;
+        out.millis = got.millis > 0L ? got.millis : System.currentTimeMillis() - began;
+        if (!isPdf(out.bytes)) {
+            out.shape = out.capped ? "not-a-pdf-capped" : "not-a-pdf";
+            out.error = out.bytes.length + "B 开头没有 %PDF-";
+            return out;
+        }
+        try {
+            PdfFile.Extracted parsed = PdfFile.extractText(out.bytes);
+            out.pages = parsed.pages;
+            out.glyphs = parsed.undecodableGlyphs;
+            out.fonts = parsed.undecodableFonts;
+            out.text = parsed.text.length() > MAX_TEXT ? parsed.text.substring(0, MAX_TEXT) : parsed.text;
+            out.chars = out.text.trim().length();
+            out.shape = parsed.textOps == 0 ? "pdf-no-text-layer"
+                    : out.chars == 0 ? (parsed.undecodable ? "pdf-undecodable" : "pdf-no-text")
+                    : parsed.undecodable ? "pdf-body-partial" : "pdf-body";
+            if (out.capped || parsed.truncated) out.shape = out.shape + "-capped";
+        } catch (IOException | RuntimeException error) {
+            out.shape = "pdf-unreadable";
+            out.error = clipLine(error.getMessage(), 60);
+        }
+        return out;
+    }
+
+    /** 一键下载用的公开入口：把一篇候选的 PDF 取回来（进自建库由 CorpusImport 那边接着做）。 */
+    public static byte[] downloadPdf(String url, Limits limits, ApiClient.Cancellation cancellation)
+            throws IOException {
+        String link = url == null ? "" : url.trim();
+        if (link.isEmpty()) throw new IOException("这条候选没有全文链接");
+        PdfFetch got = fetchPdf(link, limits, cancellation);
+        if (got.text.trim().isEmpty() && (got.shape.equals("pdf-no-text-layer") || got.shape.equals("fetch-failed")
+                || got.shape.startsWith("not-a-pdf") || got.shape.equals("pdf-unreadable")))
+            throw new IOException(describeFetch(got));
+        return got.bytes;
+    }
+
+    /** 抓回来这一份为什么没有字，一句能说清的话。 */
+    static String describeFetch(PdfFetch got) {
+        if (got == null) return "没试过这篇的全文链接";
+        if (got.shape.equals("fetch-failed")) return "全文链接没打通" + (got.error.isEmpty() ? "" : "：" + got.error);
+        if (got.shape.startsWith("not-a-pdf")) return "那个链接回来的不是 PDF";
+        if (got.shape.equals("pdf-no-text-layer")) return "这份 PDF 是扫描版，没有文字层";
+        if (got.shape.equals("pdf-unreadable")) return "这份 PDF 解不出页面结构" + (got.error.isEmpty() ? "" : "：" + got.error);
+        if (got.shape.equals("pdf-undecodable")) return "这份 PDF 的字形映射读不出" + (got.fonts.isEmpty() ? "" : "：" + got.fonts);
+        return "这篇没抓到正文";
+    }
+
+    /**
+     * 这个链接是不是真给 PDF。除了 .pdf 结尾，还认期刊 CMS 那几个下载口
+     * （机械工程学报的 downloadArticleFile.do?attachType=PDF&id=27657 就是这一类）。
+     */
+    static boolean pdfLink(String url) {
+        String value = url == null ? "" : url.trim().toLowerCase(Locale.ROOT);
+        if (value.isEmpty()) return false;
+        String path = value;
         int cut = path.indexOf('?');
         if (cut >= 0) path = path.substring(0, cut);
-        return path.toLowerCase(Locale.ROOT).endsWith(".pdf");
+        if (path.endsWith(".pdf") || path.endsWith("/pdf")) return true;
+        /* 玛格泰克 CMS 的下载口不带 .pdf 后缀：/CN/article/downloadArticleFile.do?attachType=PDF&id=27657 */
+        if (value.contains("attachtype=pdf")) return true;
+        return path.endsWith("downloadarticlefile.do");
+    }
+    /** 白名单站点允许走 http 取 PDF：实测机械工程官网的 PDF 只有 http 一条路。其余一律 HTTPS。 */
+    static boolean plainHttpAllowed(String url) {
+        String host = hostOf(url);
+        if (host.isEmpty() || !url.trim().toLowerCase(Locale.ROOT).startsWith("http://")) return false;
+        return hostedBy(host, OA_PDF_HOSTS);
+    }
+    /** 这条全文链接值不值得先花额度：0 白名单站点、1 其它 HTTPS 直链、2 其它 http、3 doi.org 跳转壳。 */
+    static int pdfUrlRank(String url) {
+        String value = url == null ? "" : url.trim();
+        if (value.isEmpty()) return 9;
+        String host = hostOf(value);
+        if (host.endsWith("doi.org") || host.endsWith("dx.doi.org")) return 3;
+        if (hostedBy(host, OA_PDF_HOSTS)) return 0;
+        return value.toLowerCase(Locale.ROOT).startsWith("https://") ? 1 : 2;
+    }
+    private static boolean hostedBy(String host, String[] suffixes) {
+        for (String suffix : suffixes)
+            if (host.equals(suffix) || host.endsWith("." + suffix)) return true;
+        return false;
+    }
+    static String hostOf(String url) {
+        String value = url == null ? "" : url.trim();
+        int scheme = value.indexOf("://");
+        if (scheme < 0) return "";
+        int end = value.length();
+        for (int i = scheme + 3; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '/' || c == '?' || c == '#') { end = i; break; }
+        }
+        String host = value.substring(scheme + 3, end);
+        int at = host.lastIndexOf('@');
+        if (at >= 0) host = host.substring(at + 1);
+        int port = host.indexOf(':');
+        return (port < 0 ? host : host.substring(0, port)).toLowerCase(Locale.ROOT);
+    }
+    /** 留档用的链接尾巴：主机名 + 最后一段路径，够认出是哪篇，也不把整条带参数的链接摊进报告。 */
+    static String linkLabel(String url) {
+        String host = hostOf(url);
+        String value = url == null ? "" : url.trim();
+        int scheme = value.indexOf("://");
+        String path = scheme < 0 ? value : value.substring(scheme + 3);
+        int slash = path.indexOf('/');
+        path = slash < 0 ? "" : path.substring(slash + 1);
+        int cut = path.indexOf('?');
+        if (cut >= 0) path = path.substring(0, cut);
+        int last = path.lastIndexOf('/');
+        String tail = last < 0 ? path : path.substring(last + 1);
+        if (tail.length() > 24) tail = tail.substring(tail.length() - 24);
+        return tail.isEmpty() ? host : host + "/" + tail;
+    }
+    private static int seconds(Limits limits) {
+        return limits == null || limits.timeoutSeconds <= 0 ? 20 : Math.min(limits.timeoutSeconds, 60);
+    }
+    private static String clipLine(String value, int max) {
+        String text = value == null ? "" : value.trim().replaceAll("\\s+", " ");
+        return text.length() <= max ? text : text.substring(0, max);
+    }
+    private static boolean isPdf(byte[] bytes) {
+        if (bytes == null || bytes.length < 32) return false;
+        int probe = Math.min(bytes.length, 1024);
+        for (int i = 0; i + 5 <= probe; i++)
+            if (bytes[i] == '%' && bytes[i + 1] == 'P' && bytes[i + 2] == 'D' && bytes[i + 3] == 'F'
+                    && bytes[i + 4] == '-') return true;
+        return false;
+    }
+    /** 一次全文抓取也要落一行（A4 的口径：成功也落）。没有字的那几行，就是"为什么这篇不可比"的凭据。 */
+    private static void recordFetch(Limits limits, String engine, String url, PdfFetch got) {
+        ShapeSink sink = limits == null ? null : limits.shapes;
+        if (sink == null || got == null) return;
+        ShapeRow row = new ShapeRow();
+        row.engine = engine == null ? "" : engine;
+        row.probe = clipProbe(linkLabel(url));
+        row.status = got.status;
+        row.bodyBytes = got.bytes.length;
+        row.entries = got.chars > 0 ? 1 : 0;
+        row.shape = got.shape;
+        row.millis = got.millis;
+        row.error = got.error == null ? "" : got.error;
+        row.excerpt = clipLine(fetchNote(got), SHAPE_EXCERPT_CHARS);
+        try { sink.record(row); } catch (RuntimeException ignored) { }
+    }
+    static String fetchNote(PdfFetch got) {
+        StringBuilder out = new StringBuilder();
+        out.append(got.chars).append(" chars").append(got.pages > 0 ? " / " + got.pages + " pages" : "");
+        if (got.glyphs > 0) out.append(" / 读不出字形 ").append(got.glyphs).append(" 个");
+        if (!got.fonts.isEmpty()) out.append("（").append(got.fonts).append("）");
+        if (got.capped) out.append(" / 已到下载上限，只取回前 ").append(got.bytes.length).append(" B");
+        return out.toString();
+    }
+    private static void recordText(Limits limits, String engine, String url, ApiClient.Response response,
+                                   int chars, String shape, String note) {
+        ShapeSink sink = limits == null ? null : limits.shapes;
+        if (sink == null) return;
+        ShapeRow row = new ShapeRow();
+        row.engine = engine == null ? "" : engine;
+        row.probe = clipProbe(linkLabel(url));
+        row.status = response == null ? -1 : response.status;
+        row.bodyBytes = response == null || response.raw == null ? -1 : response.raw.length;
+        row.entries = chars > 0 ? 1 : 0;
+        row.shape = shape;
+        row.millis = response == null ? 0L : response.elapsedMillis;
+        row.excerpt = clipLine(note, SHAPE_EXCERPT_CHARS);
+        try { sink.record(row); } catch (RuntimeException ignored) { }
+    }
+    private static void recordFetchFailure(Limits limits, String engine, String url, Throwable error) {
+        ShapeSink sink = limits == null ? null : limits.shapes;
+        if (sink == null) return;
+        ShapeRow row = new ShapeRow();
+        row.engine = engine == null ? "" : engine;
+        row.probe = clipProbe(linkLabel(url));
+        row.shape = "fetch-failed";
+        row.failed = true;
+        row.error = clipLine(error == null ? "" : error.getMessage(), 60);
+        try { sink.record(row); } catch (RuntimeException ignored) { }
     }
     private static boolean binary(String body) {
         int scan = Math.min(body.length(), 2048), odd = 0;
@@ -781,10 +1048,27 @@ public final class PaperSources {
             candidate.source.year = year(text(item, "publication_year"));
             candidate.source.locator = first(doi, id);
             candidate.abstractText = clip(inverted(ApiJson.path(item, "abstract_inverted_index")));
-            candidate.fullTextUrl = url(item, "open_access.oa_url", "best_oa_location.pdf_url");
+            /* 以前先取 open_access.oa_url，它实测常常是 https://doi.org/... ——一条要跳转两次的链接，
+               而传输层不追跳转，抓回来是 2,733 B 的跳转页、0 字。现在按"能不能真下到文件"排：
+               白名单期刊官网 > 其它 HTTPS 直链 > 其它 http > doi.org 跳转壳。 */
+            candidate.fullTextUrl = betterFullTextUrl(url(item, "best_oa_location.pdf_url"),
+                    url(item, "best_oa_location.landing_page_url"), url(item, "open_access.oa_url"));
             add(out, candidate, limit);
         }
         return out;
+    }
+
+    /** 在几条候选链接里挑一条真能下到东西的：先比 rank，同级保持给出顺序（确定性）。 */
+    static String betterFullTextUrl(String... candidates) {
+        String best = "";
+        int bestRank = 9;
+        for (String value : candidates) {
+            String url = value == null ? "" : value.trim();
+            if (url.isEmpty()) continue;
+            int rank = pdfUrlRank(url);
+            if (rank < bestRank) { bestRank = rank; best = url; }
+        }
+        return best;
     }
 
     private static ArrayList<Candidate> parseCrossref(Object root, int limit) {

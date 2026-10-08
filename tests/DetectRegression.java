@@ -25,6 +25,8 @@ public final class DetectRegression {
     /* 万方那一路收发的是 protobuf 字节，夹具也照字节存，文本通道一概不碰。 */
     private static byte[] wanfangFixture = new byte[0];
     private static byte[] lastBinaryBody = new byte[0];
+    /** tests/fixture-cidcmap.pdf：一张 CID 字体自带的 cmap，真值是铜焊图陆那四个字。 */
+    private static byte[] oaPdf = new byte[0];
     private static String lastContentType = "";
     private static void check(boolean ok, String message) {
         if (!ok) throw new AssertionError(message);
@@ -132,6 +134,30 @@ public final class DetectRegression {
         server.createContext("/europepmc/search", exchange -> { record("/europepmc/search", queryOf(exchange)); respond(exchange, 200, EUROPEPMC); });
         server.createContext("/europepmc/", exchange -> { record("/europepmc/fulltext", queryOf(exchange)); respond(exchange, 200, FULLTEXT_XML); });
         server.createContext("/arxiv", exchange -> { record("/arxiv", queryOf(exchange)); respond(exchange, 200, ARXIV); });
+        /* 期刊官网自己发 PDF 的那一路：字节进、正文出，全走回环，不碰真网。 */
+        server.createContext("/oa/", exchange -> {
+            record("/oa", queryOf(exchange));
+            try {
+                exchange.getResponseHeaders().set("Content-Type", "application/pdf");
+                exchange.sendResponseHeaders(200, oaPdf.length);
+                OutputStream out = exchange.getResponseBody();
+                out.write(oaPdf);
+                out.close();
+            } catch (Exception ignored) { }
+            exchange.close();
+        });
+        server.createContext("/oa-big", exchange -> {
+            record("/oa-big", queryOf(exchange));
+            byte[] big = new byte[3000];
+            java.util.Arrays.fill(big, (byte) 120);
+            try {
+                exchange.sendResponseHeaders(200, big.length);
+                OutputStream out = exchange.getResponseBody();
+                out.write(big);
+                out.close();
+            } catch (Exception ignored) { }
+            exchange.close();
+        });
         server.createContext("/core", exchange -> {
             record("/core", queryOf(exchange));
             lastApiKey = exchange.getRequestHeaders().getFirst("api-key");
@@ -216,6 +242,7 @@ public final class DetectRegression {
             sleep(2500);
             respond(exchange, 200, "{}");
         });
+        oaPdf = binary("tests/fixture-cidcmap.pdf");
         server.start();
         String base = "http://127.0.0.1:" + server.getAddress().getPort();
         try {
@@ -518,12 +545,51 @@ public final class DetectRegression {
                 "Europe PMC fullTextXML is reduced to plain comparison text");
         check(totalHits() == beforeFull + 1 && query("/europepmc/fulltext").startsWith("/europepmc/MED/PMC9876543/fullTextXML"),
                 "full text is fetched once and only from loopback");
+        /* .pdf 链接以前是被直接丢掉的；现在它必须真下回来、用 app 自己的 PDF 解析出正文。 */
         PaperSources.Candidate pdf = new PaperSources.Candidate();
         pdf.source.engine = "openalex";
-        pdf.fullTextUrl = "https://repo.example.org/1234/paper.pdf";
+        pdf.fullTextUrl = base + "/oa/zidong.pdf";
         int beforePdf = totalHits();
-        check(PaperSources.fullText(pdf, limits, null).isEmpty() && totalHits() == beforePdf,
-                "pdf-only candidates are never downloaded");
+        String pdfText = PaperSources.fullText(pdf, limits, null);
+        check(PaperSources.pdfLink("https://repo.example.org/1234/paper.pdf")
+                        && PaperSources.pdfLink("http://www.cjmenet.com.cn/CN/article/downloadArticleFile.do"
+                                + "?attachType=PDF&id=27657")
+                        && !PaperSources.pdfLink(base + "/europepmc/search"),
+                "pdf 链接认 .pdf 结尾，也认玛格泰克那种 attachType=PDF 的下载口");
+        check(pdfText.contains("\u94dc\u710a\u5b54\u9699") && totalHits() == beforePdf + 1
+                        && hits("/oa") == 1,
+                "pdf 直链下载一次并解析出内嵌字体 cmap 里的四个字");
+        check(PaperSources.hostOf("http://www.cjmenet.com.cn:8080/CN/x.do?a=1").equals("www.cjmenet.com.cn")
+                        && PaperSources.hostOf("not-a-url").isEmpty(),
+                "主机名解析取端口与查询串之前的部分，坏链接回空");
+        check(PaperSources.pdfUrlRank("http://www.cjmenet.com.cn/CN/x.do") == 0
+                        && PaperSources.pdfUrlRank("https://random-host.example.org/a.pdf") == 1
+                        && PaperSources.pdfUrlRank("http://random-host.example.org/a.pdf") == 2
+                        && PaperSources.pdfUrlRank("https://doi.org/10.1000/abc") == 3
+                        && PaperSources.pdfUrlRank("") == 9,
+                "白名单期刊官网 > 其它 https > 其它 http > doi.org 跳转壳");
+        check(PaperSources.plainHttpAllowed("http://www.cjmenet.com.cn/CN/x.do")
+                        && !PaperSources.plainHttpAllowed("http://evil.example.org/a.pdf")
+                        && !PaperSources.plainHttpAllowed("http://127.0.0.1:1/a.pdf"),
+                "只有白名单期刊官网的 PDF 允许走 http，其余一律 HTTPS");
+        check(PaperSources.betterFullTextUrl("https://doi.org/10.1000/abc",
+                        "https://journal.example.org/downloadArticleFile.do?attachType=PDF&id=7").contains("attachType")
+                        && PaperSources.betterFullTextUrl("", "https://doi.org/10.1000/abc")
+                                .equals("https://doi.org/10.1000/abc"),
+                "doi.org 跳转壳排到最后，能直接下到文件的链接先花额度");
+        String oaQuery = PaperSources.queryFor("openalex", "\u591a\u5b54\u94dc\u7684\u5236\u5907\u4e0e\u7ed3\u6784\u8c03\u63a7\u53ca\u5176\u77ac\u6001\u6db2\u76f8\u8fde\u63a5\u884c\u4e3a", 50);
+        check(oaQuery.contains("open_access.is_oa") && oaQuery.contains("mailto=")
+                        && PaperSources.openAlexTerm("multimodal copper brazing of porous copper").split(" ").length >= 2,
+                "开放检索只问 OA 条目并带落款；拉丁文仍问满五个词");
+        check(PaperSources.openAlexTerm("\u591a\u5b54\u94dc\u7684\u5236\u5907\u4e0e\u7ed3\u6784\u8c03\u63a7").length() <= 16,
+                "中文检索式砍到 16 字以内：OpenAlex 把每个词都当必须命中，长串一命中就是 0 条");
+        HttpTransport.Fetched part = HttpTransport.getPdf(base + "/oa-big", null, 20, 1024, null, null, false);
+        check(part.bytes.length == 1024 && part.capped && part.status == 200,
+                "PDF 读到上限就收工并把 capped 标出来，不再当成\u201c响应过大\u201d整份丢掉");
+        boolean wholeRefused = false;
+        try { HttpTransport.get(base + "/oa-big", null, 20, 1024, null, null); }
+        catch (ApiClient.Failure error) { wholeRefused = error.getMessage().equals("\u54cd\u5e94\u8fc7\u5927"); }
+        check(wholeRefused, "\u666e\u901a\u68c0\u7d22\u54cd\u5e94\u8d85\u8fc7\u4e0a\u9650\u7167\u65e7\u76f4\u63a5\u62a5\u9519\uff0c\u4e0d\u628a\u534a\u4efd JSON \u5f53\u6b63\u6587\u89e3");
 
         PaperSources.Candidate arxiv = PaperSources.search("arxiv", "brazing temperature", limits, null).get(0);
         check(arxiv.source.engine.equals("arxiv") && arxiv.source.locator.equals("http://arxiv.org/abs/2103.11222v2")

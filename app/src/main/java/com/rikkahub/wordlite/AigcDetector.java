@@ -97,6 +97,9 @@ public final class AigcDetector {
         /** 本次真正用的系数表（族取中文族；拉丁族的表由它平移而来）。 */
         public AigcScorer.Coefficients coefficients;
         public String coefficientVersion = "";
+        /** 本次有多少句由离线模型打分、其中多少句落进平滑窗口。模型没装载或未达标时恒为 0。 */
+        public int modelSentences;
+        public int windowHits;
     }
 
     private AigcDetector() { }
@@ -141,7 +144,18 @@ public final class AigcDetector {
             for (int i = 0; i < scored.size(); i++) {
                 AigcFeatures.Segment seg = scored.get(i);
                 ArrayList<AigcFeatures.Hit> hits = AigcFeatures.of(seg, stats);
-                double score = AigcScorer.score(hits, AigcScorer.current(seg.family));
+                // 离线模型打分路径：只有装载了权重**且**清单里那两个实测数真过出厂门槛才走（见 AigcNgramModel）。
+                // 拉丁族不许用中文模型打分，照旧走启发式。随包的 ngram-lr-2026-10-09 未达标，这一段今天进不来。
+                AigcNgramModel model = AigcNgramModel.engaged() && seg.family != AigcFamily.LATIN
+                        ? AigcNgramModel.current() : null;
+                double score;
+                if (model != null) {
+                    score = model.sentenceScore(seg.compact);
+                    result.modelSentences++;
+                    if (model.windowHit(seg.compact)) result.windowHits++;
+                } else {
+                    score = AigcScorer.score(hits, AigcScorer.current(seg.family));
+                }
                 Sentence sentence = new Sentence();
                 sentence.start = seg.start;
                 sentence.end = seg.end;
@@ -245,9 +259,12 @@ public final class AigcDetector {
     /** 样本不足时禁止给比例，其余只说倾向与档位，不做判决（MOSS"分数只用于相对比较"）。 */
     static String verdict(Result result) {
         // 方向没验正过就谈不上"这次量得准不准"：这一句排在样本量之前，先认错再谈字数。
-        if (!AigcScorer.calibrated())
+        // 离线模型是另一条独立的闸门：它自己那份实测（真稿独立留出 AUC 与真人误报）达标才轮到印数。
+        if (!AigcScorer.calibrated() && !AigcNgramModel.calibrated())
             return AigcScorer.UNCALIBRATED_NOTE + "，所以本次只列触发过的判据证据，不给生成比例";
-        return measurement(result);
+        String measured = measurement(result);
+        // 印出来的每一个数都得说清是谁量的：模型版本号 + 训练数据 + 量到的 AUC 一起带上。
+        return AigcNgramModel.engaged() ? measured + "。" + AigcNgramModel.describe() : measured;
     }
 
     /**

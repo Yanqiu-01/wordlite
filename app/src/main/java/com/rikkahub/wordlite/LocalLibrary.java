@@ -31,6 +31,8 @@ public final class LocalLibrary {
         public boolean noTextLayer;
         /** PDF 有文字算子，但字体编码映射不出 Unicode。 */
         public boolean undecodable;
+        /** 映射不出的是哪些字、有多少：回执与报告用它把"少字"说成一句有出处的事实。 */
+        public String undecodableNote = "";
     }
 
     /** 入库回执：批量导入要知道落库的文件名与"重复撞在哪一篇上"，只回一个错误串不够用。 */
@@ -251,6 +253,10 @@ public final class LocalLibrary {
             PdfFile.Extracted pdf = PdfFile.extractText(content, MAX_TEXT_CHARS);
             result.pages = pdf.pages;
             result.undecodable = pdf.undecodable;
+            result.undecodableNote = pdf.undecodableGlyphs > 0
+                    ? pdf.undecodableGlyphs + " 个字形映射不出"
+                            + (pdf.undecodableFonts.isEmpty() ? "" : "，字体：" + pdf.undecodableFonts)
+                    : "";
             result.noTextLayer = pdf.textOps == 0;
             result.text = pdf.text;
             return result;

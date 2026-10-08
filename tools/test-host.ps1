@@ -63,6 +63,9 @@ Add-Suite "RewriteRobustnessRegression" @("tests/corpus/real-prose.txt")
 Add-Suite "AigcRegression"         @()
 # 逐特征方向审计（带标注语料）。缺语料一律判失败，不许静默跳过；它同时是"未标定就不许给数"的闸门。
 Add-Suite "AigcFeatureAuditRegression" @()
+# 离线 n-gram 模型（训练台 tools/build-aigc-model.py 导出的 assets/aigc/*）：装载、两侧口径一致、
+# 真稿独立留出、出厂闸门。缺权重文件或缺标注语料一律判失败；这一版 AUC 不达标，闸门必须仍然是关的。
+Add-Suite "AigcOfflineModelRegression" @("app/src/main/assets/aigc", "tests/corpus")
 Add-Suite "LocalRewriteRegression" @()
 Add-Suite "DetectRegression"       @()
 Add-Suite "RetrievalCoverageRegression" @()

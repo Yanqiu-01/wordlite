@@ -18,7 +18,13 @@ public final class DuplicateEngine {
        limits.windows 说了算。MAX_REQUESTS 是"窗口数 x 源数"的真上限且默认可达：默认 9 个源 x 6 个
        窗口 = 54 次，用户把窗口拉到 24 就是 216 次，撞顶必须留字据。
        MAX_CORPUS_PAPERS 是语料侧的入库总闸，逐源上限取 limits.perEngine：9 个源 x 12 篇 = 108 <= 120。 */
-    static final int MAX_REQUESTS = 120, MAX_FULL_TEXTS = 6, MAX_CORPUS_PAPERS = 120, MAX_NOTES = 40;
+    /**
+     * 全文额度 10：开放获取的 PDF 是"抽得出字才算一篇"，实测 12 次下载成 4 次（2026-10-09），
+     * 6 次额度期望只有 2 篇可比正文，10 次才够 3-4 篇。代价是流量：一轮实测见 docs/retrieval-recall.md。
+     */
+    static final int MAX_REQUESTS = 120, MAX_FULL_TEXTS = 10, MAX_CORPUS_PAPERS = 120, MAX_NOTES = 40;
+    /** 报告里列几条"可以下进自建库"的候选：再多那一屏就没人看了。 */
+    static final int MAX_DOWNLOADABLES = 10;
     /* 挂钟闸门与限速：实测一轮 9 个源约 10 秒（维普最慢 4062ms），但 Routes 的多路尝试能把单个
        请求拖到 20 秒以上，所以只设请求数上限挡不住慢网络，两个闸必须同时存在。 */
     static final long MAX_SEARCH_MILLIS = 180000L, MIN_ENGINE_GAP_MILLIS = 400L;
@@ -152,8 +158,23 @@ public final class DuplicateEngine {
         public final ArrayList<AbstractHit> abstractHits = new ArrayList<AbstractHit>();
         /** 每次检索请求的响应留档（A4）：逐源逐次，成功也留，一行一次请求（万方换页每页一行）。 */
         public final ArrayList<PaperSources.ShapeRow> shapes = new ArrayList<PaperSources.ShapeRow>();
+        /**
+         * 带着可下载 PDF 直链的候选：结果页给一条"下进自建库"的入口。
+         * 自建库走的是与联网正文同一个判据（TextCorpus 那一次 match），所以这一条不是安慰奖。
+         */
+        public final ArrayList<Downloadable> downloadables = new ArrayList<Downloadable>();
         /** 留档被 MAX_SHAPE_ROWS 裁过的行数：档里没这一行才说明真的问了几次就是几行。 */
         public int shapesDropped;
+    }
+
+    /** 结果页"下进自建库"的一条：题名、哪个检索源给的、PDF 直链。 */
+    public static final class Downloadable {
+        public String title = "", engine = "", url = "";
+        Downloadable(String title, String engine, String url) {
+            this.title = title == null ? "" : title;
+            this.engine = engine == null ? "" : engine;
+            this.url = url == null ? "" : url;
+        }
     }
 
     private DuplicateEngine() { }
@@ -574,7 +595,8 @@ public final class DuplicateEngine {
         if (cancelled(cancellation)) note(report, "检索已取消，结果只覆盖已完成的窗口");
         report.windowsRetrieved = sweep.windowsRetrieved();
         report.coveredChars = sweep.coveredChars();
-        phaseB(sweep.askedQueries(), corpus, report, engines, limits, cancellation, sweep.pool, skipped,
+        /* 第二阶段用本轮那份 Limits（带留档出口）：全文抓取也要落一行，出口不在这就没法落。 */
+        phaseB(sweep.askedQueries(), corpus, report, engines, sweep.limits, cancellation, sweep.pool, skipped,
                 failedLast, exhausted, silent, requestCap, timeCap, poolCap, sweep.droppedCandidates(), sweep.deadline);
     }
 
@@ -951,6 +973,12 @@ public final class DuplicateEngine {
             if (fetched) report.fullTextCandidates++; else report.abstractOnlyCandidates++;
             report.comparableCandidates++;
             corpus.add(candidate.source, body);
+            /* 抓到正文的就不用再列了；还只有摘要可比、但手里挂着 PDF 直链的，给用户一条自己把它
+               下进自建库的路——自建库那一路的判据与联网正文完全同一条，缺的从来只是材料。 */
+            if (!fetched && report.downloadables.size() < MAX_DOWNLOADABLES
+                    && PaperSources.pdfUrlRank(pick.candidate.fullTextUrl) <= 2)
+                report.downloadables.add(new Downloadable(candidate.source.title,
+                        candidate.source.engine, pick.candidate.fullTextUrl.trim()));
         }
         everyConnectorFailed(report, engines, skipped);
         disclose(report, silent, failedLast, exhausted, requestCap, timeCap, corpusCap, poolCap, poolDropped);
@@ -1014,6 +1042,9 @@ public final class DuplicateEngine {
             if (count(report.candidateCount, engine) > 0) chinese++;
         if (chinese > 0 && report.fullTextCandidates == 0)
             note(report, "知网、万方、维普只回摘要，正文与图表无法比对，相似率是下限");
+        if (!report.downloadables.isEmpty())
+            note(report, "另有 " + report.downloadables.size() + " 篇候选挂着可直接下载的开放获取 PDF，"
+                    + "结果页可一键下进自建库（自建库按正文比对，不按摘要）");
         if (!report.candidates.isEmpty()) {
             note(report, "共取回 " + report.candidates.size() + " 篇候选文献（跨源合并 " + report.mergedDuplicates
                     + " 篇），入库比对 " + report.comparableCandidates + " 篇");

@@ -15,6 +15,12 @@ import java.util.Map;
 /** Read-only GET for the built-in literature sources: HTTPS only, no redirects, no secrets in errors. */
 public final class HttpTransport {
     public static final int MAX_BODY = 2 * 1024 * 1024, MAX_FULL_TEXT = 512 * 1024;
+    /**
+     * 一份开放获取 PDF 的下载上限。实测能匿名取回的中文 OA PDF 是 700 KB–3.6 MB
+     * （2026-10-09，12 份：0.72/0.88/0.93/0.97/1.15/1.38/1.61/3.62 MB），6 MB 装得下最大的那份还留一档。
+     * 一轮最多抓 MAX_FULL_TEXTS=10 篇，所以这是"最坏情况 60 MB"的那道闸；实测一轮平均见正文。
+     */
+    public static final int MAX_PDF_BODY = 6 * 1024 * 1024;
     /** Beyond this a rate limit is not a momentary crowd, and waiting would look like a hang. */
     private static final int MAX_RETRY_WAIT_MILLIS = 10000;
     /* The sources do not require it, but a UA that names the project and a home page is the
@@ -75,9 +81,48 @@ public final class HttpTransport {
                 payload == null ? new byte[0] : payload, contentType);
     }
 
+    /** 一份下载回来的字节，外加"是不是被我们的上限掐断的"。半份 PDF 也能解析出前面几页，所以掐断不是失败。 */
+    public static final class Fetched {
+        public int status = -1;
+        public byte[] bytes = new byte[0];
+        public boolean capped;
+        public long millis;
+        public String via = "";
+    }
+
+    /**
+     * 取一份 PDF。与 get() 的两点区别，都为 PDF 这一类材料而设：
+     * 读满 maxBytes 就收工并把 capped 标出来（"响应过大"对 PDF 没有意义——截半份照样能抽出前面的正文）；
+     * allowPlainHttp 放行 http 由调用方负责——期刊官网自建站只有 http 的 PDF，白名单在检索侧管着，
+     * 白名单之外一律照旧必须 HTTPS。
+     */
+    public static Fetched getPdf(String url, Map<String, String> headers, int timeoutSeconds, int maxBytes,
+                                 ApiClient.Cancellation cancellation, java.net.Proxy proxy,
+                                 boolean allowPlainHttp) throws IOException {
+        int limit = maxBytes <= 0 ? MAX_PDF_BODY : Math.min(maxBytes, MAX_PDF_BODY);
+        boolean[] capped = new boolean[1];
+        ApiClient.Response response = send(url, headers, timeoutSeconds, limit, cancellation, proxy,
+                null, null, capped, allowPlainHttp);
+        Fetched fetched = new Fetched();
+        fetched.status = response.status;
+        fetched.bytes = response.raw == null ? new byte[0] : response.raw;
+        fetched.capped = capped[0];
+        fetched.millis = response.elapsedMillis;
+        fetched.via = response.via == null ? "" : response.via;
+        return fetched;
+    }
+
     private static ApiClient.Response send(String url, Map<String, String> headers, int timeoutSeconds,
                                            int maxBytes, ApiClient.Cancellation cancellation,
                                            java.net.Proxy proxy, byte[] form, String contentType)
+            throws IOException {
+        return send(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, form, contentType, null, false);
+    }
+
+    private static ApiClient.Response send(String url, Map<String, String> headers, int timeoutSeconds,
+                                           int maxBytes, ApiClient.Cancellation cancellation,
+                                           java.net.Proxy proxy, byte[] form, String contentType,
+                                           boolean[] cappedOut, boolean allowPlainHttp)
             throws IOException {
         /* 一条请求可能同时有直连和经电脑代理两条路，而哪条通取决于用户此刻的网络：国内库直连快，
            海外源往往非得借代理才出得去。按主机名把候选路排个先后逐条试——只有"连不上"才值得换路，
@@ -96,7 +141,7 @@ public final class HttpTransport {
             try {
                 ApiClient.Response reached = once(url, headers,
                         Routes.connectSeconds(proxy, via, timeoutSeconds), maxBytes, cancellation,
-                        via, form, contentType);
+                        via, form, contentType, cappedOut, allowPlainHttp);
                 Routes.succeeded(via);
                 Routes.note(url, via);
                 reached.via = Routes.label(via);
@@ -142,7 +187,7 @@ public final class HttpTransport {
             throw failure;
         }
         ApiClient.Response retry = once(url, headers, timeoutSeconds, maxBytes, cancellation, failedVia,
-                form, contentType);
+                form, contentType, cappedOut, allowPlainHttp);
         retry.attempts = 2;
         retry.via = Routes.label(failedVia);
         return retry;
@@ -171,14 +216,17 @@ public final class HttpTransport {
     }
     private static ApiClient.Response once(String url, Map<String, String> headers, int timeoutSeconds,
                                            int maxBytes, ApiClient.Cancellation cancellation,
-                                           java.net.Proxy proxy, byte[] form, String contentType)
+                                           java.net.Proxy proxy, byte[] form, String contentType,
+                                           boolean[] cappedOut, boolean allowPlainHttp)
             throws IOException {
-        int limit = maxBytes <= 0 ? MAX_BODY : Math.min(maxBytes, MAX_BODY);
+        /* 上限的天花板：要整份响应的源最多 MAX_BODY，愿意"读满就收工"的那一路（PDF）到 MAX_PDF_BODY。 */
+        int ceiling = cappedOut == null ? MAX_BODY : MAX_PDF_BODY;
+        int limit = maxBytes <= 0 ? MAX_BODY : Math.min(maxBytes, ceiling);
         int seconds = timeoutSeconds <= 0 ? 20 : Math.min(timeoutSeconds, 120);
         HttpURLConnection connection = null;
         long started = System.nanoTime();
         try {
-            URL target = parse(url);
+            URL target = parse(url, allowPlainHttp);
             connection = (HttpURLConnection) (proxy == null ? target.openConnection() : target.openConnection(proxy));
             if (cancellation != null) cancellation.connection(connection);
             guard(cancellation);
@@ -211,7 +259,7 @@ public final class HttpTransport {
             response.status = status;
             byte[] raw;
             try (InputStream input = connection.getInputStream()) {
-                raw = read(input, limit, cancellation);
+                raw = read(input, limit, cancellation, cappedOut);
             }
             response.raw = raw;
             response.body = new String(raw, StandardCharsets.UTF_8);
@@ -245,15 +293,19 @@ public final class HttpTransport {
             if (cancellation != null) cancellation.connection(null);
         }
     }
-    /** HTTPS everywhere except the loopback fixtures, so a stub server can serve the regressions. */
-    private static URL parse(String url) throws MalformedURLException, ApiClient.Failure {
+    /**
+     * HTTPS everywhere except the loopback fixtures, so a stub server can serve the regressions.
+     * allowPlainHttp 是检索侧为"只有 http 的期刊官网 PDF"要的一条例外，白名单在它那边；
+     * 放行的是这一条下载，不是一般的检索请求，也不包括任何带着本机内容的请求。
+     */
+    private static URL parse(String url, boolean allowPlainHttp) throws MalformedURLException, ApiClient.Failure {
         if (url == null || url.trim().isEmpty()) throw new ApiClient.Failure("检索地址无效", 0);
         URL target = new URL(url.trim());
         String protocol = target.getProtocol() == null ? "" : target.getProtocol().toLowerCase(Locale.ROOT);
         String host = target.getHost() == null ? "" : target.getHost().toLowerCase(Locale.ROOT);
         if (protocol.equals("https")) return target;
         boolean loopback = host.equals("localhost") || host.equals("127.0.0.1") || host.equals("::1");
-        if (protocol.equals("http") && loopback) return target;
+        if (protocol.equals("http") && (loopback || allowPlainHttp)) return target;
         throw new ApiClient.Failure("检索源必须使用 HTTPS", 0);
     }
     /** The search form is built here, never taken from the document, so its length is not a leak. */
@@ -275,13 +327,22 @@ public final class HttpTransport {
     private static void guard(ApiClient.Cancellation cancellation) throws ApiClient.Failure {
         if (Thread.currentThread().isInterrupted() || cancellation != null && cancellation.cancelled()) throw new ApiClient.Failure("已取消", 0);
     }
-    private static byte[] read(InputStream input, int limit, ApiClient.Cancellation cancellation) throws IOException {
+    private static byte[] read(InputStream input, int limit, ApiClient.Cancellation cancellation,
+                               boolean[] cappedOut) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buffer = new byte[8192];
         int count;
         while ((count = input.read(buffer)) >= 0) {
             guard(cancellation);
-            if (out.size() + count > limit) throw new ApiClient.Failure("响应过大", 0);
+            if (out.size() + count > limit) {
+                /* 截断还是报错，由调用方表过态没有决定：给了 cappedOut 就是"读满为止"——
+                   半份 PDF 照样能抽出前面几页；没给说明这响应必须整份，截一半只会解出一个假答案。 */
+                if (cappedOut == null) throw new ApiClient.Failure("响应过大", 0);
+                int room = limit - out.size();
+                if (room > 0) out.write(buffer, 0, Math.min(room, count));
+                cappedOut[0] = true;
+                break;
+            }
             out.write(buffer, 0, count);
         }
         return out.toByteArray();

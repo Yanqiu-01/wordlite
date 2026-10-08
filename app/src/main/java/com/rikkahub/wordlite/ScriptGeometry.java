@@ -39,6 +39,43 @@ public final class ScriptGeometry {
         return raised(true, m, shiftEm, 1f);
     }
 
+    /**
+     * A w:vertAlign run as a line-box competitor: the box of its own face at the size the
+     * run declares, with the script raise/lower left out of the box.
+     *
+     * Word measured, not inferred (artifacts/agent-layout-fix/lab: script-lab.py writes
+     * script-lh-nogrid.docx / script-lh-grid360.docx -- one paragraph per case, five lines
+     * separated by <w:br/>, every line starting with the same Han glyph so a difference of two
+     * Information(6) reads is the line advance of the line above; script-lab-measure.ps1 reads
+     * it back through Word 16.0 COM into script-lh-*.tsv; lab/script-lh-read.py prints the
+     * per-case deltas). On a 12pt body:
+     *
+     *   - a script that declares the body size (every vertAlign run in tests/samples/input-liu.docx):
+     *     the line advance equals the paragraph's own plain lines to 0.000 px under w:line=240
+     *     and 300 auto and under atLeast, and nothing grows at all under lineRule=exact;
+     *     NOT measured under a real line grid -- the grid sample carries only w:linePitch,
+     *     no w:type, and Word reads back identical to the gridless one;
+     *   - a script that declares 24pt grows the line to 36.2 px and one that declares 36pt to
+     *     55.3 px, and super and sub grow by the same 15.333 px / 34.4 px.
+     *
+     * Both readings say the same thing: what grows the row is a run BIGGER than the paragraph,
+     * charged at the size it declares, and the baseline shift is not part of the box. Charging
+     * the shift was our own addition. On tests/samples/input-liu.docx it happens to bill nothing
+     * either way -- all 54 vertAlign runs there declare the body size and the body row already
+     * contains that box (measured: the device capture is byte-identical before and after this
+     * rule) -- so this is a correctness pin, not a pagination fix: a document whose citation
+     * superscripts are typed bigger than the body would grow rows Word leaves alone.
+     *
+     * The superscript flag does not reach the box arithmetic and is deliberately false: Word grew
+     * the two directions by the same amount. w:position keeps its shift (see raised()) because
+     * the same lab shows Word does grow a row for text raised without rescaling (+12.7 px on a
+     * 20.867 px line).
+     */
+    public static ScriptGeometry declared(FontScriptMetrics metrics) {
+        FontScriptMetrics m = metrics == null ? FontScriptMetrics.DEFAULT : metrics;
+        return raised(false, m, 0f, 1f);
+    }
+
     private static ScriptGeometry raised(boolean superscript, FontScriptMetrics m,
                                          float shift, float scale) {
         float ascentRatio = m.ascentFraction * m.lineHeightRatio;
@@ -97,3 +134,5 @@ public final class ScriptGeometry {
         return new int[]{ascent, descent};
     }
 }
+
+

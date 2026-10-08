@@ -199,7 +199,10 @@ public final class CorpusImport {
         if (receipt.chars == 0) {
             // 有文字算子却拼不出一个有效字符 = 字体编码读不出，跟"文件本来就是空的"分开报。
             receipt.status = Status.FAILED;
-            receipt.message = extract.undecodable ? "PDF 有文字流，但字体编码映射不出文字" : "没有从文件里读到文本";
+            receipt.message = extract.undecodable
+                    ? "PDF 有文字流，但字体编码映射不出文字"
+                            + (extract.undecodableNote.isEmpty() ? "" : "：" + extract.undecodableNote)
+                    : "没有从文件里读到文本";
             return;
         }
         String hash = LocalLibrary.bodyHash(text);
@@ -226,6 +229,72 @@ public final class CorpusImport {
         }
         receipt.status = Status.FAILED;
         receipt.message = added.error.length() == 0 ? "入库失败" : added.error;
+    }
+
+    /** 一条"从链接下载后入库"的候选：显示名 + PDF 直链。名字由调用方定（一般是题名）。 */
+    public static final class Pick {
+        public final String name;
+        public final String url;
+        public Pick(String name, String url) {
+            this.name = name == null ? "" : name;
+            this.url = url == null ? "" : url;
+        }
+    }
+
+    /** 取字节这一步由调用方给（Android 上是 PaperSources.downloadPdf，回归测试里是回环服务器）。 */
+    public interface Fetch {
+        byte[] get(String url) throws Exception;
+    }
+
+    /**
+     * 把一批候选的 PDF 下回来再走一遍普通导入。
+     * 下载失败与导入失败同样一文件一条回执，一个坏链接不许拖垮整批——批量导入那三条规矩一条不改。
+     */
+    public static Batch download(LocalLibrary library, List<Pick> picks, Fetch fetch,
+                                 Progress progress, Cancel cancel) {
+        if (library == null) throw new IllegalArgumentException("library == null");
+        if (fetch == null) throw new IllegalArgumentException("fetch == null");
+        ArrayList<Pick> items = picks == null ? new ArrayList<Pick>() : new ArrayList<Pick>(picks);
+        Batch batch = new Batch();
+        batch.total = items.size();
+        Map<String, String> seen = new HashMap<String, String>();
+        for (int i = 0; i < items.size(); i++) {
+            if (cancel != null && cancel.cancelled()) { batch.cancelled = true; break; }
+            Pick pick = items.get(i);
+            Receipt receipt = new Receipt();
+            receipt.number = i + 1;
+            receipt.name = pick == null ? "" : safeName(pick);
+            try {
+                byte[] bytes = pick == null || pick.url.trim().isEmpty()
+                        ? null : fetch.get(pick.url.trim());
+                if (bytes == null || bytes.length == 0) {
+                    receipt.status = Status.FAILED;
+                    receipt.message = "没下载到内容";
+                } else {
+                    importOne(library, new Source(receipt.name, bytes), receipt, seen);
+                }
+            } catch (Exception error) {
+                receipt.status = Status.FAILED;
+                receipt.message = describe(error);
+            }
+            batch.receipts.add(receipt);
+            if (progress == null) continue;
+            try {
+                progress.onReceipt(receipt.number, batch.total, receipt);
+            } catch (Exception error) {
+                batch.cancelled = true;
+                break;
+            }
+        }
+        return batch;
+    }
+
+    /** 下载入库的文件名：题名净化后补 .pdf，空题名退到链接主机名，绝不带 URL 里的查询串。 */
+    private static String safeName(Pick pick) {
+        String title = pick.name.trim();
+        if (title.length() > 0) return title.endsWith(".pdf") ? title : title + ".pdf";
+        String host = PaperSources.hostOf(pick.url);
+        return (host.isEmpty() ? "open-access" : host) + ".pdf";
     }
 
     private static String describe(Throwable error) {

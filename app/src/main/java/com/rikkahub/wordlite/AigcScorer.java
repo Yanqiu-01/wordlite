@@ -78,6 +78,13 @@ public final class AigcScorer {
      * 第 2 条（真人误报 ≤ 2/千句）两张表都过（天花板表全八档 0/498 = 0.00/千句，拟合表各门槛 0/498），
      * 但第 1、5 条不过就没有"能过线的机器句"可给数。所以版本号仍是 v1-order-only：
      * 踩在 0.750000 这条线上、段级掉到 0.700、领域配对档反向的数，印出去就是假数字。
+     *
+     * <p>2026-10-09 又试了第三条路：不再堆手写特征，直接训练一个字符 n-gram + 逻辑回归的离线模型
+     * （{@link AigcNgramModel}，训练台 {@code tools/build-aigc-model.py}，公开带标注语料 27 万计分句）。
+     * 它在公共留出上 AUC 0.8352~0.9698（看配置），但在真稿独立留出上只有 0.558，真人误报 3.2 句/千句，
+     * 两条出厂门槛（0.85 与 2/千句）都不过，所以那位自己另有一道闸门（{@link AigcNgramModel#calibrated()}），
+     * 也不归本方法的版本号管：{@link #VERSION} 说的仍然是这套手写启发式系数。
+     * 全过程与失效分析见 docs/aigc-offline-model.md。
      */
     public static boolean calibrated() {
         return VERSION.startsWith(CALIBRATED_PREFIX);
