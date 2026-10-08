@@ -181,6 +181,22 @@ final class WordLineHeights {
     }
 
     /**
+     * Word 的固定值行距（w:lineRule="exact"）是一把绝对长度，不是倍数，所以中间不许取整：
+     * 400 twips（20 磅）在这一套文档坐标里就是 400/15 = 26.6667px。这个换算的前提是真机量到的
+     * 比例：tools/line-spacing-probe.ps1 在 CDY-AN90（sdk 29）上读到 12pt 的字大小
+     * getTextSize()=16.0000 文档px、1pt=1.333333px、1440twips=96px，也就是 px/em = 1.000，
+     * 不是 1.0741。整像素的行盒由 fixedBoxPx 画，小数那一截由 Spacing.lineCarry 交给分页器。
+     */
+    static float fixedAdvancePx(int lineTwips) {
+        return Math.max(1, lineTwips) / PageGeometry.TWIPS_PER_UNIT;
+    }
+
+    /** 平台上真画得出来的那一整像素行盒：固定值向下取整到最近的整数，差额走 lineCarry。 */
+    static int fixedBoxPx(int lineTwips, float coordinateScale) {
+        return Math.max(1, Math.round(fixedAdvancePx(lineTwips) * coordinateScale));
+    }
+
+    /**
      * Word 的 auto 行距是一步算完的小数：单一行高(pt) × 96/72 × w:line/240，中间不取整。
      * 我们画出来的行盒仍然落在整数上，分页要补的就是这一条与整数行盒之差。
      */

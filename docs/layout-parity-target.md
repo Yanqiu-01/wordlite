@@ -39,6 +39,8 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 （`tools/build-metrics-probe.ps1`、`tools/device-probe/MetricsActivity.java`、`MetricsManifest.xml`）留在版本库里，
 下一版和"西文行的宽度多收"放在同一轮改。六个数因此仍是上表那一列。
 
+再后一轮（第 26 节）先把"引擎到底收到了什么"量死：全篇只有封面第 0 段写了 w:lineRule="exact" w:line="380"（19 磅），没有任何 20 磅 / 16 磅的行距声明；Word 自己的读数是 Exactly 0 段、AtLeast 0 段、相邻基线正好 20.0pt 的段落 0 个。该改的还是改了：exact 当一把绝对长度算（真机量到 1pt=1.333333px、12pt 的 em=16.0000px，比例 1.000，不是 1.0741），画整像素行盒、小数那一截走 lineCarry。六条一个没动（两边 `lines-all.tsv` 同一个 sha `5F714EE762A78345`），页数 28=28，7 段错页全是 -1，见第 26.4 节。
+
 三条规矩：
 
 1. 真值只有两个来源——桌面 Word 16.0 COM 的逐行基线/页码坐标，和手机上微软 Word 的实际渲染。
@@ -1123,3 +1125,94 @@ simple 那一列更像 Word（6,55,93），但换 strategy 会同时改掉中文
 所以嫌疑落在两端对齐撑缝把 slack 倒进这道缝上。手机侧逐字符 x 的量台已就位
 （`artifacts/device/probe/DeviceCapture.java` 现出 `chars-at-punct.tsv`：每行含"拉丁紧邻全角标点"的行逐字符 x/步长），
 下一轮两边逐字符相减，再决定改撑缝还是改标点压缩口径。
+
+## 26. 固定值行距：先量死"引擎收到什么"，再把它当一把绝对长度（真机 LineSpacingProbe）
+
+用户给的前提是"那两页写着行距固定值 20 磅 / 16 磅，我们静默沿用了 1.5 倍行距"。这一轮第一步不看 XML，
+先看引擎到底收到什么：新增量台 `tools/device-probe/LineSpacingProbe.java`（一键跑
+`pwsh tools/line-spacing-probe.ps1 -Tree <快照>/app/src/main/java -Pages 1,2,3,20,21`，在手机上用
+app_process 跑同一套 DocxParser + A4Paginator），每段打印 DocxParser 走完 w:pStyle / basedOn /
+docDefaults 继承之后交给 DocxTextLayout 的 (w:line, w:lineRule, snapToGrid)、排版后的第一行上挂了
+几个 LineHeightSpan、以及分页真正按的行高。这样"解析器没继承到"和"继承到了但排版不理"分得开。
+
+### 26.1 全篇的声明普查：这篇稿子里没有 20 磅 / 16 磅的行距
+
+- 引擎侧（tag `linespacing1`，engine head_sha `a81444a`，373 段全打）：只有一条 exact——第 0 段
+  （封面"毕业论文 毕业设计"）`<w:spacing w:before="240" w:lineRule="exact" w:line="380"/>` = 19 磅，
+  引擎读到 lineTwips=380、rule=exact、第一行 LineHeightSpan=1，用的行高 25.0px。其余全是 auto：
+  line=300×262、288×41、240×20、284/324/360 各 1；**atLeast 0 条，400（20 磅）0 条，320（16 磅）0 条**。
+- 样式那边也没有：styles.xml 的 lineRule 全是 auto（line=240×175、300×5、276×2、480、360、280）。
+- 桌面 Word 自己的读数（`artifacts/agent-layout-verify/page-stack-all/page_stack.tsv` 的
+  LineSpacingRule 列，Multiple=5 / Single=0 / 1.5 倍=1）：Multiple 325 段、Single 69 段、1.5 倍 1 段
+  （第 177 段"表4-1课题进度及主要工作"，正文里那条唯一的 line=360 auto），**Exactly 0 段、AtLeast 0 段**。
+- Word 自己的相邻基线距离（同一份真值，117 个多行段落）：主峰 19.7pt = 26.267px（23 段），
+  第二族 17.325pt = 23.100px（16 段），中位 25.900px；**正好 20.0pt 的段落 0 个，正好 16.0pt 的 0 个**。
+
+结论说白：那两页没有"固定值被丢掉"这回事，这篇稿子根本没写过 20 磅 / 16 磅的行距。
+1154 / 923 那两个数是按某个 em 比例换算出来的我们自己算的数，不是 Word 的行高，不能拿来当对账目标。
+
+### 26.2 那个 em 比例顺手量死了：是 1.000，不是 1.0741
+
+同一台手机（CDY-AN90，sdk 29）同一轮采样里的 SCALE 行（`pwsh tools/line-spacing-probe.ps1 -Pages 20,21`）：
+
+| 字号 | 该是几 px（pt×4/3） | Paint.getTextSize() | "汉"宽 | 汉宽/em |
+| --- | --- | --- | --- | --- |
+| 9pt | 12.0 | 12.0000 | 12.0 | 1.00000 |
+| 12pt | 16.0 | 16.0000 | 16.0 | 1.00000 |
+| 15pt | 20.0 | 20.0000 | 20.0 | 1.00000 |
+| 18pt | 24.0 | 24.0000 | 24.0 | 1.00000 |
+| 22pt | 29.3333 | 29.3333 | 29.0 | 0.98864（整像素 advance，第 21.4 节那条） |
+
+`1440twips = 96.0000px`、`1pt = 1.333333px`。也就是说文档坐标到像素的比例是 **1.000**：
+20 磅就该是 26.6667px、16 磅就该是 21.3333px。1154/1080 那个 1.0741 不进引擎。
+
+### 26.3 改了什么：exact 是一把长度，画整像素、按小数分页
+
+只动 exact 这一条，atLeast 一个字没改：
+
+- `WordLineHeights.fixedAdvancePx(twips) = twips / 15`（不取整）、`fixedBoxPx = round(它)`。
+  `DocxTextLayout.Spacing` 用行盒画、把小数那一截放进 `lineCarry`，由 A4Paginator 按行补给分页
+  （`minimumLineHeight` 的 exact 分支同步改成不取整，图片段与无文字段同一个口径）。
+  封面那条 380twips：过去整段按 25px/行收费，现在画 25px 的行盒、按 25.3333px 分页。
+- 网格不许再把固定值补到整格（固定值的意思是这一行就这么多高），所以 carrying 时 `gridSnapGrownRow=false`；
+  只有行盒还等于固定值算出来的那一格时才交小数，避免网格地板抬过之后重复加钱。
+- 上标下标仍然不许抬高固定值的行：`clipScripts = exact` 这条本来就在，本轮补了断言。
+  脚注引用这一族引擎里没有落地排版（`DocxParser` 只记 `output.hasFootnotes`，正文里没有脚注标记 run），
+  宽度与高度天然都是 0，本轮没有改这条。
+- 断言（`pwsh tools/run-suites-private.ps1 -Tree artifacts/privtree/fixedlh -OutDir artifacts/privout/fixedlh
+  -Suite WordLineHeightRegression,ScriptRegression,Regression`，全绿）：
+  `tests/WordLineHeightRegression.fixedLineHeightIsAnAbsoluteLength` 新增 6 条——20 磅 = 26.6667px、
+  16 磅 = 21.3333px、380twips = 25.3333px、行盒 27px / 25px、比例锁在 1.000。
+  三个套件的读数是 69 / 65 / 74 条断言 PASS。
+
+六条前后（`pwsh tools/parity-six.ps1 -Tag fixedlh1 -Tree artifacts/privtree/fixedlh/app/src/main/java`，
+对照同机 HEAD 复采 `-Tag head25`）：
+
+| # | 指标 | 改前 `head25` | 改后 `fixedlh1` |
+| --- | --- | --- | --- |
+| 1 | 段落页归属 | 7 段错页 / 206（exact 96.6%，全是 -1） | 7 段错页 / 206（一字不差） |
+| 2 | 逐行行高中位误差 | -0.767 px | -0.767 px |
+| 3 | 逐行行高 p90 | 2.533 px | 2.533 px |
+| 4 | 每页累计高度 | 0.79 行 | 0.79 行 |
+| 5 | 断点一致率 | 115/165 = 69.7% | 115/165 = 69.7% |
+| 6 | 右边界超出 1px | 1 / 33 | 1 / 33 |
+
+六个数一个没动，`lines-all.tsv` 的 sha 两边都是 `5F714EE762A78345`——这是预期结果而不是没测出来：
+这篇稿子只有封面那一个 exact 段落、而且封面自己就是一页，多出来的 0.3333px 换不了页。
+这一条改的真正用处是用户自己在编辑器里选的固定行距（`EditorActivity` 写 `w:lineRule="exact"`），
+以及任何真写了固定值的 docx。不许拿这个改动去声称页归属涨了。
+
+### 26.4 21 页 vs 20 页：页数是 28 = 28，那个数字说的是 6 个段落的归属
+
+- `pwsh tools/parity-six.ps1 -Tag head25 -Tree artifacts/privtree/head25/app/src/main/java`
+  （HEAD `68beb77`）：**页数 ours/Word = 28/28**。这篇稿子既不是 20 页也不是 21 页。
+- Word 放在物理第 21 页、我们放在第 20 页的是这 6 段：word_para 208 `（2）建立可重复的多孔Cu制备流程…`
+  到 `（7）形成统一的数据表、显微组织图、统计图和…`（4.2 预期目标那串）。
+  同一族的另外 7 段错页全是 -1：para 121（Word 14 / 我们 13）、155（18 / 17）、208（21 / 20）、
+  382（25 / 24）、397（27 / 26）、408 与 409（28 / 27）。没有一段是晚一页。
+- 所以"改完固定值能不能从 21 页塌回 20 页"这个问法本身不成立：两边页数本来就相等，
+  要修的是这 7 段的归属；-1 的方向说我们每页装得比 Word 多，账就在第 2/3/4 条那 0.767px/行上，
+  而那一族单独修会在别处多出来（第 23 节、第 19 节的反向抵消是同一条原因）。
+- 另外记一笔对不上：交接时引用的基线"201/206、73.9%、78.8%、0/33"在 HEAD 上复现不出来，
+  同一条命令的读数是 199/206（7 段错页）、69.7%、1/33（`artifacts/agent-layout-verify/head25/six.txt`）。
+  写进更新说明的数应当从这份读取出。

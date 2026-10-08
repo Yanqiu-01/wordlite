@@ -1227,19 +1227,20 @@ public final class DocxTextLayout {
         int singlePx = Math.max(1, Math.round(singleLinePt * PageGeometry.points(1)));
         int lineTwips = paragraph.format.lineSpacingTwips;
         String rule = paragraph.format.lineRule == null ? "" : paragraph.format.lineRule;
-        int desired;
+        float desired;
         if ("exact".equalsIgnoreCase(rule)) {
-            desired = Math.max(1, Math.round(PageGeometry.twips(lineTwips) ));
+            // A declared 固定值 is a length: keep the fraction, do not bill a rounded line.
+            desired = Math.max(1f, WordLineHeights.fixedAdvancePx(lineTwips));
         } else if ("atLeast".equalsIgnoreCase(rule)) {
             desired = Math.max(singlePx, Math.round(PageGeometry.twips(lineTwips)));
         } else if (lineTwips > 0) {
-            desired = Math.max(1, Math.round(singlePx * lineTwips / 240f));
+            desired = Math.max(1f, Math.round(singlePx * lineTwips / 240f));
         } else {
             desired = singlePx;
         }
         if (paragraph.format.snapToGrid && lineGridPitchTwips > 0)
             desired = Math.max(desired,
-                    Math.max(1, Math.round(PageGeometry.twips(lineGridPitchTwips)) + 1));
+                    Math.max(1, Math.round(PageGeometry.twips(lineGridPitchTwips))) + 1);
         return desired;
     }
 
@@ -1279,6 +1280,8 @@ public final class DocxTextLayout {
         private boolean clipScripts;
         /** 行高走 Word 实测值的那一段：长高的行不许补齐到整格，见 ScriptGeometry.lineBox。 */
         private boolean gridSnapGrownRow = true;
+        /** 固定值行距的小数那一截：Word 的 20 磅就是 26.6667px，画整像素、按小数分页。 */
+        private float fixedCarry;
 
         Spacing(DocxDocument.ParagraphFormat f, float coordinateScale,
                 float singleLineHeightPt, float ascentFrac, int lineGridPitchTwips, boolean measuredAdvance) {
@@ -1292,7 +1295,8 @@ public final class DocxTextLayout {
             //   step2: desired = round(singlePx × line/240)
             int singlePx = Math.max(1, Math.round(singleLineHeightPt * PageGeometry.points(1) * coordinateScale));
             if ("exact".equalsIgnoreCase(rule)) {
-                desiredHeight = Math.max(1, Math.round(PageGeometry.twips(lineTwips) * coordinateScale));
+                desiredHeight = WordLineHeights.fixedBoxPx(lineTwips, coordinateScale);
+                fixedCarry = PageGeometry.twips(lineTwips) * coordinateScale - desiredHeight;
             } else if ("atLeast".equalsIgnoreCase(rule)) {
                 desiredHeight = Math.max(singlePx,
                         Math.round(PageGeometry.twips(lineTwips) * coordinateScale));
@@ -1323,6 +1327,13 @@ public final class DocxTextLayout {
             // Word clips raised text under exact line spacing and grows the line
             // for it under auto, multiple and at-least spacing.
             clipScripts = "exact".equalsIgnoreCase(rule);
+            /* 固定值行距：小数那一截在这里交出去。网格不许再把它补到整格——固定值的意思就是
+               这一行这么多高，Word 的固定 20 磅不会因为我们开着文档网格就变成 18 磅的整倍数。 */
+            if (clipScripts && desiredHeight == WordLineHeights.fixedBoxPx(lineTwips, coordinateScale)
+                    && Math.abs(fixedCarry) < 1f) {
+                lineCarry = fixedCarry;
+                gridSnapGrownRow = false;
+            }
             /* Word 的 auto 行距是一步算完的小数：单一行高 × w:line/240，中间不取整。我们原来按
                "两步取整"建模（先把单一行高取整再乘比例），那个模型对得上我们自己的旧数，对不上 Word：
                宋体 12pt / w:line=300 Word 量到 26.267px，两步取整只给 26。差的那截按行累计，

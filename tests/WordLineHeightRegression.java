@@ -353,6 +353,26 @@ public final class WordLineHeightRegression {
         }
     }
 
+    /**
+     * 固定值行距（w:lineRule="exact"）是一把绝对长度，不是倍数。真机量到文档坐标到像素的比例是
+     * 1.000（tools/line-spacing-probe.ps1，CDY-AN90 sdk 29：12pt 的 getTextSize()=16.0000 文档px、
+     * 1pt=1.333333px、1440twips=96.0px），所以 20 磅就是 26.6667px、16 磅就是 21.3333px。
+     * 行盒必须整数、分页高度不许：否则一行差 0.3333px，一页 30 行就差 10px。
+     */
+    private static void fixedLineHeightIsAnAbsoluteLength() {
+        close(WordLineHeights.fixedAdvancePx(400), 26.6667d, 0.0002d,
+                "固定值 20 磅 = 400twips = 26.6667 文档px，中间不取整");
+        close(WordLineHeights.fixedAdvancePx(320), 21.3333d, 0.0002d, "固定值 16 磅 = 21.3333px");
+        close(WordLineHeights.fixedAdvancePx(380), 25.3333d, 0.0002d,
+                "input-liu.docx 全篇唯一那条 exact（封面段 line=380）：25.3333px，旧口径按 25px 收费");
+        check(WordLineHeights.fixedBoxPx(400, 1f) == 27,
+                "平台画的是整像素行盒 27px，剩下的 0.3333px 走 lineCarry");
+        check(WordLineHeights.fixedBoxPx(380, 1f) == 25, "380twips 行盒 25px，差额 0.3333px/行");
+        close(WordLineHeights.fixedAdvancePx(400) / (20d * 96d / 72d), 1.0d, 0.0001d,
+                "比例锁在 1.000：真机 px/em 量到 1.000，Word 真值里 0 段的相邻基线是 20.0pt，"
+                        + "所以 1154/1080 那个 1.0741 不许进引擎");
+    }
+
     public static void main(String[] args) {
         tableHoldsOnlyMeasuredFaces();
         advanceIsOneStepFractional();
@@ -362,6 +382,7 @@ public final class WordLineHeightRegression {
         characterFaceRuleTravelsWithTheSwitch();
         pageBudgetCountsBaselinesNotLineBoxes();
         overrideKeepsEverythingElse();
+        fixedLineHeightIsAnAbsoluteLength();
         System.out.println("SUMMARY " + checks + " line-height assertions passed (Word truth from "
                 + "desktop Word 16.0 COM baselines, font metrics read from the bundled assets; "
                 + "device rendering is checked by capture-device/word-parity, not here).");

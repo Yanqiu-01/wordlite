@@ -10,17 +10,22 @@
 # Word's own answers for these same strings are in artifacts/word-break/word-lines.tsv.
 #
 # Usage: pwsh tools/breakiterator-probe.ps1 [-Serial X]
-param([string]$Serial = "EAMUT20528011355")
+param(
+    [string]$Serial = "EAMUT20528011355",
+    # Which probe to build: BreakIteratorProbe (can the platform take our break rules?) or
+    # ScriptBreakProbe (does a script/scale span inside a token create a break opportunity?).
+    [ValidateSet("BreakIteratorProbe", "ScriptBreakProbe")]
+    [string]$Probe = "BreakIteratorProbe")
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 function RunAdb([string[]]$a) { & adb -s $Serial @a }
 
-$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("wl-breakprobe-" + [Guid]::NewGuid().ToString("N"))
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("wl-" + $Probe.ToLower() + "-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $android = Join-Path $root "tools/android-35.jar"
 $classes = Join-Path $tmp "classes"; New-Item -ItemType Directory -Force -Path $classes | Out-Null
-& javac -nowarn -encoding UTF-8 -classpath $android -d $classes (Join-Path $root "tools/device-probe/BreakIteratorProbe.java")
+& javac -nowarn -encoding UTF-8 -classpath $android -d $classes (Join-Path $root "tools/device-probe/$Probe.java")
 if ($LASTEXITCODE -ne 0) { throw "javac failed" }
 $jar = Join-Path $tmp "probe.jar"
 Push-Location $classes; try { & jar -cf $jar . } finally { Pop-Location }
@@ -31,11 +36,11 @@ if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
 $dev = "/data/local/tmp/wlbreak"
 RunAdb @("shell", "mkdir", "-p", $dev) | Out-Null
 RunAdb @("push", (Join-Path $dexDir "classes.dex"), "$dev/probe.dex") | Out-Null
-$out = RunAdb @("shell", "CLASSPATH=$dev/probe.dex app_process -Xmx256m / com.rikkahub.wordlite.probe.BreakIteratorProbe")
+$out = RunAdb @("shell", "CLASSPATH=$dev/probe.dex app_process -Xmx256m / com.rikkahub.wordlite.probe.$Probe")
 $sdk = (RunAdb @("shell", "getprop", "ro.build.version.sdk")).Trim()
 Write-Host "== device sdk=$sdk  (Word truth: artifacts/word-break/word-lines.tsv)"
 $out
-$dst = Join-Path $root "artifacts/agent-layout-verify/breakiterator-probe.txt"
+$dst = Join-Path $root "artifacts/agent-layout-verify/$Probe.txt"
 New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
 Set-Content -Encoding utf8NoBOM -Path $dst -Value (@("sdk=$sdk") + $out)
 Write-Host "== wrote $dst"
