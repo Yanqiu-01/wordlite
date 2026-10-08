@@ -49,6 +49,30 @@ public final class CorpusImport {
         public boolean imported() {
             return status == Status.IMPORTED;
         }
+
+        /** 一行能读完这一篇的下场：编号、结果、题名、进了库的文件名与字数，没成则说为什么。 */
+        public String describe() {
+            StringBuilder out = new StringBuilder().append(number).append(". ").append(statusLabel(status));
+            if (name.length() > 0) out.append(' ').append(name);
+            if (status == Status.IMPORTED) {
+                out.append(" → ").append(storedName).append("（").append(chars).append(" 字");
+                if (pages > 0) out.append(" / ").append(pages).append(" 页");
+                out.append('）');
+            } else if (status == Status.DUPLICATE) {
+                out.append(" → 库里已有同一篇：").append(duplicateOf);
+            } else {
+                out.append(" → ").append(message.length() == 0 ? "没进库" : message);
+            }
+            return out.toString();
+        }
+
+        private static String statusLabel(Status status) {
+            if (status == Status.IMPORTED) return "已入库";
+            if (status == Status.DUPLICATE) return "重复";
+            if (status == Status.NO_TEXT_LAYER) return "无文字层";
+            if (status == Status.UNSUPPORTED) return "不支持";
+            return "失败";
+        }
     }
 
     public static final class Batch {
@@ -83,6 +107,22 @@ public final class CorpusImport {
                 if (!receipt.imported() && receipt.message.length() > 0) return receipt.message;
             }
             return "";
+        }
+
+        /**
+         * 逐篇一行的结果，"下进自建库"那一步直接贴它。
+         * 为什么不让界面自己拼：以前那一格只把 batch.receipts.get(0) 的说明弹给用户看，
+         * 一批十篇里九篇失败也只有第一条露得出脸，剩下的成没成没人知道。
+         */
+        public String detail() {
+            StringBuilder out = new StringBuilder();
+            for (int i = 0; i < receipts.size(); i++) {
+                if (i > 0) out.append('\n');
+                out.append(receipts.get(i).describe());
+            }
+            if (cancelled)
+                out.append("\n已取消，剩余 ").append(Math.max(0, total - receipts.size())).append(" 篇未处理");
+            return out.toString();
         }
 
         public String summary() {

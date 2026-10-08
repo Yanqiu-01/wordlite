@@ -539,11 +539,25 @@ public final class CorpusImportRegression {
         check(batch.receipts.get(1).status == CorpusImport.Status.FAILED
                         && batch.receipts.get(1).message.equals("\u6ca1\u4e0b\u8f7d\u5230\u5185\u5bb9"), "\u7a7a\u8fd4\u56de\u5355\u72ec\u62a5\u201c\u6ca1\u4e0b\u8f7d\u5230\u5185\u5bb9\u201d");
         check(batch.receipts.get(2).message.contains("\u8fde\u4e0d\u4e0a"), "\u4e0b\u8f7d\u5931\u8d25\u628a\u539f\u56e0\u5e26\u56de\u6765\uff0c\u4e0d\u9759\u9ed8\u8df3\u8fc7");
+        /* 逐篇回执：一批三篇，成功那篇和两种失败各有各的一行。
+           以前界面只弹 batch.receipts.get(0) 的说明，一批十篇里后面九篇的下场全被藏起来。 */
+        String detail = batch.detail();
+        String[] lines = detail.split("\n");
+        check(lines.length == 3, "detail() 一批几篇就几行：" + lines.length);
+        check(lines[0].contains("已入库") && lines[0].contains("开放获取样例.pdf")
+                        && lines[0].contains("468 字") && lines[0].contains("2 页"),
+                "成功那一行说得出入库文件名、字数与页数：" + lines[0]);
+        check(lines[1].contains("失败") && lines[1].contains("没下载到内容")
+                        && lines[2].contains("连不上"),
+                "两种失败各占一行，坏链接那条不许把成功那条挤掉");
+        check(batch.summary().contains("导入 1 篇") && batch.summary().contains("失败 2 个")
+                        && detail.indexOf("开放获取样例") < detail.indexOf("空返回"),
+                "汇总与逐篇两样都对得上账：" + batch.summary());
         CorpusImport.Batch empty = CorpusImport.download(library,
                 new java.util.ArrayList<CorpusImport.Pick>(),
                 new CorpusImport.Fetch() { public byte[] get(String url) { return new byte[0]; } },
                 null, null);
-        check(empty.total == 0 && empty.receipts.isEmpty(), "\u6ca1\u6709\u5019\u9009\u65f6\u53ea\u7ed9\u4e00\u4efd\u7a7a\u56de\u6267\uff0c\u4e0d\u62a5\u9519");
+        check(empty.detail().isEmpty() && empty.summary().equals("导入 0 篇"), "\u6ca1\u6709\u5019\u9009\u65f6\u53ea\u7ed9\u4e00\u4efd\u7a7a\u56de\u6267\uff0c\u4e0d\u62a5\u9519");
     }
 
     private static CorpusImport.Source source(String name, String text) throws Exception {

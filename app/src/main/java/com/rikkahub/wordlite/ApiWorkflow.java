@@ -381,57 +381,97 @@ public final class ApiWorkflow {
     }
     /**
      * 结果页的"下进自建库"那一格：只列现在**只有摘要可比**、但检索源挂着可下载 PDF 的候选。
-     * 点一下就下载 + 走 CorpusImport 进自建库——自建库与联网正文进的是同一个语料、同一条判据，
+     * 点一下下载 + 走 CorpusImport 进自建库——自建库与联网正文进的是同一个语料、同一条判据，
      * 所以这一条不是装饰：它把这 N 篇从"摘要级"抬到"正文级"。
+     * <p>第一行是"全部下进自建库"：一次点十下不是批量，CorpusImport.download 本来就吃一批 Pick，
+     * 缺的只是把整批递进去、并把逐篇回执显示出来的这一步。
      */
     private void downloadables(LinearLayout box, DuplicateEngine.Report result) {
         if (result == null || result.downloadables.isEmpty()) return;
-        box.addView(label("可以下进自建库的开放获取全文 " + result.downloadables.size()
+        final ArrayList<DuplicateEngine.Downloadable> picks =
+                new ArrayList<DuplicateEngine.Downloadable>(result.downloadables);
+        box.addView(label("可以下进自建库的开放获取全文 " + picks.size()
                 + " 篇（现在只有摘要可比；下进来后按正文比对）", 13));
-        for (final DuplicateEngine.Downloadable pick : result.downloadables) {
-            TextView row = label("下载进自建库：" + pick.title + "\n" + engineTitle(pick.engine)
+        TextView every = label("全部下进自建库：" + picks.size() + " 篇（逐篇回执，一份下不成不拖垮其余）", 14);
+        every.setTypeface(Typeface.DEFAULT_BOLD);
+        every.setPadding(0, dp(10), 0, dp(10));
+        every.setOnClickListener(view -> confirmDownload(picks));
+        box.addView(every);
+        for (final DuplicateEngine.Downloadable pick : picks) {
+            TextView row = label("只下这一篇：" + pick.title + "\n" + engineTitle(pick.engine)
                     + " · " + PaperSources.linkLabel(pick.url), 13);
             row.setPadding(0, dp(10), 0, dp(10));
-            row.setOnClickListener(view -> importFromUrl(pick));
+            row.setOnClickListener(view -> confirmDownload(
+                    new ArrayList<DuplicateEngine.Downloadable>(java.util.Collections.singletonList(pick))));
             box.addView(row);
         }
     }
 
-    /** 下载一篇开放获取 PDF 并导入自建库。下载与导入的成败都在最后那句提示里，一个字都不吹。 */
-    private void importFromUrl(final DuplicateEngine.Downloadable pick) {
+    /** 下载之前先说清要花多少流量：单份开放获取 PDF 实测 0.7-3.9 MB，一份的上限是 6 MB。 */
+    private void confirmDownload(final ArrayList<DuplicateEngine.Downloadable> picks) {
+        if (job != null) { toast("有任务在跑，稍后再试"); return; }
+        StringBuilder names = new StringBuilder();
+        for (int i = 0; i < picks.size() && i < 4; i++) {
+            if (names.length() > 0) names.append("\n");
+            names.append("· ").append(cut(picks.get(i).title, 40));
+        }
+        if (picks.size() > 4) names.append("\n… 另 ").append(picks.size() - 4).append(" 篇");
+        new AlertDialog.Builder(activity).setTitle("下进自建库")
+                .setMessage("共 " + picks.size() + " 篇，逐篇下载并导入自建库：\n" + names
+                        + "\n\n单份 PDF 实测 0.7-3.9 MB（每份上限 6 MB），这一轮最多约 "
+                        + (picks.size() * 6) + " MB。导入后这些篇在下一次查重里按正文比对。")
+                .setPositiveButton("下载", (dialog, which) -> importFromUrls(picks))
+                .setNegativeButton("取消", null).show();
+    }
+
+    /**
+     * 下载一批开放获取 PDF 并导入自建库。一个坏链接不许拖垮整批（CorpusImport 那三条规矩），
+     * 结果按逐篇回执显示——只看第一条回执等于把后面九篇的下场藏起来。
+     */
+    private void importFromUrls(final ArrayList<DuplicateEngine.Downloadable> picks) {
         if (job != null) { toast("有任务在跑，稍后再试"); return; }
         // 导入那一步也要这张表：PDF 是在 CorpusImport 里解析的，没跑过查重时它可能还没装载。
         CidUnicodeTables.loadFromAssets(activity);
-        new AlertDialog.Builder(activity).setTitle("下进自建库")
-                .setMessage(pick.title + "\n\n下载这篇开放获取 PDF 并导入自建库？导入后它按正文参与下一次比对。")
-                .setPositiveButton("下载", (dialog, which) -> {
-                    final ApiClient.Task task = begin("下载 " + pick.title);
-                    final EngineSettings options = engine.copy();
-                    worker = new Thread(() -> {
-                        String line;
-                        try {
-                            PaperSources.Limits limits = new PaperSources.Limits();
-                            limits.timeoutSeconds = options.timeoutSeconds;
-                            limits.proxy = options.proxy;
-                            CorpusImport.Batch batch = CorpusImport.download(library,
-                                    java.util.Collections.singletonList(
-                                            new CorpusImport.Pick(pick.title, pick.url)),
-                                    url -> PaperSources.downloadPdf(url, limits, task), null, task::cancelled);
-                            CorpusImport.Receipt receipt = batch.receipts.isEmpty() ? null : batch.receipts.get(0);
-                            line = receipt == null ? "没下载到内容" : receipt.imported()
-                                    ? "已下进自建库：" + receipt.storedName + " · " + receipt.chars + " 字 / "
-                                            + receipt.pages + " 页，下次查重按正文比对"
-                                    : receipt.message;
-                        } catch (Exception error) {
-                            line = "下载失败：" + (error.getMessage() == null || error.getMessage().isEmpty()
-                                    ? "未知错误" : error.getMessage());
-                        }
-                        final String result = line;
-                        complete(task, () -> toast(result));
-                    }, "wordlite-corpus-download");
-                    worker.start();
-                })
-                .setNegativeButton("取消", null).show();
+        final ApiClient.Task task = begin("下载 " + picks.size() + " 篇开放获取全文");
+        final EngineSettings options = engine.copy();
+        worker = new Thread(() -> {
+            String title, body;
+            try {
+                PaperSources.Limits limits = new PaperSources.Limits();
+                limits.timeoutSeconds = options.timeoutSeconds;
+                limits.proxy = options.proxy;
+                ArrayList<CorpusImport.Pick> items = new ArrayList<CorpusImport.Pick>();
+                for (int i = 0; i < picks.size(); i++)
+                    items.add(new CorpusImport.Pick(picks.get(i).title, picks.get(i).url));
+                CorpusImport.Batch batch = CorpusImport.download(library, items,
+                        url -> PaperSources.downloadPdf(url, limits, task), null, task::cancelled);
+                title = batch.summary();
+                body = batch.detail();
+            } catch (Exception error) {
+                title = "下载失败";
+                body = error.getMessage() == null || error.getMessage().isEmpty()
+                        ? "未知错误" : error.getMessage();
+            }
+            final String head = title, lines = body;
+            complete(task, () -> showImportReceipts(head, lines));
+        }, "wordlite-corpus-download");
+        worker.start();
+    }
+
+    /** 逐篇回执的弹窗：一行一篇，字可选可复制，长名字换行也不挡下一行。 */
+    private void showImportReceipts(String title, String lines) {
+        LinearLayout box = new LinearLayout(activity);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(18), dp(12), dp(18), dp(6));
+        box.addView(label(title, 13));
+        TextView detail = label(lines, 12);
+        detail.setTextIsSelectable(true);
+        detail.setPadding(0, dp(10), 0, 0);
+        box.addView(detail);
+        ScrollView scroll = new ScrollView(activity);
+        scroll.addView(box);
+        new AlertDialog.Builder(activity).setTitle("下进自建库").setView(scroll)
+                .setNegativeButton("关闭", null).show();
     }
 
     private String snippetText(TextCorpus.Hit hit) {
@@ -441,6 +481,12 @@ public final class ApiWorkflow {
         return safeSlice(lastScanned == null ? "" : lastScanned.text, hit.start, hit.end)
                 + "\n" + title + (year.isEmpty() ? "" : "（" + year + "）");
     }
+    /** 题名在确认框里只占一行，长了截断加省略号；一个字都不编，只是不让它把对话框撑破。 */
+    private static String cut(String value, int max) {
+        String text = value == null ? "" : value.trim();
+        return text.length() <= max ? text : text.substring(0, max) + "…";
+    }
+
     private static String safeSlice(String text, int start, int end) {
         if (text == null || start < 0 || end <= start || end > text.length()) return "";
         String value = text.substring(start, end);
