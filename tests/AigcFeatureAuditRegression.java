@@ -3,8 +3,11 @@ package com.rikkahub.wordlite;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -79,6 +82,7 @@ public final class AigcFeatureAuditRegression {
         double score;
         final double[] value = new double[AigcFeatureId.COUNT];
         int family;
+        String text = "";              // 计分句本身（compact 口径），只给可选逐句导出用
     }
 
     private static void check(boolean ok, String message) {
@@ -121,6 +125,7 @@ public final class AigcFeatureAuditRegression {
             Row row = new Row();
             row.score = AigcScorer.score(hits, AigcScorer.current(seg.family));
             row.family = seg.family;
+            row.text = seg.compact;
             AigcFeatureId[] ids = AigcFeatureId.values();
             for (int k = 0; k < ids.length; k++) row.value[k] = AigcFeatures.value(ids[k], seg, stats);
             into.add(row);
@@ -209,6 +214,7 @@ public final class AigcFeatureAuditRegression {
                 + human.size() + " 个人句 / " + machine.size() + " 个机器句"
                 + "（拟合侧 " + fitH.size() + " 人 / " + fitM.size() + " 机，留出侧 " + holdH.size()
                 + " 人 / " + holdM.size() + " 机；留出侧一律不参与拟合）");
+        dumpSentencesIfAsked(byTier);
         check("v1-order-only".equals(AigcScorer.VERSION),
                 "系数版本还是 v1-order-only：2026-10-08 把判据从 11 条扩到 33 条重新拟合之后，"
                         + "留出档 AUC(机器>真人) 的天花板仍然只有 0.657 < " + fmt(REQUIRED_HOLDOUT_AUC)
@@ -407,6 +413,30 @@ public final class AigcFeatureAuditRegression {
     }
 
 
+
+    /** 可选的逐句导出：只有设了环境变量 WORDLITE_AIGC_AUDIT_DUMP 才写盘，默认一次都不做。
+     *  导出件回答的是"出厂审计到底给哪几个计分句打了分"，只给 tools/aigc-signal-probe.py
+     *  当"同一批句子"的输入用；里面是论文原句，不进仓库。 */
+    private static void dumpSentencesIfAsked(LinkedHashMap<String, ArrayList<Row>> byTier) throws Exception {
+        String path = System.getenv("WORDLITE_AIGC_AUDIT_DUMP");
+        if (path == null || path.trim().isEmpty()) return;
+        PrintWriter w = new PrintWriter(new OutputStreamWriter(new FileOutputStream(path), "UTF-8"));
+        try {
+            int n = 0;
+            for (int t = 0; t < TIERS.length; t++) {
+                ArrayList<Row> rows = byTier.get(TIERS[t][0]);
+                for (int i = 0; i < rows.size(); i++) {
+                    w.println(TIERS[t][0] + "\t" + TIERS[t][2] + "\t" + TIERS[t][3] + "\t"
+                            + String.format(java.util.Locale.ROOT, "%.6f", rows.get(i).score)
+                            + "\t" + rows.get(i).text.replace('\t', ' '));
+                    n++;
+                }
+            }
+            System.out.println("DUMP 出厂审计的计分逐句 " + n + " 条导出 -> " + path);
+        } finally {
+            w.close();
+        }
+    }
 
     private static double mean(double[] v) {
         double sum = 0d;

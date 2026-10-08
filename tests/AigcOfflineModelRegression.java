@@ -55,6 +55,7 @@ public final class AigcOfflineModelRegression {
         loadsAndRefuses();
         goldenParity();
         threeTierManifest();
+        holdout2Manifest();
         independentHoldout();
         productFilterHoldout();
         windowChannel();
@@ -522,5 +523,34 @@ public final class AigcOfflineModelRegression {
 
     private static String round(double v, int digits) {
         return String.format(Locale.ROOT, "%." + digits + "f", v);
+    }
+
+    // ---------------------------------------------------------------- 第二把尺子的来源清单
+
+    /**
+     * 段落级真人真稿留出集（holdout2）的清单：原文一律留在仓库外，仓库里只有这一份来源与许可记录。
+     * 它必须自带"没沾过训练料"的实测证据——这条不是装饰：尺子只要沾过训练料，
+     * 后面所有 AUC 与误报数都不作数，所以宁可在这里炸掉。
+     */
+    private static void holdout2Manifest() throws Exception {
+        String rel = corpusDir + "/aigc-holdout2-manifest.json";
+        java.io.File f = new java.io.File(rel);
+        check(f.isFile(), "第二把尺子的清单必须在：" + rel + "（重建：py tools/build-holdout-corpus.py build && ... proof）");
+        String all = readText(rel);
+        int longest = 0;
+        for (String ln : all.split("\n")) {
+            longest = Math.max(longest, ln.length());
+        }
+        check(all.indexOf("\"never_in_training\"") >= 0 && all.indexOf("\"command\"") >= 0,
+                "清单自带 never_in_training 一段（含复跑命令），不是靠人保证留出干净");
+        check(all.indexOf("\"exact_equal_sentences\": 0") >= 0,
+                "实测：4,515,370 条公开训练计分句里与新留出段逐字相同的有 0 条");
+        check(all.indexOf("\"exact_equal\": 0") >= 0 || all.indexOf("\"exact_equal\":0") >= 0,
+                "实测：与仓库内那份老真稿（句级 995 句）逐字相同的也是 0 条，两把尺子不重叠");
+        check(all.indexOf("CC BY") >= 0 && all.indexOf("redistributable_into_repo") >= 0,
+                "许可逐篇记在清单里，并单独标出哪几档将来允许进仓库（CC BY / CC BY-SA）");
+        check(all.indexOf("human_side_rule") >= 0 && all.indexOf("模型生成") >= 0,
+                "清单写明真人侧规则：全部取自已发表论文正文，没有一个字是模型生成的");
+        check(longest <= 400, "清单里没有正文（最长一行 " + longest + " 字，超过 400 字就说明有人把原文写进来了）");
     }
 }
