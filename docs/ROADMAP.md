@@ -139,7 +139,7 @@
 
 | 版本 | 内容 | 验收 |
 | --- | --- | --- |
-| 2.0.0 | **命中地图**：报告详情页顶部一条按文档顺序展开的色带，重复 / 改写 / AI / 疑似 AI 四种颜色，宽度 = 字数占比，点击落点跳正文并高亮那一段（`ReportCenterUI` + `CheckReport` 的 evidence 序列；这是后面三个版本共用地基） | 新 `HitMapRegression`：色带分段宽度等于各桶字符数除以总有效字数、四种桶互不重叠、空报告渲染成"未检出"而不是零宽条；Robolectric `ReportCenterTest` 断言点击落点偏移与 `CheckReport.Evidence.start` 逐字相等 |
+| 2.0.0 | **命中地图**：报告详情页顶部一条按文档顺序展开的色带，重复 / 改写 / AI / 疑似 AI 四种颜色，宽度 = 字数占比，点击落点跳正文并高亮那一段（`ReportCenterUI` + `CheckReport` 的 evidence 序列；这是后面三个版本共用地基） | 新 `HitMapRegression`：色带分段宽度等于各桶字符数除以总有效字数、四种桶互不重叠、空报告渲染成"未检出"而不是零宽条；**2.0.0 已交付**：落点口径改由 `HitMapModel.nearestBand` 在 Host 侧钉（这个仓库没有 Robolectric 装置，`app/src/test` 是空的），`onDraw` 的像素与点击派发不在闸门范围内 |
 | 2.0.1 | 筛选与排序落到色带与证据表：按来源 / 按相似度档 / 只看未引用，筛选后指标卡重算 | Robolectric 断言筛选结果条数等于 `CheckReport.Evidence` 手算值；`CharLedgerRegression` 加断言：筛选态的相似率与 `CharLedger` 那一套独立相加口径不打架（`independentSums` 与 `overlapChars` 不许同时涨） |
 | 2.0.2 | 深色模式、字号跟随系统、触控目标 ≥ 48dp、图标按钮全部带 contentDescription（1.0.5/1.0.6 的色带与详情页部分） | Robolectric 断言两套配色、两套字号下色带与证据表不重叠、可点区域 ≥ 48dp；`RibbonUI` 与 `AigcPanel` 的按钮缺 contentDescription 直接失败 |
 | 2.0.3 | 导出与分享：HTML / PDF / TXT 三份，导出内容含命中地图与"已读 / 应收"那一格；体积封顶、超长摘要截断 | `CheckReport` 断言导出文本与面板同一批数字；`PdfRegression` 加断言；`ReportStoreRegression` 断言导出失败（磁盘满 / 分享被拒）不动已入库的报告 |

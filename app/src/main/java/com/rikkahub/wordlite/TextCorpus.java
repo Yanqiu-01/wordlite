@@ -252,7 +252,16 @@ public final class TextCorpus {
         public int start, end;
         public float score;
         public Source source;
+        /** 这一段是靠哪条判据认出来的：CHANNEL_VERBATIM 字面证据、CHANNEL_REWRITE 抗改写判据。 */
+        public int channel;
     }
+
+    /**
+     * 命中的出处。分色与分账只看一件事——这段字有没有字面证据：三元组 Dice 与包含率那两条数的都是
+     * 顺序相关的字面重合（逐字抄、整句搬），字符袋那条数的是"换了字序、剩下还是那批字"（改写过的抄本）。
+     * 一个区间只要有过一次字面证据就归字面：并段里混进一条字面命中，整段就不许再涂成"改写"。
+     */
+    public static final int CHANNEL_VERBATIM = 0, CHANNEL_REWRITE = 1;
 
     public static final class Report {
         public final ArrayList<Hit> hits = new ArrayList<Hit>();
@@ -313,6 +322,8 @@ public final class TextCorpus {
     private static final class Match {
         int entryId;
         float score;
+        /** 这一枪是不是只靠抗改写那条判据站住的（字符袋）。并段时按"整段都要成立"往下传。 */
+        boolean viaBag;
         /**
          * 这一枪落在正文上的区间（match() 入参文本的 UTF-16 下标，按先后排、两两不重叠）。
          * 默认一段 = 整个片段；只有包含率那一条路会把它裁成实际共享的那几段，见 clipToSharedBlocks。
@@ -513,6 +524,7 @@ public final class TextCorpus {
             int valid = Math.max(1, validCount(norm, start, end));
             hit.score = (float) Math.min(1d, bestLength / (double) valid);
             hit.source = source;
+            hit.channel = CHANNEL_VERBATIM;   // 指纹带是 winnowing 保证的连续逐字重合
             out.add(hit);
         }
     }
@@ -583,6 +595,7 @@ public final class TextCorpus {
         int runStart = -1, runEnd = -1, runWeight = 0;
         double runScore = 0d;
         Source runSource = null;
+        boolean runRewrite = false;
         for (int i = 0; i < spans.size(); i++) {
             int[] span = spans.get(i);
             // 整体落在排除区里的句子连匹配都不做，省的是开销；它占多少字由下面按区间一次算清，
@@ -607,19 +620,22 @@ public final class TextCorpus {
                         if (hitEnd > runEnd) runEnd = hitEnd;
                         runScore += (double) best.score * frag.chars;
                         runWeight += frag.chars;
+                        // 并段里混进一条字面证据，整段就算字面：改写的认定必须整段都站得住。
+                        runRewrite = runRewrite && best.viaBag;
                     } else {
-                        if (runStart >= 0) flush(report, runStart, runEnd, runWeight, runScore, runSource);
+                        if (runStart >= 0) flush(report, runStart, runEnd, runWeight, runScore, runSource, runRewrite);
                         runStart = hitStart;
                         runEnd = hitEnd;
                         runWeight = frag.chars;
                         runScore = (double) best.score * frag.chars;
                         runSource = source;
+                        runRewrite = best.viaBag;
                     }
                 }
 
             }
         }
-        if (runStart >= 0) flush(report, runStart, runEnd, runWeight, runScore, runSource);
+        if (runStart >= 0) flush(report, runStart, runEnd, runWeight, runScore, runSource, runRewrite);
         // 指纹带仍然先按句级命中裁一次——那一步决定哪条带子值得进 hits（补不出 MIN_MATCH 个字符就整条丢）。
         // 它顺手记下的"这段被别篇先占走"会和句级命中之间的重叠并成一份，不再各自数一遍。
         ArrayList<int[]> lost = addBandHits(report.hits, fingerprintHits(norm, excluded), norm);
@@ -682,6 +698,7 @@ public final class TextCorpus {
                 trimmed.end = range[1];
                 trimmed.score = band.score;
                 trimmed.source = band.source;
+                trimmed.channel = CHANNEL_VERBATIM;
                 hits.add(trimmed);
                 covered.add(new int[]{range[0], range[1]});
                 claims.add(new Claim(range[0], range[1], band.source));
@@ -754,12 +771,14 @@ public final class TextCorpus {
      * 那三笔账由 attributeHits 从取好并集的 hits 里数，于是"报告说的重复字数"与"来源榜从 hits
      * 反推的每篇字数"数的是同一批字符，不可能一个双算一个不双算。
      */
-    private static void flush(Report report, int start, int end, int weight, double scoreSum, Source source) {
+    private static void flush(Report report, int start, int end, int weight, double scoreSum, Source source,
+                              boolean rewrite) {
         Hit hit = new Hit();
         hit.start = start;
         hit.end = end;
         hit.score = weight <= 0 ? 0f : (float) (scoreSum / weight);
         hit.source = source;
+        hit.channel = rewrite ? CHANNEL_REWRITE : CHANNEL_VERBATIM;
         report.hits.add(hit);
     }
 
@@ -801,6 +820,7 @@ public final class TextCorpus {
                 if (piece != hit) {
                     piece.score = hit.score;
                     piece.source = hit.source;
+                    piece.channel = hit.channel;
                 }
                 piece.start = range[0];
                 piece.end = range[1];
@@ -1087,6 +1107,7 @@ public final class TextCorpus {
         if (bestViaBag) bestScore = Math.max(bestScore, bestBagValue * 0.8f);
         out.entryId = bestId;
         out.score = bestScore;
+        out.viaBag = bestViaBag;
         /* 裁到"两边实际共享的那一段"只在一个片段只跟一个候选对得上时才是安全的。同一个片段里有两句
            都过了线（同篇的相邻两句、或两篇各一句），那这个片段本身就是拼出来的：只裁进赢的那一句，
            另一句就连证据一起没了——抄两段只报一段比多报更糟。这种片段整段报，宁可多红也不许漏。

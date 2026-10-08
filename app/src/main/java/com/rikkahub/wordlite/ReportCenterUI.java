@@ -39,6 +39,9 @@ public final class ReportCenterUI extends LinearLayout {
     private final LinearLayout engineBox;
     private final LinearLayout sourceBox;
     private final LinearLayout evidenceBox;
+    private final LinearLayout hitMapBox;
+    private final HitMapView hitMap;
+    private final TextView hitMapLegend;
     private final TextView title;
     private final TextView coverage;
     private final TextView footLine;
@@ -140,6 +143,24 @@ public final class ReportCenterUI extends LinearLayout {
         coverage.setTag("coverage-line");
         detailPane.addView(coverage, new LayoutParams(-1, -2));
 
+        // 命中地图排在指标卡与注记之间：它回答"重复在哪几处"，是看完比率之后自然要问的第二件事。
+        hitMapBox = new LinearLayout(context);
+        hitMapBox.setOrientation(VERTICAL);
+        hitMapBox.setTag("hit-map");
+        TextView mapTitle = section("命中地图");
+        mapTitle.setTag("hit-map-title");
+        hitMapBox.addView(mapTitle, new LayoutParams(-1, -2));
+        hitMap = new HitMapView(context);
+        hitMap.setTag("hit-map-band");
+        hitMap.setPalette(dark ? 0xFF3A3A3A : 0xFFE3E6E8,
+                0xFFC0392B, 0xFFE08A1E, 0xFF1F7A6C, dark ? 0xFF6E8A83 : 0xFF9FBFB8);
+        hitMap.setOnPick(band -> jumpToBand(band));
+        hitMapBox.addView(hitMap, new LayoutParams(-1, dp(48)));
+        hitMapLegend = text("", 11, muted);
+        hitMapLegend.setTag("hit-map-legend");
+        hitMapBox.addView(hitMapLegend, new LayoutParams(-1, -2));
+        detailPane.addView(hitMapBox, new LayoutParams(-1, -2));
+
         noteBox = new LinearLayout(context);
         noteBox.setOrientation(VERTICAL);
         noteBox.setTag("report-notes");
@@ -220,6 +241,7 @@ public final class ReportCenterUI extends LinearLayout {
         export.setVisibility(VISIBLE);
         title.setText(record.fileName);
         renderMetrics(record);
+        renderHitMap(record);
         renderNotes(record);
         renderSources(record);
         renderEvidence(record);
@@ -394,6 +416,65 @@ public final class ReportCenterUI extends LinearLayout {
      * 每开一张报告，每行恰好被绑一次（evidenceBinds == 行数）——绑定两次就会在长列表滚动时
      * 出现同一行被两个命中先后占用，那是比重画慢一点严重得多的错。
      */
+    /**
+     * 命中地图：段宽、四色、能不能跳，全部来自 HitMapModel.build，这里只做显示与派发。
+     * 分母用 sourceChars——那是证据偏移所在的那把尺；相似率的分母是可比字数，两者不是一把尺，
+     * 所以图例只印字数，不印百分比，免得被读成"色带涂掉的百分比 == 相似率"。
+     */
+    private void renderHitMap(ReportStore.Record record) {
+        HitMapModel.Map map = HitMapModel.build(record.sourceChars, record.evidence, record.aiSegments,
+                record.evidenceTruncated || record.aiSegmentsTruncated, record.evidence.size(),
+                record.evidenceTotal, record.aiSegments.size(), record.aiSegmentsTotal);
+        hitMap.setMap(map);
+        if (map.isEmpty()) {
+            hitMapBox.setVisibility(record.evidenceTotal > 0 || record.aiSegmentsTotal > 0 ? VISIBLE : GONE);
+            hitMap.setVisibility(GONE);
+            hitMapLegend.setText(record.evidenceTotal > 0
+                    ? "命中的区间都越出了这篇正文的范围，画不出地图" : "");
+            return;
+        }
+        hitMapBox.setVisibility(VISIBLE);
+        hitMap.setVisibility(VISIBLE);
+        int[] chars = new int[4];
+        for (int i = 0; i < map.bands.size(); i++) chars[map.bands.get(i).kind] += map.bands.get(i).chars();
+        StringBuilder legend = new StringBuilder();
+        legend.append("重复 ").append(chars[HitMapModel.KIND_DUPLICATE]).append(" 字 · 改写 ")
+                .append(chars[HitMapModel.KIND_REWRITTEN]).append(" 字 · AI 可疑 ")
+                .append(chars[HitMapModel.KIND_AI]).append(" 字 · 疑似 ")
+                .append(chars[HitMapModel.KIND_SUSPECTED]).append(" 字（段宽 = 字数占比，全文 ")
+                .append(map.totalChars).append(" 字）");
+        if (map.incomplete) {
+            legend.append("· 只画了本机保留的 ").append(map.keptEvidence).append('/').append(map.totalEvidence)
+                    .append(" 处命中与 ").append(map.keptAi).append('/').append(map.totalAi).append(" 段 AI");
+        }
+        hitMapLegend.setText(legend.toString());
+    }
+
+    /** 色带上的点：证据段跳回那一条证据（与证据表同一把尺），AI 段按它自己的区间跳。 */
+    private void jumpToBand(HitMapModel.Band band) {
+        if (opened == null || band == null) return;
+        ReportStore.Evidence hit = null;
+        if (band.fromEvidence && band.sourceIndex >= 0 && band.sourceIndex < opened.evidence.size()) {
+            hit = opened.evidence.get(band.sourceIndex);
+        }
+        if (hit == null) {
+            hit = new ReportStore.Evidence();
+            hit.start = band.start;
+            hit.end = band.end;
+        }
+        if (!opened.canJump(hit)) return;
+        if (listener != null) listener.jumpTo(opened, hit);
+    }
+
+    /** 测试与外部确认色带状态用：现在画了几段、图例说了什么。 */
+    public int hitMapBandCount() {
+        return hitMap.getBandCount();
+    }
+
+    public String hitMapLegendText() {
+        return hitMapLegend.getText().toString();
+    }
+
     private void renderEvidence(ReportStore.Record record) {
         evidenceBinds = 0;
         evidencePasses++;

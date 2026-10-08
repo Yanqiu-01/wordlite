@@ -40,6 +40,8 @@ public final class ReportStore {
     public static final int MAX_INDEX_BYTES = 256 * 1024;
     /** 证据条数上限：面板只画这些，超出部分写进 evidenceTotal，界面上说清"只保留了前 N 条"。 */
     public static final int MAX_EVIDENCE = 40;
+    /** AI 分段的上限：命中地图要的是位置分布，八十段足够画出形状，超出部分只报总数。 */
+    public static final int MAX_AI_SEGMENTS = 80;
     /** 来源榜行数 = SourceLedger.MAX_ROWS + 折叠行，折叠行本身就代表"其余 N 篇"，不能再砍。 */
     public static final int MAX_SOURCE_ROWS = SourceLedger.MAX_ROWS + 1;
     public static final int MAX_ENGINE_ROWS = 16;
@@ -61,6 +63,8 @@ public final class ReportStore {
     public static final class Evidence {
         public int start, end;
         public double score;
+        /** 命中出处：TextCorpus.CHANNEL_VERBATIM（字面证据）或 CHANNEL_REWRITE（抗改写判据）。命中地图按它分色。 */
+        public int channel;
         public String title = "", engine = "", year = "", snippet = "";
         /** snippet 被 MAX_SNIPPET_CHARS 砍过，界面上要写省略号而不是让人以为原文就这么长。 */
         public boolean snippetCut;
@@ -72,6 +76,18 @@ public final class ReportStore {
     }
 
     /** 来源分布的一行（按文献聚合），直接抄 {@link SourceLedger.Row} 的展示字段。 */
+    /** AI 判定落在正文上的一段区间。口径与 AigcDetector.Segment 一致，只是能落盘、能重画。 */
+    public static final class AiSegment {
+        public int start, end;
+        public int chars;
+        public double score;
+        public boolean flagged;
+
+        public boolean usable(int totalChars) {
+            return start >= 0 && end > start && end <= totalChars;
+        }
+    }
+
     public static final class SourceRow {
         public String key = "", title = "", authors = "", year = "", engine = "", locator = "";
         public int duplicateChars, hitCount, sourceCount;
@@ -161,6 +177,10 @@ public final class ReportStore {
         /** 当时一共有多少处命中；evidence 只装得下前 MAX_EVIDENCE 条时，这个数字才是全貌。 */
         public int evidenceTotal;
         public boolean evidenceTruncated;
+        /** AI 判定的分段区间（按正文顺序）。flagged 与其余那档分两种颜色：可疑 / 疑似。 */
+        public final ArrayList<AiSegment> aiSegments = new ArrayList<AiSegment>();
+        public int aiSegmentsTotal;
+        public boolean aiSegmentsTruncated;
 
         /** 被检正文的长度与指纹：跳转前拿它验一下"现在这篇还是当时那篇吗"。 */
         public int sourceChars;
@@ -250,6 +270,26 @@ public final class ReportStore {
             boolean droppedByCap = evidence.size() > MAX_EVIDENCE;
             while (evidence.size() > MAX_EVIDENCE) evidence.remove(evidence.size() - 1);
             if (droppedByCap) evidenceTruncated = true;
+            aiSegmentsTotal = Math.max(aiSegmentsTotal, aiSegments.size());
+            for (int i = aiSegments.size() - 1; i >= 0; i--) {
+                AiSegment seg = aiSegments.get(i);
+                if (seg != null && seg.usable(sourceChars)) continue;
+                aiSegments.remove(i);
+                aiSegmentsTruncated = true;
+            }
+            boolean aiCutByCap = aiSegments.size() > MAX_AI_SEGMENTS;
+            while (aiSegments.size() > MAX_AI_SEGMENTS) aiSegments.remove(aiSegments.size() - 1);
+            if (aiCutByCap) aiSegmentsTruncated = true;
+            for (int i = 0; i < aiSegments.size(); i++) {
+                AiSegment seg = aiSegments.get(i);
+                seg.chars = atLeastZero(seg.chars);
+                seg.score = fraction(seg.score);
+            }
+            java.util.Collections.sort(aiSegments, new java.util.Comparator<AiSegment>() {
+                public int compare(AiSegment a, AiSegment b) {
+                    return a.start != b.start ? a.start - b.start : a.end - b.end;
+                }
+            });
             for (int i = 0; i < evidence.size(); i++) {
                 Evidence hit = evidence.get(i);
                 hit.title = cut(hit.title, MAX_NAME_CHARS);
@@ -320,6 +360,16 @@ public final class ReportStore {
             }
             out.append("],\"evidenceTotal\":").append(evidenceTotal)
                     .append(",\"evidenceTruncated\":").append(evidenceTruncated ? "true" : "false")
+                    .append(",\"ai\":[");
+            for (int i = 0; i < aiSegments.size(); i++) {
+                if (i > 0) out.append(',');
+                AiSegment seg = aiSegments.get(i);
+                out.append("{\"start\":").append(seg.start).append(",\"end\":").append(seg.end)
+                        .append(",\"chars\":").append(seg.chars).append(",\"score\":").append(num(seg.score))
+                        .append(",\"flagged\":").append(seg.flagged ? "true" : "false").append('}');
+            }
+            out.append("],\"aiTotal\":").append(aiSegmentsTotal)
+                    .append(",\"aiTruncated\":").append(aiSegmentsTruncated ? "true" : "false")
                     .append(",\"sourceChars\":").append(sourceChars)
                     .append(",\"textDigest\":").append(textDigest)
                     .append(",\"html\":").append(ApiJson.quote(html))
@@ -387,6 +437,19 @@ public final class ReportStore {
             }
             record.evidenceTotal = (int) whole(map.get("evidenceTotal"));
             record.evidenceTruncated = truth(map.get("evidenceTruncated"));
+            for (Object item : asList(map.get("ai"))) {
+                Map<?, ?> seg = asMap(item);
+                if (seg == null) continue;
+                AiSegment row = new AiSegment();
+                row.start = (int) whole(seg.get("start"));
+                row.end = (int) whole(seg.get("end"));
+                row.chars = (int) whole(seg.get("chars"));
+                row.score = real(seg.get("score"));
+                row.flagged = truth(seg.get("flagged"));
+                record.aiSegments.add(row);
+            }
+            record.aiSegmentsTotal = (int) whole(map.get("aiTotal"));
+            record.aiSegmentsTruncated = truth(map.get("aiTruncated"));
             record.sourceChars = (int) whole(map.get("sourceChars"));
             record.textDigest = whole(map.get("textDigest"));
             record.html = text(map.get("html"));
@@ -469,6 +532,7 @@ public final class ReportStore {
         return "{\"start\":" + hit.start
                 + ",\"end\":" + hit.end
                 + ",\"score\":" + num(hit.score)
+                + ",\"chan\":" + hit.channel
                 + ",\"title\":" + ApiJson.quote(hit.title)
                 + ",\"engine\":" + ApiJson.quote(hit.engine)
                 + ",\"year\":" + ApiJson.quote(hit.year)
@@ -483,6 +547,8 @@ public final class ReportStore {
         hit.start = (int) whole(map.get("start"));
         hit.end = (int) whole(map.get("end"));
         hit.score = real(map.get("score"));
+        // 老库里没有 chan 这一位：缺就是 0，也就是字面证据——不许把老报告的颜色猜成"改写"。
+        hit.channel = (int) whole(map.get("chan"));
         hit.title = text(map.get("title"));
         hit.engine = text(map.get("engine"));
         hit.year = text(map.get("year"));
@@ -651,6 +717,7 @@ public final class ReportStore {
             row.start = hit.start;
             row.end = hit.end;
             row.score = hit.score;
+            row.channel = hit.channel;
             row.title = hit.source == null ? "" : hit.source.title;
             row.engine = hit.source == null ? "" : hit.source.engine;
             row.year = hit.source == null ? "" : hit.source.year;
@@ -661,6 +728,22 @@ public final class ReportStore {
             record.evidence.add(row);
         }
         record.evidenceTruncated = report.hits.size() > record.evidence.size();
+        // AI 分段存区间而不是只存一个总数：命中地图要的是"可疑的那几段在正文哪一处"。
+        record.aiSegmentsTotal = report.aigc == null ? 0 : report.aigc.segments.size();
+        if (report.aigc != null) {
+            for (int i = 0; i < report.aigc.segments.size() && record.aiSegments.size() < MAX_AI_SEGMENTS; i++) {
+                AigcDetector.Segment seg = report.aigc.segments.get(i);
+                if (seg == null) continue;
+                AiSegment row = new AiSegment();
+                row.start = seg.start;
+                row.end = seg.end;
+                row.chars = seg.chars;
+                row.score = seg.score;
+                row.flagged = seg.flagged;
+                record.aiSegments.add(row);
+            }
+        }
+        record.aiSegmentsTruncated = record.aiSegmentsTotal > record.aiSegments.size();
         record.sourceChars = source.length();
         record.textDigest = digest(source);
         record.html = CheckReport.html(record.fileName, report);

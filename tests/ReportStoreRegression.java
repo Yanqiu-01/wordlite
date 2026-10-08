@@ -181,6 +181,14 @@ public final class ReportStoreRegression {
         check(first.start == report.hits.get(0).start && first.end == report.hits.get(0).end,
                 "第一处证据的字符区间原样保住：" + first.start + "-" + first.end);
         check(record.canJump(first), "这条区间落在正文之内，点它跳得过去");
+        check(first.channel == report.hits.get(0).channel,
+                "证据带着判据出处存下来（字面 / 抗改写），命中地图才有颜色可分");
+        int aiWanted = report.aigc == null ? 0
+                : Math.min(report.aigc.segments.size(), ReportStore.MAX_AI_SEGMENTS);
+        check(record.aiSegments.size() == aiWanted
+                        && record.aiSegmentsTotal == (report.aigc == null ? 0 : report.aigc.segments.size()),
+                "AI 分段的区间整条存档，超出上限的那部分只报总数：留 " + record.aiSegments.size()
+                        + " 段 / 共 " + record.aiSegmentsTotal + " 段");
         int sum = sourceTotal(record);
         check(sum == report.duplicateChars,
                 "来源榜各行相加仍是总重复字符数 " + report.duplicateChars + "：聚合的账本过了磁盘还在");
@@ -204,6 +212,22 @@ public final class ReportStoreRegression {
         ReportStore.Record back = store.record(saved.id);
         check(back != null, "按编号读得回来");
         same(back.toJson(), saved.toJson(), "写进去什么就读回什么：整条记录的 JSON 逐字符相同");
+        check(back.aiSegments.size() == saved.aiSegments.size(),
+                "AI 分段过磁盘条数相同：" + saved.aiSegments.size() + " 对 " + back.aiSegments.size());
+        if (!saved.aiSegments.isEmpty()) {
+            ReportStore.AiSegment a = saved.aiSegments.get(0);
+            ReportStore.AiSegment b = back.aiSegments.get(0);
+            check(a.start == b.start && a.end == b.end && a.flagged == b.flagged
+                            && Math.abs(a.score - b.score) < 1e-9 && a.chars == b.chars,
+                    "AI 分段的位置、档位、分值、字数都回来了：" + a.start + "-" + a.end);
+        }
+        check(back.evidence.isEmpty() || back.evidence.get(0).channel == saved.evidence.get(0).channel,
+                "判据出处过了磁盘还是那一个：颜色不许在存档之后变");
+        ReportStore.Record legacy = ReportStore.Record.fromJson(ApiJson.parse(
+                "{\"id\":\"old\",\"evidence\":[{\"start\":3,\"end\":9,\"score\":0.5}]}"));
+        check(legacy != null && legacy.evidence.size() == 1 && legacy.aiSegments.isEmpty()
+                        && legacy.evidence.get(0).channel == TextCorpus.CHANNEL_VERBATIM,
+                "老库里没有 chan / ai 这两位的记录照样读得回来：缺的那位按字面证据与零段处理，不猜颜色");
         same(back.fileName, "论文-多孔铜.docx", "文件名回来");
         same(back.createdAt, saved.createdAt, "时间戳回来（列表按它排序）");
         same(back.detectedAt, report.detectedAt, "检测时间那一行回来");
