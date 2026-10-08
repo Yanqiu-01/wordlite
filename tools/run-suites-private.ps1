@@ -5,6 +5,7 @@
 # Never touches artifacts/build/host-classes (shared with tools/test-host.ps1).
 param(
     [Parameter(Mandatory=$true)][string]$Tree,      # source tree root to compile
+    [string]$Apk = "",                      # built APK, for the suites that read the package
     [Parameter(Mandatory=$true)][string]$OutDir,    # private output dir for classes/logs
     [string]$Suite = "DetectRegression,RetrievalCoverageRegression"
 )
@@ -40,10 +41,44 @@ Write-Host ("== javac tests ({0} files) ==" -f $testFiles.Count)
 if ($LASTEXITCODE -ne 0) { throw "test compile failed" }
 
 $cp = "$tcls;$cls;$jar"
+
+# 与 tools/test-host.ps1 同一张参数表。私有复跑最容易骗人的地方就是这个：套件要参数而没人给，
+# 它抛 IndexOutOfBoundsException，于是每个人每次都在同一批"红"上面学会忽略。参数在这里补齐，
+# 红就只剩"真的红了"这一种解释。{out} 换成本次私有的输出目录。
+$suiteOut = Join-Path $OutDir "out"
+# Regression 直接往 roundtrip 目录里写，不自己建；test-host.ps1 也是预先建好的。
+foreach ($d in @($suiteOut, (Join-Path $suiteOut "roundtrip"))) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+$argMap = @{
+    "Regression"                  = @("tests/fixture.docx", "{out}/roundtrip")
+    "RewriteRobustnessRegression" = @("tests/corpus/real-prose.txt")
+    "AigcOfflineModelRegression"  = @("app/src/main/assets/aigc", "tests/corpus")
+    "DeepModeAudit"               = @("tests/corpus/real-prose.txt", "tests/corpus/oa-planted-cjmenet.txt")
+    "RewriteRateRegression"       = @("tests/samples/input-liu.docx", "tests/corpus/oa-planted-cjmenet.txt", "{out}/rewrite-rate")
+    "PreservationRegression"      = @("tests/samples/complex-preservation.docx")
+    "ReviewRegression"            = @("tests/fixture.docx", "{out}/threaded-revisions.docx")
+    "PdfRegression"               = @("{out}/metadata.pdf")
+    "ZeroRateAudit"               = @("tests/samples/input-liu.docx", "tests/corpus/real-prose.txt", "tests/corpus/aigc-cartoon.txt")
+    "DetectionFloor"              = @("tests/corpus", "{out}/detection-floor-library")
+    "AbstractLayerRegression"     = @("tests/corpus")
+    "FontSubstitution"            = @("tests/samples/input-liu.docx")
+    "OriginalDocxRegression"      = @("tests/samples/input-liu.docx", "{out}/original-roundtrip.docx")
+    "TableGeometryRegression"     = @("tests/samples/input-liu.docx", "{out}/table-geometry.docx", "tests/fixture.docx")
+}
+# 这两个看的是构建产物，没有 APK 可查时直说，不拿一个假红去冒充失败。
+$apkSuites = @("FontAssetsRegression")
 $bad = 0
 foreach ($name in $Suite.Split(",")) {
     $log = Join-Path $OutDir ("logs/" + $name.ToLower() + ".log")
-    & java --add-modules jdk.httpserver "-Dfile.encoding=UTF-8" -classpath $cp ("com.rikkahub.wordlite." + $name) *> $log
+    $extra = @()
+    if ($argMap.ContainsKey($name)) {
+        $extra = @($argMap[$name] | ForEach-Object { $_.Replace("{out}", $suiteOut) })
+    }
+    if ($apkSuites -contains $name -and -not $Apk) {
+        Write-Host ("SKIP {0}  要看构建产物，加 -Apk <apk> 再跑" -f $name) -ForegroundColor DarkYellow
+        continue
+    }
+    if ($apkSuites -contains $name) { $extra = @($Tree, $Apk) }
+    & java --add-modules jdk.httpserver "-Dfile.encoding=UTF-8" -classpath $cp ("com.rikkahub.wordlite." + $name) @extra *> $log
     $code = $LASTEXITCODE
     $tail = if (Test-Path $log) { (Get-Content $log -Encoding UTF8 | Where-Object { $_ -ne "" } | Select-Object -Last 2) } else { "" }
     if ($code -eq 0) { Write-Host ("PASS {0}  {1}" -f $name, ($tail -join " | ")) }
