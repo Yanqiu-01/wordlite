@@ -94,7 +94,12 @@ public final class DetectRegression {
             + "\"abstractText\":\"Sealed joints were characterised by helium leak testing.\","
             + "\"authorList\":{\"author\":[{\"firstName\":\"K\",\"lastName\":\"Ortega\"}]},"
             + "\"fullTextUrlList\":{\"fullTextUrl\":[{\"availability\":\"free\",\"documentStyle\":\"html\","
-            + "\"url\":\"https://academic.oup.com/free/html\"}]}}]}}";
+            + "\"url\":\"https://academic.oup.com/free/html\"},"
+            /* 2026-10-09 实测的真形状：开放获取的 PMC 行自己就给四条 fullTextUrl，其中 documentStyle=pdf/xml
+               那两条才是正文所在，html 那条要么要追跳转要么 403。__BASE__ 在回话时换成回环地址，
+               好让"全文只从回环取"这条断言继续成立。 */
+            + "{\"availability\":\"free\",\"availabilityCode\":\"F\",\"documentStyle\":\"xml\","
+            + "\"site\":\"Europe_PMC\",\"url\":\"__BASE__/europepmc/body\"}]}}]}}";
     private static final String ARXIV = "<?xml version='1.0' encoding='UTF-8'?>\n<feed xmlns=\"http://www.w3.org/2005/Atom\">\n"
             + "  <id>https://arxiv.org/api/query</id>\n  <title>arXiv Query: search_query=all:brazing</title>\n"
             + "  <entry>\n    <id>http://arxiv.org/abs/2103.11222v2</id>\n"
@@ -148,7 +153,8 @@ public final class DetectRegression {
         });
         server.createContext("/crossref", exchange -> { record("/crossref", queryOf(exchange)); respond(exchange, 200, CROSSREF); });
         server.createContext("/semantic-scholar", exchange -> { record("/semantic-scholar", queryOf(exchange)); respond(exchange, 200, SEMANTIC); });
-        server.createContext("/europepmc/search", exchange -> { record("/europepmc/search", queryOf(exchange)); respond(exchange, 200, EUROPEPMC); });
+        server.createContext("/europepmc/search", exchange -> { record("/europepmc/search", queryOf(exchange));
+            respond(exchange, 200, EUROPEPMC.replace("__BASE__", "http://" + exchange.getRequestHeaders().getFirst("Host"))); });
         server.createContext("/europepmc/", exchange -> { record("/europepmc/fulltext", queryOf(exchange)); respond(exchange, 200, FULLTEXT_XML); });
         server.createContext("/arxiv", exchange -> { record("/arxiv", queryOf(exchange)); respond(exchange, 200, ARXIV); });
         /* 期刊官网自己发 PDF 的那一路：字节进、正文出，全走回环，不碰真网。 */
@@ -646,15 +652,16 @@ public final class DetectRegression {
         check(europe.source.engine.equals("europepmc") && europe.source.locator.equals("10.1371/journal.pone.0123456")
                 && europe.source.year.equals("2020") && europe.source.title.equals("Open access study of brazed seals"),
                 "Europe PMC core result parsed with DOI locator");
-        check(europe.fullTextUrl.equals(base + "/europepmc/MED/PMC9876543/fullTextXML"),
-                "Europe PMC full text url stays on the configured endpoint");
+        check(europe.fullTextUrl.equals(base + "/europepmc/body"),
+                "Europe PMC 的全文链接取源自己在 fullTextUrlList 里给的那条（documentStyle=xml），"
+                        + "不是拿 pmcid 拼的 MED/<pmcid>/fullTextXML——那条口实测六次全 404");
         check(query("/europepmc/search").contains("resultType=core") && query("/europepmc/search").contains("pageSize=5"),
                 "Europe PMC asks for core results with a page size");
         int beforeFull = totalHits();
         String fullText = PaperSources.fullText(europe, limits, null);
         check(fullText.contains("Brazing gaps below 0.2 mm produced the strongest joints.") && fullText.indexOf('<') < 0,
                 "Europe PMC fullTextXML is reduced to plain comparison text");
-        check(totalHits() == beforeFull + 1 && query("/europepmc/fulltext").startsWith("/europepmc/MED/PMC9876543/fullTextXML"),
+        check(totalHits() == beforeFull + 1 && query("/europepmc/fulltext").startsWith("/europepmc/body"),
                 "full text is fetched once and only from loopback");
         /* .pdf 链接以前是被直接丢掉的；现在它必须真下回来、用 app 自己的 PDF 解析出正文。 */
         PaperSources.Candidate pdf = new PaperSources.Candidate();
