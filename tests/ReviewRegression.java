@@ -77,7 +77,9 @@ public final class ReviewRegression {
         ByteArrayOutputStream accepted = new ByteArrayOutputStream();
         DocxWriter.write(new ByteArrayInputStream(output.toByteArray()), accepted, acceptDoc);
         String acceptedXml = new String(DocxZipReader.read(new ByteArrayInputStream(accepted.toByteArray())).get("word/document.xml"), StandardCharsets.UTF_8);
-        java.nio.file.Files.write(java.nio.file.Paths.get("artifacts/tests/review/accepted.xml"), acceptedXml.getBytes(StandardCharsets.UTF_8));
+        java.nio.file.Path acceptedDir = java.nio.file.Paths.get("artifacts/tests/review");
+        java.nio.file.Files.createDirectories(acceptedDir);   // a fresh checkout has no artifacts/ yet
+        java.nio.file.Files.write(acceptedDir.resolve("accepted.xml"), acceptedXml.getBytes(StandardCharsets.UTF_8));
         org.w3c.dom.Document acceptedDocument = factory.newDocumentBuilder().parse(new ByteArrayInputStream(acceptedXml.getBytes(StandardCharsets.UTF_8)));
         String w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
         check(acceptedDocument.getElementsByTagNameNS(w, "ins").getLength() == 0
