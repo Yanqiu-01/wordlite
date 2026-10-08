@@ -36,6 +36,7 @@ public final class RecordImportRegression {
         plainCiteLines();
         plainAbstractBlocks();
         encodingSniffing();
+        utf16AndTruncation();
         brokenRecords();
         unrecognisableFormat();
         routingDecides();
@@ -477,6 +478,60 @@ public final class RecordImportRegression {
     }
 
     // ---- helpers ----
+
+    // ---- 编码：UTF-16 的导出（记事本"Unicode"）----
+
+    private static void utf16AndTruncation() {
+        RecordImport.Parsed le = RecordImport.parse(
+                withBom(bytesAs(NOTE_EXPRESS, "UTF-16LE"), new byte[] { (byte) 0xFF, (byte) 0xFE }),
+                "cnki-utf16le.txt");
+        check(RecordImport.FORMAT_NOTEEXPRESS.equals(le.format),
+                "UTF-16LE 带 BOM 的导出照样认得出写法，got " + le.format);
+        check(le.charset.startsWith("UTF-16LE"), "charset 说的是 UTF-16LE，got " + le.charset);
+        check(le.records.size() == 3 && TITLE_A.equals(le.records.get(0).title),
+                "UTF-16LE 读出来的题名里没有 NUL（" + le.records.size() + " 篇）");
+
+        RecordImport.Parsed be = RecordImport.parse(
+                withBom(bytesAs(NOTE_EXPRESS, "UTF-16BE"), new byte[] { (byte) 0xFE, (byte) 0xFF }),
+                "cnki-utf16be.txt");
+        check(be.records.size() == 3 && TITLE_A.equals(be.records.get(0).title),
+                "UTF-16BE 同样读得出（" + be.records.size() + " 篇，" + be.charset + "）");
+
+        // 没写 BOM 的 UTF-16LE：按 UTF-8 严格解会"成功"，得到一串夹 NUL 的乱码——这一条必须被拦下。
+        RecordImport.Parsed bare = RecordImport.parse(bytesAs(NOTE_EXPRESS, "UTF-16LE"), "cnki-noBom.txt");
+        check(bare.records.size() == 3 && TITLE_A.equals(bare.records.get(0).title),
+                "没有 BOM 的 UTF-16LE 不许被当成 UTF-8 读成乱码（" + bare.records.size()
+                        + " 篇，charset=" + bare.charset + "）");
+        check(bare.charset.startsWith("UTF-16LE"), "这一份的 charset 要说清是按 UTF-16LE 读的，got " + bare.charset);
+
+        // 截断不许把一对代理劈开。
+        StringBuilder big = new StringBuilder();
+        for (int i = 0; i < 19999; i++) big.append('中');
+        big.append('\uDB40\uDD00').append("尾字");
+        RecordImport.Record longOne = new RecordImport.Record();
+        longOne.abstractText = big.toString();
+        longOne.title = "超长摘要的一篇";
+        String body = longOne.body();
+        check(body.length() <= RecordImport.MAX_RECORD_CHARS,
+                "可比文本不超过上限（" + body.length() + " <= " + RecordImport.MAX_RECORD_CHARS + "）");
+        check(!Character.isSurrogate(body.charAt(body.length() - 1)),
+                "截在一对代理中间时退回整对，末尾不许留半个字符");
+    }
+
+    private static byte[] withBom(byte[] body, byte[] bom) {
+        byte[] out = new byte[bom.length + body.length];
+        System.arraycopy(bom, 0, out, 0, bom.length);
+        System.arraycopy(body, 0, out, bom.length, body.length);
+        return out;
+    }
+
+    private static byte[] bytesAs(String text, String charset) {
+        try {
+            return text.getBytes(charset);
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
+        }
+    }
 
     private static byte[] bytes(String text) {
         try {

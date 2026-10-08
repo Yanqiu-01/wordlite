@@ -113,7 +113,11 @@ public final class RecordImport {
             append(tail, keywordLine());
             if (out.length() > 0 && tail.length() > 0) out.append('\n');
             out.append(tail);
-            return out.length() <= MAX_RECORD_CHARS ? out.toString() : out.substring(0, MAX_RECORD_CHARS);
+            if (out.length() <= MAX_RECORD_CHARS) return out.toString();
+            int cut = MAX_RECORD_CHARS;
+            // 截断不许把一对代理劈开：劈开得到半个字符，那一个字在比对里永远对不上。
+            if (Character.isHighSurrogate(out.charAt(cut - 1))) cut--;
+            return out.substring(0, cut);
         }
 
         /** 这一篇可比到什么档：有摘要是摘要级，连摘要都没有就只剩题名那一行。 */
@@ -239,10 +243,30 @@ public final class RecordImport {
             offset = 3;
             parsed.charset = "UTF-8 带 BOM";
         }
+        // 记事本里那个"Unicode"存出来是 UTF-16。先认 BOM；没有 BOM 的看字节形状。
+        // 不拦的后果很难看：UTF-16 的 ASCII 段按 UTF-8 严格解是合法的，会得到一串夹 NUL 的乱码，
+        // 一声不响地入库，比对时对不上也没人知道为什么。
+        String bom = utf16Charset(content);
+        if (bom != null) {
+            String wide = tryDecode(content, 2, bom, true);
+            if (wide == null) wide = tryDecode(content, 2, bom, false);
+            if (wide != null) {
+                parsed.charset = bom + "（带 BOM）";
+                return wide;
+            }
+        }
         String strict = tryDecode(content, offset, "UTF-8", true);
-        if (strict != null) {
+        if (strict != null && strict.indexOf('\u0000') < 0) {
             if (parsed.charset.length() == 0) parsed.charset = "UTF-8";
             return strict;
+        }
+        String bare16 = utf16Bare(content);
+        if (bare16 != null) {
+            String wide = tryDecode(content, 0, bare16, true);
+            if (wide != null && wide.indexOf('\u0000') < 0) {
+                parsed.charset = bare16 + "（无 BOM）";
+                return wide;
+            }
         }
         String gb = tryDecode(content, offset, "GB18030", true);
         if (gb != null) {
@@ -252,6 +276,32 @@ public final class RecordImport {
         parsed.charset = "按 UTF-8 勉强读（编码没验出来）";
         String loose = tryDecode(content, offset, "UTF-8", false);
         return loose == null ? "" : loose;
+    }
+
+    /** UTF-16 的 BOM。认出来返回 charset 名，认不出返回 null。 */
+    private static String utf16Charset(byte[] c) {
+        if (c.length >= 2 && (c[0] & 0xFF) == 0xFF && (c[1] & 0xFF) == 0xFE) return "UTF-16LE";
+        if (c.length >= 2 && (c[0] & 0xFF) == 0xFE && (c[1] & 0xFF) == 0xFF) return "UTF-16BE";
+        return null;
+    }
+
+    /**
+     * 没写 BOM 的 UTF-16 只能靠字节形状认：ASCII 为主的题录编码成 UTF-16 之后每两个字节里就有一个 0，
+     * 0 落在奇位还是偶位分出大小端。阈值取"三分之一的对子里有一个 0"：汉字在 UTF-16 里两个字节都在
+     * 高位，所以中文越多的稿子这个比例越接近一半以下，再卡高就认不出来了；而 GB18030 的中文两字节都在
+     * 高位、纯 ASCII 里根本不会出现 0x00，这两种都到不了三分之一的 0，不会被误判成 UTF-16。
+     */
+    static String utf16Bare(byte[] c) {
+        if (c == null || c.length < 16 || (c.length & 1) != 0) return null;
+        int oddZero = 0, evenZero = 0;
+        for (int i = 0; i + 1 < c.length; i += 2) {
+            if ((c[i + 1] & 0xFF) == 0) oddZero++;
+            if ((c[i] & 0xFF) == 0) evenZero++;
+        }
+        int pairs = c.length / 2;
+        if (oddZero * 3 >= pairs && oddZero >= evenZero) return "UTF-16LE";
+        if (evenZero * 3 >= pairs) return "UTF-16BE";
+        return null;
     }
 
     private static String tryDecode(byte[] content, int offset, String charset, boolean strict) {
@@ -907,7 +957,8 @@ public final class RecordImport {
         for (int i = 0; i < parsed.records.size(); i++) {
             Record rec = parsed.records.get(i);
             CorpusImport.Source source = new CorpusImport.Source(rec.fileName(), bytes(rec.body()));
-            source.recordLevel = true;
+            // 连摘要都没有的那一条落"仅题录"档：它的可比文本只剩题名一行，别冒充摘要级证据。
+            source.material = rec.material();
             out.add(source);
         }
         return out;

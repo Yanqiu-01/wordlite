@@ -59,6 +59,9 @@ Add-Suite "CandidateRankerRegression" @()
 Add-Suite "HitMapRegression" @()
 Add-Suite "RoutesRegression"      @()
 Add-Suite "CorpusImportRegression" @()
+# 题录导出入库（NoteExpress/RefWorks/RIS/BibTeX/GB-T 7714 五种写法、编码嗅探、摘要级档位）。
+# 这一套没进闸门的后果是实打实的：923 行解析代码发出去了，没人每次发布替它跑一遍。
+Add-Suite "RecordImportRegression" @()
 Add-Suite "RewriteRobustnessRegression" @("tests/corpus/real-prose.txt")
 Add-Suite "AigcRegression"         @()
 # 逐特征方向审计（带标注语料）。缺语料一律判失败，不许静默跳过；它同时是"未标定就不许给数"的闸门。
