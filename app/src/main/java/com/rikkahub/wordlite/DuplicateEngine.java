@@ -80,7 +80,7 @@ public final class DuplicateEngine {
         public int coveredChars;
         /** 可检索的正文总字数：retrievable() 通过的段落字数；结构性文本另计 excludedChars。 */
         public int comparableChars;
-        /** 每个检索源被提问的窗口数，HTML 的「提问窗口数」列读它。 */
+        /** 每个检索源被提问的次数：一扇窗口最多两次（整窗一次，混主题那段单独一次）。HTML 的「提问次数」列读它。 */
         public final LinkedHashMap<String, Integer> windowsAsked = new LinkedHashMap<String, Integer>();
         /** 真正进了语料（摘要或全文非空）的候选数。 */
         public int comparableCandidates;
@@ -375,56 +375,66 @@ public final class DuplicateEngine {
         ArrayList<PaperSources.Candidate> pool = new ArrayList<PaperSources.Candidate>();
         int requests = 0, poolDropped = 0, done = 0, total = planned * engines.size();
         boolean requestCap = false, timeCap = false;
+
+        /* 这一轮真正问出去的检索式，排序阶段要用（见 phaseB 的 ranking）。 */
+        ArrayList<String> askedQueries = new ArrayList<String>();
         for (int w = 0; w < planned; w++) {
             if (cancelled(cancellation)) { note(report, "检索已取消，结果只覆盖已完成的窗口"); break; }
-            String phrase = PaperSources.queryPhrase(plan.groups.get(w), MAX_PHRASE_CHARS);
+            /* 一扇窗口可能压着两种主题：抄来的一段会被邻居的关键词盖住，整窗检索式问不到它。 */
+            ArrayList<String> probes = windowProbes(plan.members.get(w));
             LinkedHashMap<String, Integer> gained = new LinkedHashMap<String, Integer>();
             LinkedHashMap<String, Boolean> askedNow = new LinkedHashMap<String, Boolean>();
             boolean asked = false, poolFull = false;
-            for (String engine : engines) {
-                if (phrase.isEmpty() || Boolean.TRUE.equals(skipped.get(engine))
-                        || Boolean.TRUE.equals(exhausted.get(engine))) continue;
-                if (requests >= MAX_REQUESTS) { requestCap = true; break; }
-                /* 剩余额度连一次带超时的请求都放不下就不再发：那是发出去必死的请求。 */
-                if (deadline - System.currentTimeMillis() <= limits.timeoutSeconds * 1000L + 1000L) { timeCap = true; break; }
-                /* 相邻窗口的重复段落会凑出同一个 48 字短语，这种请求纯属白送。 */
-                if (Boolean.TRUE.equals(askedPhrase.get(engine + "|" + phrase))) continue;
-                waitTurn(lastAsk, engine, gap, deadline, cancellation);
-                askedPhrase.put(engine + "|" + phrase, Boolean.TRUE);
-                askedNow.put(engine, Boolean.TRUE);
-                asked = true;
-                requests++;
-                bump(report.windowsAsked, engine);
-                step(progress, "检索 " + PaperSources.label(engine), ++done, total);
-                try {
-                    ArrayList<PaperSources.Candidate> found = PaperSources.search(engine, phrase, limits, cancellation);
-                    failedLast.remove(engine);
-                    for (PaperSources.Candidate candidate : found) {
-                        String key = poolKey(engine, candidate);
-                        if (key.isEmpty()) continue;
-                        if (pool.size() >= poolCap) { poolDropped++; poolFull = true; continue; }
-                        if (Boolean.TRUE.equals(poolKeys.get(key))) continue;
-                        poolKeys.put(key, Boolean.TRUE);
-                        pool.add(candidate);
-                        bump(gained, engine);
-                    }
-                } catch (IllegalArgumentException error) {
-                    skipped.put(engine, Boolean.TRUE); failedLast.put(engine, Boolean.TRUE);
-                    note(report, "已跳过 " + PaperSources.label(engine) + "：" + message(error));
-                } catch (IOException error) {
-                    /* 429 与"这个源挂了"不是一回事：匿名共享配额是暂时的，一次失败就整轮放弃太狠。
-                       判据用注记前缀而不是状态码，因为 PaperSources.search() 只往上抛 IOException。 */
-                    failedLast.put(engine, Boolean.TRUE);
-                    boolean throttled = message(error).startsWith(THROTTLED_PREFIX)
-                            && count(retries, engine) < MAX_THROTTLE_RETRIES;
-                    if (throttled) {
-                        bump(retries, engine);
-                        note(report, "已重试 " + PaperSources.label(engine) + "：" + message(error));
-                    } else {
-                        skipped.put(engine, Boolean.TRUE);
+            for (int p = 0; p < probes.size(); p++) {
+                String phrase = probes.get(p);
+                if (phrase.isEmpty()) continue;
+                if (!askedQueries.contains(phrase)) askedQueries.add(phrase);
+                for (String engine : engines) {
+                    if (phrase.isEmpty() || Boolean.TRUE.equals(skipped.get(engine))
+                            || Boolean.TRUE.equals(exhausted.get(engine))) continue;
+                    if (requests >= MAX_REQUESTS) { requestCap = true; break; }
+                    /* 剩余额度连一次带超时的请求都放不下就不再发：那是发出去必死的请求。 */
+                    if (deadline - System.currentTimeMillis() <= limits.timeoutSeconds * 1000L + 1000L) { timeCap = true; break; }
+                    /* 相邻窗口的重复段落会凑出同一个 48 字短语，这种请求纯属白送。 */
+                    if (Boolean.TRUE.equals(askedPhrase.get(engine + "|" + phrase))) continue;
+                    waitTurn(lastAsk, engine, gap, deadline, cancellation);
+                    askedPhrase.put(engine + "|" + phrase, Boolean.TRUE);
+                    askedNow.put(engine, Boolean.TRUE);
+                    asked = true;
+                    requests++;
+                    bump(report.windowsAsked, engine);
+                    step(progress, "检索 " + PaperSources.label(engine), Math.min(++done, total), total);
+                    try {
+                        ArrayList<PaperSources.Candidate> found = PaperSources.search(engine, phrase, limits, cancellation);
+                        failedLast.remove(engine);
+                        for (PaperSources.Candidate candidate : found) {
+                            String key = poolKey(engine, candidate);
+                            if (key.isEmpty()) continue;
+                            if (pool.size() >= poolCap) { poolDropped++; poolFull = true; continue; }
+                            if (Boolean.TRUE.equals(poolKeys.get(key))) continue;
+                            poolKeys.put(key, Boolean.TRUE);
+                            pool.add(candidate);
+                            bump(gained, engine);
+                        }
+                    } catch (IllegalArgumentException error) {
+                        skipped.put(engine, Boolean.TRUE); failedLast.put(engine, Boolean.TRUE);
                         note(report, "已跳过 " + PaperSources.label(engine) + "：" + message(error));
+                    } catch (IOException error) {
+                        /* 429 与"这个源挂了"不是一回事：匿名共享配额是暂时的，一次失败就整轮放弃太狠。
+                           判据用注记前缀而不是状态码，因为 PaperSources.search() 只往上抛 IOException。 */
+                        failedLast.put(engine, Boolean.TRUE);
+                        boolean throttled = message(error).startsWith(THROTTLED_PREFIX)
+                                && count(retries, engine) < MAX_THROTTLE_RETRIES;
+                        if (throttled) {
+                            bump(retries, engine);
+                            note(report, "已重试 " + PaperSources.label(engine) + "：" + message(error));
+                        } else {
+                            skipped.put(engine, Boolean.TRUE);
+                            note(report, "已跳过 " + PaperSources.label(engine) + "：" + message(error));
+                        }
                     }
                 }
+                if (requestCap || timeCap) break;
             }
             /* 取尽判据：同一个源连着两个窗口一篇新的都没多，就别再花配额问它。池子被我们自己
                装满的那些轮不算它沉默，否则是把内存上限伪装成源的意愿。 */
@@ -441,15 +451,16 @@ public final class DuplicateEngine {
             if (asked) { report.windowsRetrieved++; report.coveredChars += plan.chars.get(w).intValue(); }
             if (requestCap || timeCap) break;
         }
-        phaseB(text, corpus, report, engines, limits, cancellation, pool, skipped, failedLast, exhausted, silent,
-                requestCap, timeCap, poolCap, poolDropped, deadline);
+
+        phaseB(askedQueries, corpus, report, engines, limits, cancellation, pool, skipped, failedLast, exhausted,
+                silent, requestCap, timeCap, poolCap, poolDropped, deadline);
     }
 
     /**
      * 第二阶段：跨源合并 -> BM25 名次 -> 按名次入库。全文额度也跟着名次走，
      * 不再是谁先回来谁先抓。
      */
-    private static void phaseB(String text, TextCorpus corpus, Report report, ArrayList<String> engines,
+    private static void phaseB(ArrayList<String> asked, TextCorpus corpus, Report report, ArrayList<String> engines,
                                PaperSources.Limits limits, ApiClient.Cancellation cancellation,
                                ArrayList<PaperSources.Candidate> pool, LinkedHashMap<String, Boolean> skipped,
                                LinkedHashMap<String, Boolean> failedLast, LinkedHashMap<String, Boolean> exhausted,
@@ -458,9 +469,20 @@ public final class DuplicateEngine {
         CandidateRanker.Dedup merged = CandidateRanker.dedup(pool);
         report.mergedDuplicates = merged.merges.size();
         report.merges.addAll(merged.merges);
-        /* 排序用整篇文档的检索短语：BM25 在这儿回答的是"这篇候选与本文整体对不对题"，
-           拿第 7 窗口的串排序会让一句口语式过渡句把无关论文抬进语料头部并吃掉全文额度。 */
-        String query = PaperSources.queryPhrase(text, MAX_PHRASE_CHARS);
+
+        /* 排序式 = 这一轮真正问出去的检索式拼起来（1.1.3）。
+           BM25 在这一层回答的是"这篇候选与本文对不对题"，所以它的查询必须是**本文**——而本文在检索时
+           是一扇一扇窗口分开问出去的，排序式就必须是同一批窗口式合起来。以前这里是
+           `queryPhrase(text, 48)`：整篇文档压成 48 个字，几乎必然只剩开头几段的词。真机跑一篇
+           19967 字的开题报告（2026-10-08）：十个源问回 36 条，其中 34 条与那 48 个字一个三元组都不沾，
+           按旧规矩整条丢掉，最后入库 2 条，总相似度比 0.00%——那个 0% 不是论文干净，是比对根本没拿到
+           可比的对象。只命中在论文中段的真出处，在旧口径下必被丢掉。 */
+        StringBuilder ranking = new StringBuilder();
+        for (int i = 0; i < asked.size(); i++) {
+            if (i > 0) ranking.append('\n');
+            ranking.append(asked.get(i));
+        }
+        String query = ranking.toString();
         int budget = limits.fullTexts > 0 ? limits.fullTexts : MAX_FULL_TEXTS;
         ArrayList<CandidateRanker.Selection> plan = CandidateRanker.plan(query, merged.kept, budget,
                 Math.max(1, limits.perEngine));
@@ -628,6 +650,8 @@ public final class DuplicateEngine {
         final ArrayList<String> groups = new ArrayList<String>();
         /** 与 groups 一一对应：该组三段落在正文里的有效字数，口径 TextCorpus.validCount。 */
         final ArrayList<Integer> chars = new ArrayList<Integer>();
+        /** 与 groups 一一对应：这一扇窗口里那几段的原文。组串只是检索式的原料，段落自己那句才是探针要护住的东西。 */
+        final ArrayList<ArrayList<String>> members = new ArrayList<ArrayList<String>>();
         /** retrievable() 通过的段落总字数：文档覆盖率的分母。 */
         int comparableChars;
     }
@@ -660,6 +684,7 @@ public final class DuplicateEngine {
             start = i + 1;
         }
         StringBuilder group = new StringBuilder();
+        ArrayList<String> member = new ArrayList<String>();
         int grouped = 0, limit = cap < 1 ? 1 : cap;
         for (int i = 0; i < kept.size(); i++) {
             int[] span = spans.get(i);
@@ -667,6 +692,7 @@ public final class DuplicateEngine {
             out.comparableChars += chars;
             if (group.length() > 0) group.append(' ');
             group.append(kept.get(i));
+            member.add(kept.get(i));
             grouped += chars;
             if (i % WINDOW_PARAGRAPHS != WINDOW_PARAGRAPHS - 1 && i != kept.size() - 1) continue;
             /* 超出上限的组不再追加：设置里的窗口数就是用户许给这次检索的提问次数，
@@ -674,10 +700,63 @@ public final class DuplicateEngine {
             if (out.groups.size() >= limit) continue;
             out.groups.add(group.toString());
             out.chars.add(Integer.valueOf(grouped));
+            out.members.add(new ArrayList<String>(member));
             group.setLength(0);
+            member.clear();
             grouped = 0;
         }
         return out;
+    }
+
+    /** 段落检索式在整窗检索式里剩下的三元组低于这个数，就认为这一扇窗口压着第二种主题。 */
+    static final double MIN_PROBE_OVERLAP = 1d / 3d;
+
+    /**
+     * 一扇窗口要问出去的检索式：平时一条；窗口里压着另一种主题时，那一段单独再问一次。
+     *
+     * 三段落一扇是拿请求换覆盖，代价写在实测里（2026-10-08，FullScanProbe 走产品链路）：把五句真论文
+     * 原话种进 6376 字段落之间，按整窗检索式问了 11 扇、入库 17 篇，五句一句没抓到；同一批句子逐句去问，
+     * 光维普就是 4/4 自召回（reports/recall-t2-after-cqvip.txt）。原因是整窗那四十八个字只装得下最具体的
+     * 那一段——抄来的一段被邻居的关键词盖住时，它的词一个字都进不了检索式，问都问不到。判据因此是
+     * "这一段自己的检索式在整窗检索式里还剩多少三元组"：剩得少说明这一扇里有两种主题，而那正是抄稿最常
+     * 待的地方，这种窗口才值得多花一次请求；主题一致的窗口照旧一次问完。
+     */
+    static ArrayList<String> windowProbes(ArrayList<String> paragraphs) {
+        ArrayList<String> out = new ArrayList<String>();
+        StringBuilder joined = new StringBuilder();
+        for (int i = 0; i < paragraphs.size(); i++) {
+            if (i > 0) joined.append(' ');
+            joined.append(paragraphs.get(i));
+        }
+        String whole = PaperSources.queryPhrase(joined.toString(), MAX_PHRASE_CHARS);
+        if (!whole.isEmpty()) out.add(whole);
+        long[] windowGrams = TextCorpus.gramsOf(TextCorpus.normalize(whole));
+        String orphan = "";
+        double weakest = 1d;
+        for (int i = 0; i < paragraphs.size(); i++) {
+            String paragraph = paragraphs.get(i);
+            if (!retrievable(paragraph)) continue;
+            String phrase = PaperSources.queryPhrase(paragraph, MAX_PHRASE_CHARS);
+            if (phrase.isEmpty() || phrase.equals(whole)) continue;
+            double kept = sharedRatio(phrase, windowGrams);
+            if (kept < MIN_PROBE_OVERLAP && kept < weakest) { weakest = kept; orphan = phrase; }
+        }
+        /* 一扇最多补一条：补两条就等于把窗口切成段落，那是另一种预算口径，不在这里偷偷改。 */
+        if (!orphan.isEmpty()) out.add(orphan);
+        return out;
+    }
+
+    /** 这段的检索式有多少三元组落在整窗检索式里：零就意味着整窗那句问出去，这段一个字都问不到。 */
+    private static double sharedRatio(String phrase, long[] windowGrams) {
+        long[] grams = TextCorpus.gramsOf(TextCorpus.normalize(phrase));
+        if (grams.length == 0) return 1d;
+        if (windowGrams.length == 0) return 0d;
+        int i = 0, j = 0, hits = 0;
+        while (i < grams.length && j < windowGrams.length) {
+            int by = Long.compare(grams[i], windowGrams[j]);
+            if (by == 0) { hits++; i++; j++; } else if (by < 0) i++; else j++;
+        }
+        return hits / (double) grams.length;
     }
 
     /** 旧签名：校验上限 MAX_WINDOWS 下的窗口组串，`windowing()` 那类回归不必改。 */

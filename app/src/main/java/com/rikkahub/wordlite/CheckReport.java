@@ -114,7 +114,7 @@ public final class CheckReport {
         out.append("<h2>按检索源分布</h2>");
         if (names.isEmpty()) { out.append("<p>本次检测没有来源分布。</p>"); return; }
         out.append("<table><thead><tr><th>检索源</th><th>重复字符占比</th><th>候选文献数</th>")
-                .append("<th>提问窗口数</th></tr></thead><tbody>");
+                .append("<th>提问次数</th></tr></thead><tbody>");
         for (String name : names) {
             Double share = report.byEngine.get(name);
             Integer count = report.candidateCount.get(name);

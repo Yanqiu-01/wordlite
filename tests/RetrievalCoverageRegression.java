@@ -39,6 +39,8 @@ public final class RetrievalCoverageRegression {
     private static int crossrefSize = -1;
     /** 打开后每个桩都回同样的两条候选：用来演「连续两个窗口零新增」的取尽判据。 */
     private static boolean sticky;
+    /** E 组夹具：真出处只在第 MID_WINDOW_SEQ 扇窗口回得来，其余窗口一律回套话。 */
+    private static boolean midWindow;
     /** 慢桩每请求的耗时，时间闸门那组用它把挂钟闸门压出来。 */
     private static long slowMillis;
     /** 命中这些路径直接回 429，用来验限流不被误算成整轮不可用。 */
@@ -78,6 +80,7 @@ public final class RetrievalCoverageRegression {
         boilerplate = false;
         crossrefSize = -1;
         sticky = false;
+        midWindow = false;
         slowMillis = 0L;
         throttled.clear();
         resetCounters();
@@ -311,21 +314,37 @@ public final class RetrievalCoverageRegression {
 
     private static String openAlexBody(int seq, int count) {
         sourceTag = "开放源";
+        if (midWindow) {
+            /* E 组：第 MID_WINDOW_SEQ 扇窗口回那条真出处，其余窗口全是与正文零共同词的套话。 */
+            StringBuilder found = new StringBuilder("{\"meta\":{\"count\":1},\"results\":[");
+            if (seq == MID_WINDOW_SEQ) {
+                openAlexItem(found, seq, 1, "10.9999/mid-0001", MID_TITLE, MID_ABSTRACT);
+                return found.append("]}").toString();
+            }
+            for (int i = 1; i <= count; i++)
+                openAlexItem(found, seq, i, "10.1000/oa-" + seq + "-" + i, boilerTitle(seq, i), boilerAbstract(seq, i));
+            return found.append("]}").toString();
+        }
         StringBuilder out = new StringBuilder("{\"meta\":{\"count\":").append(count).append("},\"results\":[");
         for (int i = 1; i <= count; i++) {
-            if (i > 1) out.append(',');
             /* 第 3 条与 crossref 对题那条共用同一个 DOI：跨源合并的账要能对上一遍。 */
             String doi = (crossrefSize > 0 && i == 3) ? DOI_ON_TOPIC : "10.1000/oa-" + seq + "-" + i;
             String title = crossrefSize > 0 ? weakTitle(seq, i) : topicTitle(seq, i);
             String summary = crossrefSize > 0 ? weakAbstract(seq, i) : topicAbstract(seq, i);
-            out.append("{\"id\":\"https://openalex.org/W").append(seq).append('_').append(i)
-                    .append("\",\"doi\":\"https://doi.org/").append(doi)
-                    .append("\",\"title\":\"").append(title)
-                    .append("\",\"authorships\":[{\"author\":{\"display_name\":\"L. Zhang\"}}],\"publication_year\":2021,")
-                    .append("\"open_access\":{\"is_oa\":false},\"abstract_inverted_index\":{\"").append(summary)
-                    .append("\":[0]}}");
+            openAlexItem(out, seq, i, doi, title, summary);
         }
         return out.append("]}").toString();
+    }
+
+    /** 一条 OpenAlex 条目：逗号由容器判断，夹具只管填内容。 */
+    private static void openAlexItem(StringBuilder out, int seq, int i, String doi, String title, String summary) {
+        if (out.charAt(out.length() - 1) != '[') out.append(',');
+        out.append("{\"id\":\"https://openalex.org/W").append(seq).append('_').append(i)
+                .append("\",\"doi\":\"https://doi.org/").append(doi)
+                .append("\",\"title\":\"").append(title)
+                .append("\",\"authorships\":[{\"author\":{\"display_name\":\"L. Zhang\"}}],\"publication_year\":2021,")
+                .append("\"open_access\":{\"is_oa\":false},\"abstract_inverted_index\":{\"").append(summary)
+                .append("\":[0]}}");
     }
 
     /** crossref 对题那条的 DOI：openalex 的第 3 条与它同源。 */
@@ -410,6 +429,61 @@ public final class RetrievalCoverageRegression {
         out.setLength(39);
         return out.append('。').toString();
     }
+
+    // ---- E 组夹具：抄在论文中段的一整段原话，与只有那扇窗口问得回它的那篇来源 ----
+
+    /** 原封不动抄进正文的三句真论文原话，正好铺满第三扇检索窗口（第六、七、八段）。 */
+    private static final String[] MID_LINES = {
+            "多孔铜中间层钎焊界面组织演变随保温时间延长而粗化，界面反应层生成薄层状硅化物，"
+                    + "晶粒尺寸沿界面方向呈梯度分布。",
+            "保温六十分钟后扩散层不再明显长厚，接头抗剪强度随保温时间先升后降，断口未见孔洞与微裂纹。",
+            "据此把工艺窗口压到六十分钟以内，随炉冷却到三百度以下再开炉，界面组织保持稳定不再继续粗化。",
+    };
+    /** 那篇真出处：摘要就以被抄走的三句原话开头。 */
+    private static final String MID_TITLE = "多孔铜中间层钎焊界面组织演变研究";
+    private static final String MID_ABSTRACT =
+            MID_LINES[0] + MID_LINES[1] + MID_LINES[2] + "随炉冷却速率取每分钟八度时接头变形量最小。";
+    /** 只有第 3 扇窗口问得回这篇来源，其余五扇全回套话。 */
+    private static final int MID_WINDOW_SEQ = 3;
+
+    /**
+     * 十八段轨道客流正文，第六到第八段是从别处抄来的一整段。
+     *
+     * 段长是刻意排的：前两扇每段八个短句，是全篇里最"具体"的材料；抄稿那一扇只有钎焊词。把整篇压成
+     * 四十八个字的检索式，落点必然在前两扇的客流词上，那条真出处一个查询词都分不到——真机那篇
+     * 19967 字开题报告报 0.00% 走的就是这个口子。段号必须写进首句，否则四十八个字装不到它，
+     * 相邻窗口会撞出同一个检索式被去重；段尾也不能收在数字上，否则 retrievable() 当它是目录页码丢掉。
+     */
+    private static DocxDocument roadmap(int paragraphs) {
+        DocxDocument document = new DocxDocument();
+        for (int i = 0; i < paragraphs; i++) {
+            DocxDocument.ParagraphBlock block = new DocxDocument.ParagraphBlock();
+            block.index = i;
+            block.text = i >= 6 && i <= 8 ? MID_LINES[i - 6] : roadmapLine(i);
+            document.blocks.add(block);
+            document.paragraphs.add(block);
+        }
+        return document;
+    }
+
+    /** 客流句：前五段铺八个短句（整篇最"具体"的材料），其余铺三个。 */
+    private static String roadmapLine(int index) {
+        StringBuilder out = new StringBuilder("市域快线");
+        out.append(String.format(Locale.ROOT, "%04d", index));
+        out.append("断面客流早高峰上行集中");
+        out.append("，换乘客流在枢纽节点叠加");
+        if (index <= 5) {
+            out.append("，走廊运输能力持续紧张");
+            out.append("，开行方案只能分时拆解");
+            out.append("，站点服务能力需要同步核验");
+            out.append("，换乘通道排队长度越演越烈");
+            out.append("，运能运力匹配反复测算良久");
+            out.append("，客流组织方案数易其稿");
+        }
+        out.append("，调查数据取自自动售检票记录。");
+        return out.toString();
+    }
+
     private static DocxDocument thesis(int paragraphs) {
         DocxDocument document = new DocxDocument();
         for (int i = 0; i < paragraphs; i++) {
@@ -486,7 +560,7 @@ public final class RetrievalCoverageRegression {
         check(report.windowsPlanned == 12, "本次计划检索的窗口数取自设置里的 12");
         check(report.windowsRetrieved == 12, "计划内的窗口全部发出了请求");
         for (String engine : NINE)
-            check(asked(report, engine) == 12, engine + " 的提问窗口数记成 12，HTML 的「提问窗口数」列读的就是它");
+            check(asked(report, engine) == 12, engine + " 的提问次数记成 12，HTML 的「提问次数」列读的就是它");
         check(!report.retrievalIncomplete, "取回了候选的检索绝不许被标成什么都没查");
         check(report.retrievalPartial, "67 个窗口只跑了 12 个，这一轮必须自认部分是");
         return report;
@@ -584,7 +658,7 @@ public final class RetrievalCoverageRegression {
         check(html.contains("12/67"), "HTML 里写着实检比可切的窗口数");
         check(html.contains("仅摘要可比"), "HTML 里写着只有摘要可比的篇数");
         check(html.contains("相似率是下限"), "HTML 把部分覆盖的比率标成下限");
-        check(html.contains("提问窗口数"), "来源表里有每个源被提问的窗口数");
+        check(html.contains("提问次数"), "来源表里有每个源被提问的次数");
         check(html.contains("可比材料"), "候选表里有可比材料这一列");
         check(html.contains("总相似度比") && html.contains("自编率"), "部分完成的报告照样给出三个比率");
         check(!html.contains("未完成查重"), "部分完成绝不允许走未完成那一态");
@@ -707,6 +781,49 @@ public final class RetrievalCoverageRegression {
         check(!report.notes.toString().contains(documentText), "注记里不会回贴整篇正文");
     }
 
+
+    /**
+     * E 组：只有中段那扇窗口问得回的真出处，也必须进比对语料。
+     *
+     * 这是 2026-10-08 真机那篇 19967 字开题报告报 0.00% 的复现。第二阶段以前拿
+     * queryPhrase(整篇, 48) 排序：整篇压成四十八个字只够一两句的词，其余窗口问回来的候选
+     * 一个三元组都对不上，全被零分闸门挡在语料之外，最后没几条可比，整篇就报零。
+     * 排序式换成"这一轮真正问出去的检索式"之后，中段命中的那条按名次入库，零分闸门照旧拦套话。
+     */
+    /**
+     * E 组：只有中段那扇窗口问得回的真出处，也必须进比对语料。
+     *
+     * 这是 2026-10-08 真机那篇 19967 字开题报告报 0.00% 的复现。第二阶段以前拿
+     * queryPhrase(整篇, 48) 当排序式：整篇压成四十八个字只够一两句的词，其余窗口问回来的候选一个
+     * 三元组都对不上，全被零分闸门挡在语料之外，最后没几条可比，整篇就报零。排序式换成"这一轮真正
+     * 问出去的检索式"之后，中段命中的那条按名次入库，零分闸门照旧拦套话。
+     */
+    private static void midWindowHitEntersCorpus() {
+        resetFixtures();
+        midWindow = true;
+        responseSize = 2;
+        TextCorpus corpus = new TextCorpus();
+        DuplicateEngine.Report report = scan(roadmap(18), corpus, engines("openalex"), limits(12, 6));
+        check(hits("/openalex") == 7, "六扇窗口各问一次，抄稿那一扇多问一次：被邻居盖住的那段单独补问");
+        DuplicateEngine.WindowPlan plan = DuplicateEngine.windowPlan(TextSelection.all(roadmap(18)).text, 99);
+        ArrayList<String> probes = DuplicateEngine.windowProbes(plan.members.get(2));
+        check(probes.size() == 2, "抄稿那一扇压着两种主题，整窗一次之外那段自己再问一次");
+        check(probes.get(1).contains("扩散层"), "补问那次的检索式出自被整窗检索式盖住的那一段");
+        check(DuplicateEngine.windowProbes(plan.members.get(0)).size() == 1, "主题一致的那扇窗口照旧一次问完，不多花请求");
+        check(report.candidates.size() == 1, "只有中段窗口问回来的那条真出处进了语料");
+        check(report.candidates.get(0).source.title.contains("多孔铜"), "入库的那条就是被抄的那篇");
+        check(corpusContains(corpus, MID_LINES[1]), "中段命中的真出处进了比对语料，不再整条被丢");
+        check(report.comparableCandidates == 1, "可比候选只有一条，就是那句抄稿的来源");
+        check(report.unrankedCandidates == 11, "十一条与任何检索式零共同词的套话仍被零分闸门拦在外面");
+        check(notes(report, "11 条候选与检索词无任何共同词"), "被挡掉的条数照样写进注记");
+        check(report.duplicateChars >= 60, "抄在中段的那一段被标成重复：" + report.duplicateChars + " 字");
+        check(report.overallRate > 0d, "整篇总相似度比不再是零：" + report.overallRate + "%");
+        String html = CheckReport.html("roadmap.docx", report);
+        check(html.contains("零共同词被挡掉 11 篇"), "HTML 的覆盖率小节照样交代零分闸门挡掉了几篇");
+        midWindow = false;
+        responseSize = 12;
+    }
+
     public static void main(String[] args) throws Exception {
         long savedGap = DuplicateEngine.engineGapMillis;
         long savedMillis = DuplicateEngine.searchMillis;
@@ -720,6 +837,7 @@ public final class RetrievalCoverageRegression {
             requestCeiling();
             timeCeiling();
             rankedIntake();
+            midWindowHitEntersCorpus();
             corpusCeiling();
             throttleCountsBySource();
             exhaustedSourceStopsAsking();
