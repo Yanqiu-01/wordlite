@@ -85,9 +85,13 @@ Write-Host "== resources =="
 Invoke-Checked $aapt2Exe @("compile", "--dir", (Join-Path $src "res"), "-o", $resZip)
 Invoke-Checked $aapt2Exe @("link", "-o", $unsigned, "--manifest", (Join-Path $src "AndroidManifest.xml"),
     "-I", $androidJar, "--java", $gen, $resZip, "-A", (Join-Path $src "assets"))
-# Fonts are deflated, not stored: 183 MB of faces would otherwise ship byte for byte inside the APK
-# (measured 112 MB once deflated). Typeface.createFromAsset reads compressed assets fine, and the
-# installed build is checked on the phone before a release goes out.
+# Fonts ship STORED, not deflated (the rewrite happens below, right before align+sign). Deflating
+# them saves ~70 MB in the file and costs much more on the phone: Typeface.createFromAsset on a
+# compressed asset inflates the whole face into native memory before FreeType can read it, so opening
+# a document with three CJK faces in it asks a phone for ~40 MB of copies that stay there. When that
+# allocation fails the face is gone for the run and 华文新魏 titles silently render as 宋体. Stored +
+# zipalign'd means AssetManager hands FreeType a pointer into the APK instead: nothing to inflate,
+# nothing to keep, and the pages stay evictable. The APK grows to roughly 200 MB; the phone has room.
 
 Write-Host "== javac =="
 # Slash-separated paths: a javac argfile treats a backslash as an escape character.
@@ -146,6 +150,28 @@ try {
     }
 } finally { $zip.Dispose() }
 Write-Host ("renamed {0} entries to slash separators" -f $renamed)
+
+Write-Host "== store the fonts uncompressed =="
+# Every assets/fonts/*.{ttf,ttc} gets rewritten with no compression. Done here, after the path
+# normalisation, so the rename step above cannot re-deflate them behind our back.
+$stored = 0
+$zip = [System.IO.Compression.ZipFile]::Open($unsigned, [System.IO.Compression.ZipArchiveMode]::Update)
+try {
+    foreach ($e in @($zip.Entries | Where-Object {
+        $_.FullName -match '^assets/fonts/.*\.(ttf|ttc|otf)$' -and $_.CompressedLength -ne $_.Length })) {
+        $buffer = New-Object System.IO.MemoryStream
+        $in = $e.Open()
+        try { $in.CopyTo($buffer) } finally { $in.Dispose() }
+        $bytes = $buffer.ToArray()
+        $buffer.Dispose()
+        $e.Delete()
+        $new = $zip.CreateEntry($e.FullName, [System.IO.Compression.CompressionLevel]::NoCompression)
+        $outstream = $new.Open()
+        try { $outstream.Write($bytes, 0, $bytes.Length) } finally { $outstream.Dispose() }
+        $stored++
+    }
+} finally { $zip.Dispose() }
+Write-Host ("stored {0} font entries uncompressed" -f $stored)
 
 & $keytool -list -keystore $keystore -storepass android -alias wordlite 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {

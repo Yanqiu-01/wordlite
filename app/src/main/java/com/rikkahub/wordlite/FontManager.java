@@ -5,6 +5,7 @@ import android.graphics.Paint;
 import android.graphics.Typeface;
 import java.io.InputStream;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.HashSet;
 
 /** Lazy, process-local font cache. No font file is opened by initialize(). */
@@ -12,7 +13,20 @@ public final class FontManager {
     private static Context context;
     private static final HashMap<String, Typeface> faces = new HashMap<String, Typeface>();
     private static final HashMap<String, FontScriptMetrics> metrics = new HashMap<String, FontScriptMetrics>();
-    private static final HashSet<String> unavailable = new HashSet<String>();
+    /**
+     * 装载失败的字库，到什么时候才可以再试一次。
+     *
+     * 这里不永久拉黑。Typeface.createFromAsset 失败最常见的原因是那一刻内存不够——随包的中文脸
+     * 单张 4-20 MB，而以前它们在这台手机的 APK 里是压缩存放的，装载时要先在原生内存里整张展开——
+     * 缓一缓就过得去。以前的写法是一失败就记进 unavailable 从此不再尝试：华文新魏的标题会在整个
+     * 进程剩下的时间里安静地画成宋体，界面上一个字都不说。改成隔一段时间重试，并把失败原因留下，
+     * 让 字体 面板能说清现在到底用的哪张脸。
+     */
+    private static final HashMap<String, Long> retryAfter = new HashMap<String, Long>();
+    /** 每张脸最后一次装载失败的原因，好让界面如实说出来。 */
+    private static final LinkedHashMap<String, String> loadErrors
+            = new LinkedHashMap<String, String>();
+    static final long LOAD_RETRY_MILLIS = 20000L;
     private static final HashMap<String, Boolean> coverage = new HashMap<String, Boolean>();
     private static final HashMap<String, PdfTrueType> cmaps = new HashMap<String, PdfTrueType>();
     private static boolean covers(String path, int codePoint) {
@@ -50,17 +64,50 @@ public final class FontManager {
     }
 
     public static synchronized Typeface load(String path) {
-        if (path == null || context == null || unavailable.contains(path)) return null;
+        if (path == null || context == null) return null;
         Typeface cached = faces.get(path);
         if (cached != null) return cached;
+        Long until = retryAfter.get(path);
+        if (until != null) {
+            if (until.longValue() > android.os.SystemClock.elapsedRealtime()) return null;
+            retryAfter.remove(path);
+        }
         try {
-            cached = Typeface.createFromAsset(context.getAssets(), path);
-            faces.put(path, cached);
-            return cached;
+            Typeface made = Typeface.createFromAsset(context.getAssets(), path);
+            if (made == null) throw new IllegalStateException("createFromAsset 返回空");
+            faces.put(path, made);
+            loadErrors.remove(path);
+            return made;
         } catch (RuntimeException error) {
-            unavailable.add(path);
+            noteFailure(path, error);
+            return null;
+        } catch (OutOfMemoryError error) {
+            /* 一张 20 MB 的脸在内存紧张时能把进程顶崩。宁可这一屏退回系统字库并在 字体 面板里说清，
+               也不让用户写着写着闪退——但这是 Error，只认这一种，别的照旧往上抛。 */
+            noteFailure(path, error);
             return null;
         }
+    }
+
+    private static void noteFailure(String path, Throwable error) {
+        retryAfter.put(path, Long.valueOf(android.os.SystemClock.elapsedRealtime() + LOAD_RETRY_MILLIS));
+        loadErrors.put(path, error.getClass().getSimpleName() + ": " + String.valueOf(error.getMessage()));
+    }
+
+    /**
+     * 现在有哪几张脸装不上。字体 面板与诊断导出拿它说真话："字库里有这张脸"和"这一屏画得出这张脸"
+     * 是两件事，用户看到的应该是后者。
+     */
+    public static synchronized String failureNote() {
+        if (loadErrors.isEmpty()) return "";
+        StringBuilder out = new StringBuilder();
+        for (java.util.Map.Entry<String, String> entry : loadErrors.entrySet()) {
+            if (faces.containsKey(entry.getKey())) continue;
+            if (out.length() > 0) out.append("；");
+            out.append(DocxFontAssets.label(entry.getKey())).append("（")
+                    .append(entry.getValue()).append("）");
+        }
+        return out.length() == 0 ? "" : "字库装载失败：" + out + "。这几张脸暂时用宋体显示，稍等或重开文档会自己重试。";
     }
 
     public static synchronized FontScriptMetrics metrics(String family) {

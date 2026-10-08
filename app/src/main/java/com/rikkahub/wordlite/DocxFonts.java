@@ -96,6 +96,10 @@ public final class DocxFonts {
         }
         if (substitutes > 0)
             out.append("。其中 ").append(substitutes).append(" 种字库里没有，用了最接近的字代替");
+        /* 字库里有这张脸，和这一屏画得出这张脸，是两件事。装载失败过就说出来——用户抱怨过
+           "标题的华文新魏没了，也不知道留的到底是什么字"：那句话本来就该由应用先说，不该等他发现。 */
+        String failed = FontManager.failureNote();
+        if (!failed.isEmpty()) out.append("。").append(failed);
         return out.toString();
     }
 }
