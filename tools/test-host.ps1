@@ -67,6 +67,8 @@ Add-Suite "AigcFeatureAuditRegression" @()
 # 真稿独立留出、出厂闸门。缺权重文件或缺标注语料一律判失败；这一版 AUC 不达标，闸门必须仍然是关的。
 Add-Suite "AigcOfflineModelRegression" @("app/src/main/assets/aigc", "tests/corpus")
 Add-Suite "LocalRewriteRegression" @()
+Add-Suite "DeepModeAudit"          @("tests/corpus/real-prose.txt", "tests/corpus/oa-planted-cjmenet.txt")
+Add-Suite "RewriteRateRegression"  @("tests/samples/input-liu.docx", "tests/corpus/oa-planted-cjmenet.txt", "$out/rewrite-rate")
 Add-Suite "DetectRegression"       @()
 Add-Suite "RetrievalCoverageRegression" @()
 Add-Suite "WanfangPagingRegression"    @()

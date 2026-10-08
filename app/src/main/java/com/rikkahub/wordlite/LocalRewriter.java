@@ -44,6 +44,7 @@ public final class LocalRewriter {
 
     private interface Rule {
         String apply(String source);
+        String apply(String source, int times);
     }
 
     private static final class Entry {
@@ -52,7 +53,8 @@ public final class LocalRewriter {
         Entry(String strategy, Rule rule) { this.strategy = strategy; this.rule = rule; }
     }
 
-    /** One rule, one match point: the first legal match is rewritten, everything else stays put. */
+    /** Rewrites one matched frame. Default pass touches a single match point; a deep pass may take
+     *  several of them (see apply(source, times)). */
     private static final class Regex implements Rule {
         private final Pattern pattern;
         private final String template;
@@ -68,7 +70,38 @@ public final class LocalRewriter {
         Regex(String regex, String template) { this(Pattern.compile(regex), template, false, ""); }
         Regex(String regex, String template, boolean clauseStart) { this(Pattern.compile(regex), template, clauseStart, ""); }
         Regex(String regex, String template, boolean clauseStart, String rejects) { this(Pattern.compile(regex), template, clauseStart, rejects); }
-        public String apply(String source) {
+        public String apply(String source) { return once(source); }
+
+        /**
+         * Deep pass for the verified loop: this rule may also edit the later legal match points, and it
+         * never rewrites a span it has already edited. times <= 1 keeps the one-match-point behaviour.
+         */
+        public String apply(String source, int times) {
+            if (times <= 1) return once(source);
+            StringBuilder out = new StringBuilder();
+            Matcher matcher = pattern.matcher(source);
+            // kept: source already copied out verbatim. search: where the next scan starts. They differ
+            // whenever a match point was skipped, and only search may jump over untouched text.
+            int kept = 0, search = 0, done = 0;
+            while (done < times && matcher.find(search)) {
+                int start = matcher.start(), end = matcher.end();
+                if (end <= start) { search = start + 1; continue; }
+                search = end;
+                if (clauseStart && !atClauseStart(source, start)) continue;
+                String replacement = expand(matcher, template);
+                if (replacement == null || !sameIslands(matcher.group(), replacement)) break;
+                if (rejected(matcher.group())) break;
+                out.append(source, kept, start).append(replacement);
+                kept = end;
+                done++;
+            }
+            if (done == 0) return null;
+            out.append(source, kept, source.length());
+            return out.toString();
+        }
+
+        /** One rule, one match point: the first legal match is rewritten, everything else stays put. */
+        private String once(String source) {
             Matcher matcher = pattern.matcher(source);
             while (matcher.find()) {
                 if (clauseStart && !atClauseStart(source, matcher.start())) continue;
@@ -214,6 +247,13 @@ public final class LocalRewriter {
         "逐渐", "持续", "分别", "依次", "同步", "单独", "迅速", "直接", "间接", "有力", "可靠", "灵活",
         "系统", "全面", "深入",
     };
+    /**
+     * A clause-initial causative verb is not part of the subject: swapping the two sides of a
+     * comparison must not drag it into the middle ("引起实测值高于仿真值" must not become
+     * "仿真值低于导致实测值"), so those clause openings simply do not match.
+     */
+    private static final String NOT_CAUSATIVE_HEAD =
+            "(?!(?:导致|引起|引发|造成|致使|使得|带来|产生|出现))";
     /** Directional comparatives: swapping the two sides and the marker keeps the meaning exact. */
     private static final String[][] COMPARATIVES = {
         { "高于", "低于" }, { "大于", "小于" }, { "强于", "弱于" }, { "多于", "少于" },
@@ -259,6 +299,91 @@ public final class LocalRewriter {
         { "词汇", "缺点", "不足", "", "" },
         { "词汇", "分为", "划分为", "部", "" },
         { "词汇", "步骤", "流程", "", "" },
+        { "连接词", "从而", "进而", "", "" },
+        { "连接词", "进而", "从而", "", "" },
+        { "连接词", "可是", "但是", "", "" },
+        { "连接词", "即使", "即便", "", "" },
+        { "连接词", "即便", "即使", "", "" },
+        { "连接词", "如果", "若", "", "" },
+        { "连接词", "尽管", "虽然", "", "" },
+        { "连接词", "为了", "为使", "", "" },
+        { "连接词", "根据", "依据", "", "" },
+        { "连接词", "依据", "根据", "", "" },
+        { "连接词", "按照", "依照", "", "" },
+        { "连接词", "以及", "与", "", "" },
+        { "连接词", "不但", "不仅", "话", "" },
+        { "连接词", "例如", "比如", "", "" },
+        { "连接词", "比如", "例如", "", "" },
+        { "连接词", "尤其是", "特别是", "", "" },
+        { "连接词", "随着", "伴随", "", "伴" },
+        { "连接词", "伴随", "随着", "", "" },
+        { "语气", "难以", "不易", "", "" },
+        { "语气", "更为", "更加", "", "" },
+        { "语气", "更加", "更为", "", "" },
+        { "语气", "极为", "非常", "", "" },
+        { "语气", "较为", "比较", "", "" },
+        { "语气", "比较", "较为", "", "好" },
+        { "语气", "均可", "都可", "", "" },
+        { "语气", "均已", "都已", "", "" },
+        { "语气", "未能", "没能", "", "" },
+        { "语气", "仍然", "依然", "", "" },
+        { "语气", "依然", "仍然", "", "" },
+        { "语气", "一直", "始终", "", "" },
+        { "语气", "逐渐", "逐步", "", "" },
+        { "语气", "逐步", "逐渐", "", "" },
+        { "语气", "迅速", "快速", "", "" },
+        { "语气", "快速", "迅速", "", "度" },
+        { "语气", "大致", "大体", "", "" },
+        { "语气", "大幅", "显著", "", "度" },
+        { "词汇", "获得", "得到", "", "" },
+        { "词汇", "得到", "获得", "", "" },
+        { "词汇", "具有", "具备", "", "" },
+        { "词汇", "具备", "具有", "", "" },
+        { "词汇", "导致", "引起", "", "" },
+        { "词汇", "引起", "导致", "", "" },
+        { "词汇", "造成", "导致", "", "" },
+        { "词汇", "表明", "说明", "", "书" },
+        { "词汇", "说明", "表明", "话解证明表讲", "" },
+        { "词汇", "手段", "方法", "", "" },
+        { "词汇", "方法", "手段", "", "论学性" },
+        { "词汇", "增大", "增加", "", "" },
+        { "词汇", "上升", "升高", "", "" },
+        { "词汇", "升高", "上升", "", "" },
+        { "词汇", "改善", "改进", "", "" },
+        { "词汇", "改进", "改善", "", "" },
+        { "词汇", "探究", "探讨", "", "" },
+        { "词汇", "建立", "构建", "", "" },
+        { "词汇", "构建", "建立", "", "" },
+        { "词汇", "模拟", "仿真", "", "信号电量" },
+        { "词汇", "仿真", "模拟", "", "" },
+        { "词汇", "计算", "运算", "", "机" },
+        { "词汇", "采样", "采集", "", "" },
+        { "词汇", "精确", "准确", "", "" },
+        { "词汇", "准确", "精确", "", "" },
+        { "词汇", "细致", "精细", "", "" },
+        { "词汇", "开展", "进行", "", "" },
+        { "词汇", "值得注意", "需要注意", "", "" },
+        { "词汇", "该方法", "这一方法", "", "" },
+        { "词汇", "上述", "前述", "", "" },
+        { "结构", "原因是", "原因在于", "就这", "" },
+        { "结构", "原因在于", "原因是", "", "" },
+        { "词汇", "体现", "反映", "", "" },
+        { "词汇", "反映", "体现", "", "" },
+        { "词汇", "附加", "额外", "", "" },
+        { "词汇", "实测", "测量", "", "" },
+        { "词汇", "归结于", "归因于", "", "" },
+        { "词汇", "突显", "凸显", "", "" },
+        { "词汇", "差别", "差异", "", "" },
+        { "词汇", "无法", "不能", "", "" },
+        { "词汇", "较高", "偏高", "更", "" },
+        { "词汇", "较低", "偏低", "更", "" },
+        { "词汇", "高于", "大于", "", "" },
+        { "词汇", "低于", "小于", "", "" },
+        { "词汇", "受到", "承受", "接遭", "影响关注欢迎启发教育限制约束" },
+        { "语气", "较小", "偏小", "", "" },
+        { "语气", "偏小", "较小", "", "" },
+        { "语气", "较大", "偏大", "", "" },
+        { "语气", "偏大", "较大", "", "" },
     };
     /** English pairs; a capitalized twin of every pair is generated too. */
     private static final String[][] EN_WORDS = {
@@ -318,6 +443,13 @@ public final class LocalRewriter {
     private static final Pattern DI_DELETE = Pattern.compile(
             "(" + alternate(ADVERBS) + ")地(" + alternate(VERB_ANY) + ")");
     /** Past passive with a bounded agent: simple past needs no number agreement when the sides swap. */
+    /** Attribution frame with a bounded cause: 这是X的结果 -> 由X造成. */
+    private static final Pattern ZHE_SHI_Jieguo = Pattern.compile(
+            "(?<![\u4e00-\u9fa5])这是([^\u3002\uff0c\uff1b\uff1a\n]{2,18}?)的结果");
+    /** Causal frame with a bounded cause: 受X影响 -> 在X的作用下. */
+    private static final Pattern SHOU_YINGXIANG = Pattern.compile(
+            "(?<![遭经受])受(" + SPAN_CHAR + "{1,12}?)影响");
+
     private static final Pattern EN_PASSIVE = Pattern.compile(
             "(?:(?<=\\n)|(?<=\\. )|(?<=\u3002)|(?<=\uFF1B)|^)"
                     + "(the|The|a|A|an|An|this|This|these|These)\\s+([A-Za-z][A-Za-z0-9()\\- ]{0,40}?)\\s+(?:was|were)\\s+([A-Za-z]{3,}ed)\\s+by\\s+"
@@ -336,14 +468,16 @@ public final class LocalRewriter {
         rules.add(new Entry("结构", new Regex(TONGGUO_KEYI, "借助$2$3", true, "")));
         rules.add(new Entry("结构", new Regex(TONGGUO_LAI, "借助$2$3", true, "")));
         rules.add(new Entry("结构", new Regex(DI_DELETE, "$1$2", false, "")));
+        rules.add(new Entry("结构", new Regex(SHOU_YINGXIANG, "在$1的作用下", false, "")));
+        rules.add(new Entry("结构", new Regex(ZHE_SHI_Jieguo, "由$1造成", false, "")));
         rules.add(new Entry("结构", new Regex(EN_REDUCED, " $1", false, "not|never")));
         rules.add(new Entry("词序", new Regex(EN_PASSIVE, "$u4 $3 $l1 $2", false,
                 "that|which|who|whom|whose|and|but|because|when|where|while|not|have|has|used")));
         for (String[] pair : COMPARATIVES) {
-            rules.add(new Entry("词序", new Regex("(" + HEAD_SPAN + ")" + TAIL_GUARD + pair[0] + "(" + SPAN_CHAR
-                    + "{1,12}?)" + CLAUSE_END, "$2" + pair[1] + "$1", true, "")));
-            rules.add(new Entry("词序", new Regex("(" + HEAD_SPAN + ")" + TAIL_GUARD + pair[1] + "(" + SPAN_CHAR
-                    + "{1,12}?)" + CLAUSE_END, "$2" + pair[0] + "$1", true, "")));
+            rules.add(new Entry("词序", new Regex(NOT_CAUSATIVE_HEAD + "(" + HEAD_SPAN + ")" + TAIL_GUARD
+                    + pair[0] + "(" + SPAN_CHAR + "{1,12}?)" + CLAUSE_END, "$2" + pair[1] + "$1", true, "")));
+            rules.add(new Entry("词序", new Regex(NOT_CAUSATIVE_HEAD + "(" + HEAD_SPAN + ")" + TAIL_GUARD
+                    + pair[1] + "(" + SPAN_CHAR + "{1,12}?)" + CLAUSE_END, "$2" + pair[0] + "$1", true, "")));
         }
         for (String[] row : LEXICAL)
             rules.add(new Entry(row[0], new Regex(literal(row[1], row[3], row[4]), row[2], false, "")));
@@ -481,12 +615,14 @@ public final class LocalRewriter {
     }
 
     private static void collect(String working, ArrayList<Entry> hits, String[] set,
-                                ArrayList<String> texts, ArrayList<String> labels) {
+                                ArrayList<String> texts, ArrayList<String> labels, int depth) {
         String current = working;
         ArrayList<String> used = new ArrayList<String>();
         for (Entry entry : hits) {
-            if (!wanted(set, entry.strategy) || used.contains(entry.strategy)) continue;
-            String next = entry.rule.apply(current);
+            if (!wanted(set, entry.strategy)) continue;
+            // depth 1 keeps the old rule: one rule per strategy per candidate.
+            if (depth <= 1 && used.contains(entry.strategy)) continue;
+            String next = entry.rule.apply(current, depth);
             if (next == null || next.equals(current)) continue;
             current = next;
             used.add(entry.strategy);
@@ -498,6 +634,26 @@ public final class LocalRewriter {
     }
 
     public static ArrayList<Option> rewrite(String text, List<String> terms) {
+        return rewrite(text, terms, 1);
+    }
+
+    /**
+     * depth > 1 lets a strategy that fires edit several match points instead of exactly one. The
+     * default path (depth 1) is unchanged; a deeper candidate is only safe behind a caller that
+     * re-checks the protected islands and re-scores it, which is what RewriteLoop does.
+     */
+    public static ArrayList<Option> rewrite(String text, List<String> terms, int depth) {
+        return rewrite(text, terms, depth, 3);
+    }
+
+    /**
+     * maxOptions > 3 is for the verified loop only: a caller that re-scores every candidate against
+     * the real criterion can use the single-rule candidates too, so it gets to see them. The UI path
+     * keeps asking for 3.
+     */
+    public static ArrayList<Option> rewrite(String text, List<String> terms, int depth, int maxOptions) {
+        int rounds = Math.max(1, depth);
+        int cap = Math.max(1, maxOptions);
         ArrayList<Option> options = new ArrayList<Option>();
         if (text == null || text.isEmpty()) return options;
         try {
@@ -508,7 +664,7 @@ public final class LocalRewriter {
             if (hits.isEmpty()) return options;
             ArrayList<String> texts = new ArrayList<String>();
             ArrayList<String> labels = new ArrayList<String>();
-            for (String[] recipe : RECIPES) collect(plan.working, hits, recipe, texts, labels);
+            for (String[] recipe : RECIPES) collect(plan.working, hits, recipe, texts, labels, rounds);
             for (Entry entry : hits) {
                 String single = entry.rule.apply(plan.working);
                 if (single != null && !single.equals(plan.working)) {
@@ -517,7 +673,7 @@ public final class LocalRewriter {
                 }
             }
             TextProtection.Mask mask = maskOf(text);
-            for (int i = 0; i < texts.size() && options.size() < 3; i++) {
+            for (int i = 0; i < texts.size() && options.size() < cap; i++) {
                 String candidate = plan.restore(texts.get(i));
                 if (candidate.equals(text) || holds(options, candidate)) continue;
                 if (!islandsIntact(mask, candidate) || brackets(candidate) > brackets(text)) continue;

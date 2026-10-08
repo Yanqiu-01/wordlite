@@ -163,7 +163,9 @@ public final class LocalRewriteRegression {
                 "通过…可以句式改写");
         check(rewrite("缓慢地冷却可以减少裂纹。").get(0).text.startsWith("缓慢冷却"), "地的结构可省地");
         checkShape("连接词", "由于温度升高，接头过早失效。", rewrite("由于温度升高，接头过早失效。"));
-        check(rewrite("由于温度升高，接头过早失效。").get(0).text.startsWith("因为温度升高"), "由于→因为");
+        check(rewrite("由于温度升高，接头过早失效。").get(0).text.startsWith("因为温度"), "由于→因为");
+        check(rewrite("由于温度升高，接头过早失效。").get(0).text.equals("因为温度上升，接头过早失效。"),
+                "首个候选里连接词与词汇各改一处（升高↔上升 这对成对词进来以后，候选 0 顺带改了这里）");
         check(rewrite("因此接头过早失效。").get(0).text.startsWith("所以接头"), "因此→所以");
         check(rewrite("并且需要延长保温时间。").get(0).text.startsWith("同时"), "并且→同时");
         checkShape("语气", "该工艺可以降低缺陷率。", rewrite("该工艺可以降低缺陷率。"));
@@ -216,7 +218,8 @@ public final class LocalRewriteRegression {
             nullThrew = true;
         }
         check(!nullThrew, "null 输入不抛异常");
-        check(LocalRewriter.rewrite("由于温度升高，接头失效。", null).size() == 1, "terms 传 null 仍可改写");
+        // 词表成对词变多以后这句能出两个候选，这条要量的从来不是个数，是 terms 传 null 不炸、照样能改。
+        check(LocalRewriter.rewrite("由于温度升高，接头失效。", null).size() >= 1, "terms 传 null 仍可改写");
 
         // 9. applicable agreement
         String[] probe = { "", "。", "⟦WL_9ac_0⟧", "本文研究了工艺参数对接头质量的影响。", "由于温度升高，接头失效。",
