@@ -456,6 +456,13 @@ public final class DocxDocument {
         public int footerDistanceTwips = -1;
         /** Word document-grid baseline pitch in twips; -1 means no grid. */
         public int lineGridPitchTwips = -1;
+        /**
+         * False when w:docGrid carries no w:type, which is how OOXML spells "no grid": the pitch is then
+         * a leftover and must not price anything. Word 16.0 says so - tools/word-spacing-truth.ps1 case
+         * lh_single (no type: a 12pt SimSun row costs 15.6pt, not the declared 18pt pitch) versus case
+         * bl_grid (type="lines": the same row costs 18.35pt).
+         */
+        public boolean lineGridActive;
         public boolean landscape;
         public String headerPart = "";
         public String footerPart = "";
@@ -495,6 +502,7 @@ public final class DocxDocument {
             headerDistanceTwips = copy.headerDistanceTwips;
             footerDistanceTwips = copy.footerDistanceTwips;
             lineGridPitchTwips = copy.lineGridPitchTwips;
+            lineGridActive = copy.lineGridActive;
             landscape = copy.landscape;
             headerPart = copy.headerPart;
             footerPart = copy.footerPart;
@@ -529,6 +537,7 @@ public final class DocxDocument {
             out.headerDistanceTwips = headerDistanceTwips;
             out.footerDistanceTwips = footerDistanceTwips;
             out.lineGridPitchTwips = lineGridPitchTwips;
+            out.lineGridActive = lineGridActive;
             out.landscape = landscape;
             out.headerPart = headerPart;
             out.footerPart = footerPart;

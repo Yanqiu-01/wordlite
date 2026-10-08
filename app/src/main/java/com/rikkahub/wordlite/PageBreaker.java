@@ -19,14 +19,6 @@ public final class PageBreaker {
          */
         public float hang;
         public boolean pageBreakBefore, keepNext, keepLines, widowControl = true;
-        /**
-         * 这一项是"分节符自己开出来的那一页"的第一项。分节符与 w:pageBreakBefore 是同一种显式翻页：
-         * 页顶不再画这一段的段前距。真值：目录页那个"目 录"标题声明 beforeLines=100（我们计 24.0px），
-         * 桌面 Word 16.0 在它上方只留了 2.7px（版心顶 107.7pt、标题行框顶 110.05pt，扣掉自然页顶偏移
-         * 0.4px），账记在 docs/layout-parity-target.md 第 15 节。文档第一节的第一段不算——那一页不是被
-         * 分页符推上来的，段前距照旧画。
-         */
-        public boolean sectionStart;
         /** Section-local pagination group. */
         public int sectionIndex;
         /** Section-specific content height; <=0 uses paginate's default capacity. */
@@ -76,13 +68,15 @@ public final class PageBreaker {
             if (item.pageBreakBefore && !page.fragments.isEmpty()) {
                 page = new Page(); pages.add(page); y = 0; pendingAfter = 0;
             }
-            // Word treats pageBreakBefore as the top edge of a fresh page:
-            // paragraph-before spacing is not painted above that paragraph. A section break
-            // is the same kind of explicit break, and A4Paginator paginates each section on
-            // its own, so the caller marks that first item with sectionStart instead of this
-            // loop guessing it -- the document's very first paragraph still gets its
-            // space-before, because no break opened that page.
-            float before = (item.pageBreakBefore || item.sectionStart) ? 0f : Math.max(0, item.before);
+            // Word treats w:pageBreakBefore as the top edge of a fresh page, and paragraph-before spacing is
+            // not painted above that paragraph. Two rival page-top rules were measured in the laboratory and
+            // then refused by the real manuscript: tools/word-spacing-truth.ps1 case overflow_before says a
+            // page reached by running out of room keeps no space-before either, and case pagebreak_before says
+            // an explicit break keeps all of it. Painting those here moved page attribution on
+            // tests/samples/input-liu.docx from 8 wrong paragraphs to 15 (artifacts/agent-layout-verify/
+            // spacing1), so the flat laboratory run is missing something this document has - no w:keepNext and
+            // no section geometry. Measured in a lab is not measured on the manuscript: the old rule stays.
+            float before = item.pageBreakBefore ? 0f : Math.max(0, item.before);
             float gap = Math.max(pendingAfter, before);
             float full = item.height(0, item.lines.length);
             // Keep an entire paragraph only when it can fit on an empty page.

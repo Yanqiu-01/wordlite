@@ -411,7 +411,7 @@ after 是对的，**before 才是错的**。触发方式在 XML 里：`w:p[3]`�
 =nextPage），所以第 2 页是**分节符**开的；标题自己没有 `w:pageBreakBefore`，而 `PageBreaker` 只对
 `item.pageBreakBefore` 归零段前距（那里的注释早就写了"也该管节首"，但代码一直没实现）。
 
-**已修**：`A4Paginator.sectionStart(batch, batches)` 给"分节符开出来的那一页的第一项"打
+**已修（本节结论已被第 16 节作废，代码已撤）**：`A4Paginator.sectionStart(batch, batches)` 给"分节符开出来的那一页的第一项"打
 `PageBreaker.Item.sectionStart`，`PageBreaker` 对它不画 before。文档第一节的第一段排除——那一页不是
 被分页符推上来的，段前距照旧画（Host 两条断言把这两侧都钉住）。第 2 页因此少计 24.0 px。
 
@@ -460,3 +460,47 @@ after 空间"相关，规则没定死之前不改 `pageBreakBefore` 的现有行
 
 这三处合计约 460 px，加上去掉 `+0.5f` 之后仍然补不平 CJK 的抬升，所以开关重开时三处必须同行，
 缺一处就会像候选版那样把首个错页从 para 121 提前到 para 56。
+
+## 16. 受控样张把段前后距的规则量死了（`tools/word-spacing-truth.ps1`，23 个用例）
+
+为什么非得用受控样张：Word 对象模型没有 `ContextualSpacing` 属性，`ParagraphFormat.SpaceBefore` 只有磅值，COM 连问题都问不出来。所以每个用例自己写成最小 .docx（原始 OOXML），只读打开，用 `Range.Information(6)` 量每段首字符框顶，再对"同脸无声明间距"的基线（`lh_single` / `lh_150`）做差——字体自身那段被减掉，剩下的才是间距规则本身。单位：Word 出磅，px = pt x 4/3。
+
+| Word 16.0 实测规则 | 用例 | 读数 |
+| --- | --- | --- |
+| 同样式相邻段，旗标在**后一段**上 ⇒ 段前与段后一起归零；跨页、在表格单元格内一样 | ctx_direct_same / ctx_after / tbl_ctx_in_cell | 逐行 gap 与 lh_single 一字不差（20.8px） |
+| 旗标写在前一段不算数 | ctx_mixed | 被标那段上方 20.8（抑制），它下面那段上方 36.27（照画） |
+| 样式 id 不同就不抑制，哪怕两段形状完全一样 | ctx_diff_style_both / ctx_diff_style_one | 37.13 / 36.2（= 行高 + 16px 段前） |
+| 文档 / 节 / 单元格的第一段保留段前距（抑制必须有"上一段"） | ctx_style_same / sect_break_before / tbl_ctx_in_cell | 首段上方 15.4~16.3px（声明 12pt） |
+| **分节符开的那一页：段前距照画** | sect_break_before | 16.33px（声明 240twips = 16px） |
+| **`w:pageBreakBefore` 那一页：段前距照画**；同一段带上 `contextualSpacing` 就归零 | pagebreak_before / pagebreak_before_ctx | 16.33px / 0px |
+| **挤不下而翻页的那一页：段前距一点不画** | overflow_before / overflow_before_ctx | 第 2 页首段框顶 144px = 版心顶，上方 0px |
+| `w:beforeLines` 与 `w:before` 同时写：lines 赢，磅值是死字 | bl_and_twips 与 bl_only 逐字节相同 | — |
+| 没有活动网格时 lines 的单位与字号、行距倍数、docDefaults 字号都无关，约 240twips | bl_only(12pt) / bl_18(18pt) / -DefaultSz 32 | 50 单位 = 8.1 / 8.1 / 7.7px |
+| 有 `w:docGrid w:type="lines"` 时单位 = pitch | bl_grid（pitch 360） | 50 单位 = 11.73px ≈ 9pt |
+| `beforeAutospacing/afterAutospacing=1` **不是空操作**：声明的 before/after 作废，换成 Word 自己的自动距 | tbl_plain vs tbl_autospacing_on；autospacing_body vs _off | 单元格内 32.6→44.4px；正文 27.2→39.4px；写 `=0` 与不写完全相同 |
+
+下面三条是当时的计划；真机 `spacing1` 对账之后只落地了两条，第三条被真稿当场否掉，记在第 16.1 小节。
+
+1. **撤销上一版的 sectionStart 抑制**——分节符那一页不但不归零，反而要画段前距；第 15 节把"目录标题上方只有 2.73px"解释成分节符抑制，是错的解释。
+2. **页顶分两种**：显式翻页（`w:pageBreakBefore`）画 `max(0, before - 上一页末段 after)`；挤不下翻过去的那一页画 0。第 15 节留下的那两个数（同样式的章标题，上一页末段 after=0 的四页给 16.73px、after=10pt 的三页给 3.13px）在 `before` 单位改成 240twips（=16px）之后正好对上：16.73 ≈ 16，3.13 ≈ 16 − 13.33。
+3. **`beforeLines` 的单位**只在 `w:docGrid/@w:type` 真是 lines/linesAndChars 时用 pitch，否则 240twips。本稿三个 `<w:docGrid w:linePitch="360" w:charSpace="0"/>` 都没有 `w:type`，也就是没有活动网格，于是章标题的声明段前距从 24.0px 变成 16.0px，目录标题从 24.0px 变成 16.0px。
+
+**一条还没合上的账（不许猜，下一刀先量它）**：受控样张说"分节符那页照画段前距"，可 `tests/samples/input-liu.docx` 的"目 录"标题——分节符之后的第一段，声明 `before=391 beforeLines=100`——在 Word 里上方只有 2.35pt（第 15 节、`secfix1/page2-audit.md` 第 2 节），按本轮单位应是 16px。两处必有一处理解错了，差额 13px，而 Word 第 2 页只剩 16.11px 空量：这 13px 直接决定目录最后一条（para 58）落在第 2 页还是第 3 页。要补的真值是把"带 sectPr 的那一段 + 标题那一段"连同本稿 styles.xml 一起剥成 replica，再逐条 pPr 属性 bisect；在此之前不许再往 `PageBreaker` 里加第四条页顶规则。
+
+第 15 节里"已修：分节符那一页不画节首段段前距"那一条自本节起作废，代码已撤；节里其余读数继续有效。
+
+### 16.1 落地结果：`spacing1` 真机对账把第 2 条当场否掉
+
+同一篇稿子、同一台 CDY-AN90、`engine.tsv` 与 capture 对齐，只改这几条规则：
+
+| 指标 | HEAD 4985e66（`secfix1`） | 三条全上（`spacing1`） | 只留第 1、3 条 |
+| --- | --- | --- | --- |
+| 段落页归属 | 8 错 / 96.12% | **15 错 / 92.72%** | 待采 `spacing2` |
+| 错位段清单 | 58,121,155,208,382,397,408,409 | 80,121,146,147,148,155,156,164,165,166,208,397,408,409（全 -1） | 待采 |
+| para 58（目录末条，Word 第 3 页） | 错吸到第 2 页 | **回正** | 待采 |
+| 页数 | 28 / 28 | 28 / 28 | 待采 |
+
+读数：**第 1 条（撤销节首抑制）与第 3 条（beforeLines 单位 24.0→16.0px）把 para 58 送回了第 3 页**，与 Word 一致——第 2 页那点 16.11px 空量确实是被这 16px 吃掉的，第 15 节当年把这笔钱记成"超支"是记反了。
+**第 2 条（页顶分两种）净亏 7 段**：挤不下的页顶不画段前距，等于每一页多吸一行，新增的 80 / 146-148 / 156 / 164-166 全是 -1，正好是这个方向。所以第 2 条整条退回，`PageBreaker` 维持"显式翻页不画段前距"的旧行为，注释里写明受控样张与真稿在这里对不上：受控样张是一串同样式、无 `w:keepNext`、无分节几何的平铺段落，真稿有 keepNext 链和分节边界，缺的就是那笔钱的去向。
+
+教训按第 0 节第 3 条记档：**实验台上量到的规则不等于在真稿上量到的规则**。今后凡受控样张给出的规则要改进 `PageBreaker` / `A4Paginator`，必须同一次提交里带一个 `spacingN` 真机 capture；只在实验室成立的规则不许进代码。

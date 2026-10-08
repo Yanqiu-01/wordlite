@@ -60,18 +60,14 @@ public final class Regression {
         result = pages(100, a);
         check(result.get(0).fragments.get(0).top == 0,
                 "pageBreakBefore suppresses paragraph-before spacing at the new page top");
-        // 分节符开出来的那一页同理：节首那一段的段前距不画。真值在目录页——Word 给"目 录"标题上方
-        // 只留 2.7px，而我们按 beforeLines=100 计了 24.0px（docs/layout-parity-target.md 第 15 节）。
-        PageBreaker.Item secHead = item(0, 1, 10), secBody = item(1, 1, 10);
-        secHead.before = 24; secHead.sectionStart = true;
-        result = pages(100, secHead, secBody);
-        check(result.get(0).fragments.get(0).top == 0 && result.get(0).fragments.get(1).top == 10,
-                "分节符开的那一页不画节首段的段前距：段顶落在 0，下一段紧跟在 10");
         PageBreaker.Item firstPlain = item(0, 1, 10), secondPlain = item(1, 1, 10);
         firstPlain.before = 24;
         result = pages(100, firstPlain, secondPlain);
         check(result.get(0).fragments.get(0).top == 24,
                 "文档第一节的第一页不是分页符开出来的：段前距照旧画，这一条改动没碰它");
+        // The sectionStart flag that used to sit on top of these two assertions is gone: a section break
+        // opens a fresh pagination run, so the paragraph after it is already covered here, and the real
+        // reading that motivated the flag turned out to be about a page top rather than a section break
         pre = item(0, 1, 70);
         a = item(1, 1, 10); b = item(2, 1, 10); p = item(3, 3, 10);
         a.keepNext = b.keepNext = true;

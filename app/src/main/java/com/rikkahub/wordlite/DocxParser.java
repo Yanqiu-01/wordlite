@@ -903,6 +903,8 @@ public final class DocxParser {
         if (grid != null) {
             int pitch = intValue(attr(grid, "linePitch"), section.lineGridPitchTwips);
             if (pitch > 0) section.lineGridPitchTwips = pitch;
+            String gridType = attr(grid, "type");
+            section.lineGridActive = "lines".equals(gridType) || "linesAndChars".equals(gridType);
         }
         for (Element ref : childElements(sectPr)) {
             String name = localName(ref);

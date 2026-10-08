@@ -142,16 +142,23 @@ public final class A4Paginator {
     }
 
     private static int sectionGrid(DocxDocument document, int sectionIndex) {
-        return sectionOf(document, sectionIndex).lineGridPitchTwips;
+            return sectionOf(document, sectionIndex).lineGridPitchTwips;
+        }
+    /**
+     * The "one line" that w:beforeLines and w:afterLines are priced in. Word uses the section
+     * document-grid pitch only while that grid is actually switched on. With w:docGrid carrying no
+     * w:type - which is all three sectPr elements of tests/samples/input-liu.docx do - the grid is
+     * off and Word prices a line at 240 twips whatever the paragraph's own font size or line rule
+     * says. Measured by tools/word-spacing-truth.ps1: 50/100 of a line costs 8.1px at 12pt, 8.1px
+     * at 18pt, 7.7px with a 16pt default run size, and 12.2px as soon as a lines grid with pitch
+     * 360 exists (cases bl_only, bl_18, bl_grid and the -DefaultSz 32 rerun). That is what made the
+     * chapter titles of that manuscript cost 24.0px here against Word's measured 16.73px.
+     */
+    private static int spacingLineUnitTwips(DocxDocument document, int sectionIndex) {
+        DocxDocument.SectionSettings section = sectionOf(document, sectionIndex);
+        return section.lineGridActive ? section.lineGridPitchTwips : -1;
     }
 
-    /**
-     * 这一项是不是"分节符开出来的那一页"的第一项。是则它的段前距不画（PageBreaker.Item.sectionStart
-     * 那条真值）。文档第一节排除在外：它那一页不是分页符推上来的。
-     */
-    private static boolean sectionStart(SectionBatch batch, List<SectionBatch> batches) {
-        return batch.items.isEmpty() && batches.size() > 1 && batches.get(0) != batch;
-    }
 
     private PageResult measureAndBreak(DocxDocument document,
                                        Map<Integer, Integer> pageOf, int totalPages,
@@ -211,11 +218,11 @@ public final class A4Paginator {
                     PageBreaker.Item item = new PageBreaker.Item(p.index, heights);
                     item.hang = hang;
                     int gridPitch = sectionGrid(document, sectionIndex);
-                    item.before = PageGeometry.twips(effectiveSpacingTwips(p, true, gridPitch));
+                    int spacingUnit = spacingLineUnitTwips(document, sectionIndex);
+                    item.before = PageGeometry.twips(effectiveSpacingTwips(p, true, spacingUnit));
                     item.after = p.images.isEmpty()
-                            ? PageGeometry.twips(effectiveSpacingTwips(p, false, gridPitch)) : 0;
+                            ? PageGeometry.twips(effectiveSpacingTwips(p, false, spacingUnit)) : 0;
                     item.pageBreakBefore = p.format.pageBreakBefore;
-                    item.sectionStart = sectionStart(batch, batches);
                     item.keepLines = p.format.keepLines;
                     item.keepNext = p.format.keepNext;
                     item.widowControl = p.format.widowControl;
@@ -235,6 +242,7 @@ public final class A4Paginator {
                     graphic.imageWidth = w * scale;
                     graphic.imageHeight = h * scale;
                     int gridPitch = sectionGrid(document, sectionIndex);
+                    int spacingUnit = spacingLineUnitTwips(document, sectionIndex);
                     // An inline picture participates in its paragraph's line box.
                     // Empty-picture paragraphs used to bypass StaticLayout entirely,
                     // so a small inserted image consumed almost no document rows.
@@ -245,13 +253,12 @@ public final class A4Paginator {
                     if (gridControlsImage) imageLineBox += 0.5f;
                     PageBreaker.Item picture = new PageBreaker.Item(p.index, Math.max(1, imageLineBox));
                     picture.before = textPresent || imageIndex > 0 ? 0
-                            : PageGeometry.twips(effectiveSpacingTwips(p, true, gridPitch));
+                            : PageGeometry.twips(effectiveSpacingTwips(p, true, spacingUnit));
                     // Paragraph spacing belongs to the paragraph, not to every
                     // image run inside it. Apply it only after the final image.
                     picture.after = imageIndex == p.images.size() - 1
-                            ? PageGeometry.twips(effectiveSpacingTwips(p, false, gridPitch)) : 0;
+                            ? PageGeometry.twips(effectiveSpacingTwips(p, false, spacingUnit)) : 0;
                     picture.pageBreakBefore = !textPresent && imageIndex == 0 && p.format.pageBreakBefore;
-                    picture.sectionStart = sectionStart(batch, batches);
                     picture.widowControl = false;
                     picture.keepLines = true;
                     picture.sectionIndex = sectionIndex;
@@ -276,7 +283,6 @@ public final class A4Paginator {
                     // breaks inside a row that is taller than the page, which still lands here
                     // as its own overflowing page.
                     item.widowControl = false; item.keepLines = true;
-                    item.sectionStart = sectionStart(batch, batches);
                     item.sectionIndex = sectionIndex;
                     batch.items.add(item); measured.put(item, layout);
                 }
