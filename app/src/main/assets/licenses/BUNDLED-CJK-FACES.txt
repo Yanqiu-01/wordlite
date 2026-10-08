@@ -1,0 +1,23 @@
+Bundled CJK faces: where they come from
+=======================================
+
+The faces in assets/fonts whose names start with st-, plus lisu.ttf, youyuan.ttf,
+dengxian.ttf, msgothic.ttf, courier-new.ttf and consolas.ttf, are the same faces
+desktop Word uses on Windows. They were taken from this machine's own Windows font
+folder and subset (glyphs removed only; advance widths, ascent/descent and hinting
+are copied unchanged) by:
+
+    py tools/build-fonts.py
+
+Which is also how you rebuild them on your own machine if you do not want to carry
+these files: the script reads C:\Windows\Fonts and writes assets/fonts, and it prints
+a width-by-width comparison so a subset that changed any metric fails loudly.
+
+Those faces are Microsoft / Founder fontware, not free-licensed software. They are
+here so a document that declares 华文新魏 or 等线 renders in the face it asked for.
+Before you ship a build of this app to other people, check that licence against what
+you are doing, or run build-fonts.py yourself and keep the fonts out of the repository.
+
+Everything else in this folder is a free-licensed or vendor-redistributable face:
+STIX Two Math is SIL OFL (see STIX-OFL.txt in this folder); the SimSun / SimHei /
+KaiTi / FangSong faces are the Windows system faces that Word itself measures against.

@@ -628,20 +628,62 @@ public class EditorActivity extends Activity {
     }
 
     private void chooseFont() {
-        final String[] names = {"宋体", "黑体", "楷体", "仿宋", "方正小标宋", "Times New Roman", "Arial", "Calibri"};
-        new AlertDialog.Builder(this).setTitle("字体").setItems(names, (d, which) -> {
-            EditText editor = currentEditor();
-            if (editor == null) return;
-            Spannable text = editor.getText();
+        final String[] names = DocxFontAssets.PICKER.clone();
+        /* 说明和列表分开放。AlertDialog 的 setMessage 和 setItems 同时给，EMUI 上只渲染说明、
+           列表整个消失，所以这里自建一个可滚动视图：先一行"本文用了哪些字体、各自拿什么显示"，
+           再一行一个候选字体，每一行用它自己那张脸写自己——不用先选中再回去看效果。 */
+        final LinearLayout rows = new LinearLayout(this);
+        rows.setOrientation(LinearLayout.VERTICAL);
+        TextView report = new TextView(this);
+        report.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        report.setTextColor(0xFF757575);
+        report.setPadding(dp(20), dp(10), dp(20), dp(6));
+        report.setText(DocxFonts.summary(DocxFonts.usedIn(document)));
+        rows.addView(report);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(rows);
+        final AlertDialog dialog = new AlertDialog.Builder(this).setTitle("字体")
+                .setView(scroll).setNegativeButton("取消", null).create();
+        String current = null;
+        EditText editor = currentEditor();
+        if (editor != null) {
             int[] range = selectionOrParagraph(editor);
-            recordRunFormat(editor, range);
-            DocxDocument.RunStyle style = new DocxDocument.RunStyle();
-            style.fontFamily = style.asciiFontFamily = style.highAnsiFontFamily
-                    = style.eastAsiaFontFamily = style.complexScriptFontFamily = names[which];
-            DocxTextLayout.applyStyle(text, range[0], range[1], style, editorPointScale());
-        }).show();
+            DocxDocument.RunStyle at = styleAt(editor.getText(), range[0]);
+            current = at == null ? null : at.eastAsiaFontFamily;
+        }
+        for (int i = 0; i < names.length; i++) {
+            final String family = names[i];
+            final TextView row = new TextView(this);
+            row.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f);
+            row.setTextColor(0xFF1A1A1A);
+            row.setPadding(dp(20), dp(12), dp(20), dp(12));
+            String face = DocxFontAssets.label(DocxFontAssets.pathFor(family));
+            boolean currentRow = family.equals(current);
+            row.setText((currentRow ? "✓ " : "") + (face.equals(family) ? family : family + "（字库用" + face + "）"));
+            Typeface loaded = FontManager.load(DocxFontAssets.pathFor(family));
+            if (loaded != null) row.setTypeface(loaded);
+            row.setBackgroundResource(currentRow ? android.R.drawable.list_selector_background : 0);
+            row.setOnClickListener(v -> {
+                applyFontFamily(family);
+                dialog.dismiss();
+            });
+            rows.addView(row);
+        }
+        dialog.show();
     }
 
+    /** 把字体名写到选区（没选区就整段）上，五种字体槽一起改，和 Word 的字体下拉一致。 */
+    private void applyFontFamily(String family) {
+        EditText editor = currentEditor();
+        if (editor == null) return;
+        Spannable text = editor.getText();
+        int[] range = selectionOrParagraph(editor);
+        recordRunFormat(editor, range);
+        DocxDocument.RunStyle style = new DocxDocument.RunStyle();
+        style.fontFamily = style.asciiFontFamily = style.highAnsiFontFamily
+                = style.eastAsiaFontFamily = style.complexScriptFontFamily = family;
+        DocxTextLayout.applyStyle(text, range[0], range[1], style, editorPointScale());
+    }
     private void chooseColor() {
         final String[] names = {"黑色", "红色", "蓝色", "绿色", "灰色", "橙色", "紫色"};
         final int[] colors = {0xFF000000, 0xFFFF0000, 0xFF0000FF, 0xFF008000, 0xFF808080, 0xFFFF8C00, 0xFF800080};

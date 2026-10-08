@@ -248,9 +248,9 @@ public final class Regression {
         check(DocxFontAssets.TIMES_BOLD.equals(DocxFontAssets.pathFor("Times New Roman", 1)),
                 "Times New Roman bold maps to the real bold file");
         check(DocxFontAssets.SONG.equals(DocxFontAssets.pathFor("宋体"))
-                        && DocxFontAssets.SONG.equals(DocxFontAssets.pathFor("华文新魏"))
+                        && DocxFontAssets.ST_XINWEI.equals(DocxFontAssets.pathFor("华文新魏"))
                         && DocxFontAssets.SONG.equals(DocxFontAssets.pathFor("MS Mincho")),
-                "document CJK families use explicit bundled fallbacks after resource reduction");
+                "标题用的华文新魏有字可用，不再悄悄落到宋体；MS Mincho 落到宋体");
         File timesFile = new File("app/src/main/assets/fonts/times-new-roman.ttf");
         FontScriptMetrics timesMetrics = FontScriptMetrics.read(new FileInputStream(timesFile));
         check(timesMetrics.scale(true) > 0 && timesMetrics.scale(true) < 1 && timesMetrics.offset(true) < 0,

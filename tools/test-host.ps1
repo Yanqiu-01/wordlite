@@ -79,6 +79,8 @@ Add-Suite "ReportStoreRegression"  @()
 Add-Suite "ZeroRateAudit"          @("tests/samples/input-liu.docx", "tests/corpus/real-prose.txt", "tests/corpus/aigc-cartoon.txt")
 # 判据没有死的证据（与 ZeroRateAudit 互补）：语料里确实有可比材料时，抄进去的那一段不许印成 0.00%。缺语料一律 throw，不静默跳过。
 Add-Suite "DetectionFloor"       @("tests/corpus", "$out/detection-floor-library")
+# 字体替代表的账：标题写着华文新魏的稿子不许再悄悄变宋体，替代是谁、缺了哪些字，都要说得出。
+Add-Suite "FontSubstitution"      @("tests/samples/input-liu.docx")
 if (-not $SkipRealDoc) {
     $doc = if ($RealDocx) { $RealDocx } else { Join-Path $root "tests/samples/input-liu.docx" }
     if (Test-Path $doc) {

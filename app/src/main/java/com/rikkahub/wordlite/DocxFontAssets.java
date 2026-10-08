@@ -2,84 +2,66 @@ package com.rikkahub.wordlite;
 
 import java.util.Locale;
 
-/** Exact aliases for the bundled font files; unknown families stay unknown. */
+/**
+ * The font table. Every family listed here maps to a file that really ships in
+ * app/src/main/assets/fonts, and tools/build-fonts.py is what puts those files there: the CJK faces are
+ * the same faces desktop Word uses on Windows (华文新魏 is STXINWEI.TTF, 隶书 is SIMLI.TTF, and so on),
+ * subset down to the character set a Chinese document can hold. Advance widths and line metrics are copied
+ * unchanged, so a face can be added without moving a single line of text.
+ *
+ * A name we genuinely have no face for still says so out loud: substitution() returns the sentence the
+ * 字体 dialog shows, so 华文新魏 turning into 宋体 is never something the user has to spot by eye.
+ */
 public final class DocxFontAssets {
-    // Times New Roman (4 weights)
+    // Latin, shipped in four styles.
     public static final String TIMES = "fonts/times-new-roman.ttf";
     public static final String TIMES_BOLD = "fonts/times-new-roman-bold.ttf";
     public static final String TIMES_ITALIC = "fonts/times-new-roman-italic.ttf";
     public static final String TIMES_BOLD_ITALIC = "fonts/times-new-roman-bolditalic.ttf";
-    // CJK core
+    // Latin, shipped in regular only; bold/italic are synthesised by the platform from these.
+    public static final String ARIAL = "fonts/arial.ttf";
+    public static final String ARIAL_BOLD = "fonts/arial-bold.ttf";
+    public static final String CALIBRI = "fonts/calibri.ttf";
+    public static final String CAMBRIA = "fonts/cambria.ttf";
+    public static final String COURIER_NEW = "fonts/courier-new.ttf";
+    public static final String CONSOLAS = "fonts/consolas.ttf";
+    // CJK text faces, full character set.
     public static final String SONG = "fonts/song.ttc";
     public static final String HEI = "fonts/simhei.ttf";
     public static final String KAI = "fonts/kaiti.ttf";
-    public static final String KAI_GB = "fonts/kaiti-gb2312.ttf";
     public static final String FANG = "fonts/fangsong.ttf";
-    public static final String FANG_GB = "fonts/fangsong-gb2312.ttf";
-    // CJK decorative
-    public static final String ST_XINWEI = "fonts/stxinwei.ttf";
-    public static final String ST_KAITI = "fonts/stkaiti.ttf";
-    public static final String ST_FANGSONG = "fonts/stfangsong.ttf";
-    public static final String ST_XIHEI = "fonts/stxihei.ttf";
-    public static final String ST_XINGKAI = "fonts/stxingkai.ttf";
-    public static final String MS_MINCHO = "fonts/ms-mincho.ttf";
-    // FZ series
     public static final String FZ_SMALL_SONG = "fonts/fz-small-song.ttf";
-    public static final String FZ_SMALL_SONG_GBK = "fonts/fz-xiaobiaosong-gbk.ttf";
-    public static final String FZ_XIAO_BIAO_SONG = "fonts/fz-xiaobiaosong.ttf";
-    public static final String FZ_DA_BIAO_SONG = "fonts/fz-dabiaosong.ttf";
-    public static final String FZ_DA_BIAO_SONG_JF = "fonts/fz-dabiaosong-jf.ttf";
-    public static final String FZ_FANGSONG = "fonts/fz-fangsong.ttf";
-    public static final String FZ_FANGSONG_GBK = "fonts/fz-fangsong-gbk.ttf";
-    public static final String FZ_KAITI = "fonts/fz-kaiti.ttf";
-    public static final String FZ_KAITI_GBK = "fonts/fz-kaiti-gbk.ttf";
-    public static final String FZ_HEITI = "fonts/fz-heiti.ttf";
-    public static final String FZ_HEITI_GBK = "fonts/fz-heiti-gbk.ttf";
-    // Latin
-    public static final String CALIBRI = "fonts/calibri.ttf";
-    public static final String CALIBRI_BOLD = "fonts/calibri-bold.ttf";
-    public static final String CALIBRI_ITALIC = "fonts/calibri-italic.ttf";
-    public static final String CALIBRI_BOLD_ITALIC = "fonts/calibri-bolditalic.ttf";
-    public static final String CAMBRIA = "fonts/cambria.ttf";
-    public static final String CAMBRIA_BOLD = "fonts/cambria-bold.ttf";
-    public static final String CAMBRIA_ITALIC = "fonts/cambria-italic.ttf";
-    public static final String CAMBRIA_BOLD_ITALIC = "fonts/cambria-bolditalic.ttf";
-    public static final String CONSOLAS = "fonts/consolas.ttf";
-    public static final String CONSOLAS_BOLD = "fonts/consolas-bold.ttf";
-    public static final String CONSOLAS_ITALIC = "fonts/consolas-italic.ttf";
-    public static final String CONSOLAS_BOLD_ITALIC = "fonts/consolas-bolditalic.ttf";
-    public static final String APTOS = "fonts/aptos.ttf";
-    public static final String APTOS_BOLD = "fonts/aptos-bold.ttf";
-    public static final String APTOS_ITALIC = "fonts/aptos-italic.ttf";
-    public static final String APTOS_BOLD_ITALIC = "fonts/aptos-bolditalic.ttf";
-    public static final String GEORGIA = "fonts/georgia.ttf";
-    public static final String GEORGIA_BOLD = "fonts/georgia-bold.ttf";
-    public static final String GEORGIA_ITALIC = "fonts/georgia-italic.ttf";
-    public static final String GEORGIA_BOLD_ITALIC = "fonts/georgia-bolditalic.ttf";
-    public static final String ARIAL = "fonts/arial.ttf";
-    public static final String ARIAL_BOLD = "fonts/arial-bold.ttf";
-    public static final String ARIAL_ITALIC = "fonts/arial-italic.ttf";
-    public static final String ARIAL_BOLD_ITALIC = "fonts/arial-bolditalic.ttf";
-    public static final String COURIER_NEW = "fonts/courier-new.ttf";
-    public static final String COURIER_NEW_BOLD = "fonts/courier-new-bold.ttf";
-    public static final String COURIER_NEW_ITALIC = "fonts/courier-new-italic.ttf";
-    public static final String COURIER_NEW_BOLD_ITALIC = "fonts/courier-new-bolditalic.ttf";
-    public static final String TAHOMA = "fonts/tahoma.ttf";
-    public static final String TAHOMA_BOLD = "fonts/tahoma-bold.ttf";
-    public static final String VERDANA = "fonts/verdana.ttf";
-    public static final String VERDANA_BOLD = "fonts/verdana-bold.ttf";
-
+    // CJK faces that desktop Word has and a phone does not: shipped so a declared name gets its own face.
+    public static final String ST_XINWEI = "fonts/stxinwei.ttf";        // 华文新魏
+    public static final String ST_LITI = "fonts/stliti.ttf";            // 华文隶书
+    public static final String ST_XINGKAI = "fonts/stxingka.ttf";       // 华文行楷
+    public static final String LI_SU = "fonts/lisu.ttf";                // 隶书
+    public static final String YOU_YUAN = "fonts/youyuan.ttf";          // 幼圆
+    public static final String DENG_XIAN = "fonts/dengxian.ttf";        // 等线
+    public static final String MS_GOTHIC = "fonts/msgothic.ttf";        // ＭＳ ゴシック
+    public static final String ST_SONG = "fonts/stsong.ttf";            // 华文宋体
+    public static final String ST_ZHONGSONG = "fonts/stzhongsong.ttf";  // 华文中宋
+    public static final String ST_KAITI = "fonts/stkaiti.ttf";          // 华文楷体
+    public static final String ST_FANGSONG = "fonts/stfangsong.ttf";    // 华文仿宋
+    public static final String ST_XIHEI = "fonts/stxihei.ttf";          // 华文细黑
     public static final String MATH = "fonts/stix-two-math.ttf";
+
+    /** Every file that ships. Anything this list does not contain must never come out of pathFor(). */
     public static final String[] PATHS = {
         TIMES, TIMES_BOLD, TIMES_ITALIC, TIMES_BOLD_ITALIC,
-        SONG, HEI, KAI, FANG, FZ_SMALL_SONG,
-        ARIAL, ARIAL_BOLD, CALIBRI, CAMBRIA, MATH
+        SONG, HEI, KAI, FANG, FZ_SMALL_SONG, MATH, COURIER_NEW, CONSOLAS,
+        ARIAL, ARIAL_BOLD, CALIBRI, CAMBRIA,
+        ST_XINWEI, ST_LITI, ST_XINGKAI, LI_SU, YOU_YUAN, DENG_XIAN, MS_GOTHIC,
+        ST_SONG, ST_ZHONGSONG, ST_KAITI, ST_FANGSONG, ST_XIHEI
     };
 
-    private static String available(String requested, String fallback) {
-        for (String path : PATHS) if (path.equals(requested)) return requested;
-        return fallback;
-    }
+    /** What the 字体 dialog lists. Word's names, not our file names: the user reads the docx names. */
+    public static final String[] PICKER = {
+        "宋体", "黑体", "楷体", "仿宋", "等线", "幼圆", "隶书",
+        "方正小标宋", "华文新魏", "华文隶书", "华文行楷", "华文楷体", "华文仿宋", "华文细黑", "华文中宋",
+        "Times New Roman", "Arial", "Calibri", "Cambria", "Courier New", "Consolas",
+        "MS Gothic", "MS Mincho"
+    };
 
     private DocxFontAssets() { }
 
@@ -87,102 +69,189 @@ public final class DocxFontAssets {
         return pathFor(family, 0);
     }
 
+    /** Anything this returns is a file that ships in the APK; unknown Latin names get null, as before. */
     public static String pathFor(String family, int style) {
-        String requested = exactPathFor(family, style);
-        if (requested == null) return null;
-        for (String path : PATHS) if (path.equals(requested)) return requested;
-        String key = family.toLowerCase(Locale.ROOT);
-        if (key.contains("consolas") || key.contains("courier")) return null;
-        if (key.contains("calibri") || key.contains("aptos")) return CALIBRI;
-        if (key.contains("cambria")) return CAMBRIA;
-        if (key.contains("arial") || key.contains("tahoma") || key.contains("verdana"))
-            return (style & 1) != 0 ? ARIAL_BOLD : ARIAL;
-        if (key.contains("georgia")) return (style & 1) != 0 ? TIMES_BOLD : TIMES;
+        String exact = exactPathFor(family, style);
+        if (exact != null) return exact;
+        String key = key(family);
+        if (key.isEmpty()) return null;
+        if (key.contains("新魏") || key.contains("xinwei")) return ST_XINWEI;
+        if (key.contains("行楷") || key.contains("xingkai")) return ST_XINGKAI;
+        if (key.contains("隶") || key.contains("lishu")) return LI_SU;
+        if (key.contains("幼圆") || key.contains("youyuan")) return YOU_YUAN;
+        if (key.contains("等线") || key.contains("dengxian")) return DENG_XIAN;
+        if (key.contains("中宋") || key.contains("zhongsong")) return ST_ZHONGSONG;
+        if (key.contains("song") || key.contains("sun") || key.contains("明") || key.contains("书")) return SONG;
         if (key.contains("kai") || key.contains("楷")) return KAI;
         if (key.contains("fang") || key.contains("仿")) return FANG;
-        if (key.contains("hei") || key.contains("黑") || key.contains("细")) return HEI;
-        if (key.contains("标宋")) return FZ_SMALL_SONG;
-        return SONG;
+        if (key.contains("hei") || key.contains("黑") || key.contains("gothic")) return HEI;
+        if (key.contains("标宋") || key.contains("小标宋")) return FZ_SMALL_SONG;
+        if (key.contains("cambria")) return CAMBRIA;
+        if (key.contains("calibri") || key.contains("aptos")) return CALIBRI;
+        if (key.contains("arial") || key.contains("tahoma") || key.contains("verdana") || key.contains("segoe") || key.contains("helvetica") || key.contains("opensans")) return ARIAL;
+        if (key.contains("times") || key.contains("serif") || key.contains("georgia")
+                || key.contains("mincho")) return TIMES;
+        if (key.contains("mono") || key.contains("consol")) return CONSOLAS;
+        if (key.contains("courier")) return COURIER_NEW;
+        /* 认不出来的名字分两种：中文名落到宋体（Word 对认不出的中文字体也走这一路）；拉丁字母名照旧
+           交给系统字体——那一路以前就是这样，没重新量过就不动它。 */
+        return hasCjk(family) ? SONG : null;
     }
 
-    private static String exactPathFor(String family, int style) {
-        if (family == null) return null;
-        boolean bold = (style & 1) != 0;
-        boolean italic = (style & 2) != 0;
-        String key = family.trim().toLowerCase(Locale.ROOT).replace(" ", "")
-                .replace("_", "").replace("-", "");
-        switch (key) {
-            case "stixtwomath": case "cambria math": case "cambriamath":
-            case "latinmodernmath": case "xitsmath": case "symbol": return MATH;
-            case "microsoftyahei": case "微软雅黑": return HEI;
-            case "timesnewroman": case "timesnewromanpsmt": case "tnr": case "serif":
-                if (bold && italic) return TIMES_BOLD_ITALIC;
-                if (bold) return TIMES_BOLD;
-                if (italic) return TIMES_ITALIC;
-                return TIMES;
-            case "simsun": case "nsimsun": case "songti":
-            case "\u5b8b\u4f53": case "\u539f\u7248\u5b8b\u4f53": return SONG;
-            case "simhei": case "heiti": case "\u9ed1\u4f53": case "\u9ed1\u4f53gb2312": return HEI;
-            case "kaiti": case "simkai": case "\u6977\u4f53": return KAI;
-            case "kaitigb2312": case "\u6977\u4f53gb2312": return KAI_GB;
-            case "fangsong": case "simfang": case "\u4eff\u5b8b": return FANG;
-            case "fangsonggb2312": case "\u4eff\u5b8bgb2312": return FANG_GB;
-            case "stxinwei": case "\u534e\u6587\u65b0\u9b4f": return ST_XINWEI;
-            case "stkaiti": case "\u534e\u6587\u6977\u4f53": return ST_KAITI;
-            case "stfangsong": case "\u534e\u6587\u4eff\u5b8b": return ST_FANGSONG;
-            case "stxihei": case "\u534e\u6587\u7ec6\u9ed1": return ST_XIHEI;
-            case "stxingkai": case "\u534e\u6587\u884c\u6977": return ST_XINGKAI;
-            case "msmincho": case "mspmincho": case "\uff2d\uff33 \u660e\u671d":
-            case "\uff2d\uff33\u660e\u671d": case "ms\u660e\u671d":
-            case "\uff4d\uff53\u660e\u671d": return MS_MINCHO;
-            case "fzdocxiaobiaosong": case "fzxiaobiaosong":
-            case "\u65b9\u6b63\u5c0f\u6807\u5b8b": case "\u65b9\u6b63\u516c\u6587\u5c0f\u6807\u5b8b": return FZ_SMALL_SONG;
-            case "\u65b9\u6b63\u5c0f\u6807\u5b8bgbk": return FZ_SMALL_SONG_GBK;
-            case "\u65b9\u6b63\u5927\u6807\u5b8b": return FZ_DA_BIAO_SONG;
-            case "calibri":
-                if (bold && italic) return CALIBRI_BOLD_ITALIC;
-                if (bold) return CALIBRI_BOLD;
-                if (italic) return CALIBRI_ITALIC;
-                return CALIBRI;
-            case "cambria":
-                if (bold && italic) return CAMBRIA_BOLD_ITALIC;
-                if (bold) return CAMBRIA_BOLD;
-                if (italic) return CAMBRIA_ITALIC;
-                return CAMBRIA;
-            case "consolas":
-                if (bold && italic) return CONSOLAS_BOLD_ITALIC;
-                if (bold) return CONSOLAS_BOLD;
-                if (italic) return CONSOLAS_ITALIC;
-                return CONSOLAS;
-            case "aptos":
-                if (bold && italic) return APTOS_BOLD_ITALIC;
-                if (bold) return APTOS_BOLD;
-                if (italic) return APTOS_ITALIC;
-                return APTOS;
-            case "georgia":
-                if (bold && italic) return GEORGIA_BOLD_ITALIC;
-                if (bold) return GEORGIA_BOLD;
-                if (italic) return GEORGIA_ITALIC;
-                return GEORGIA;
-            case "arial":
-                if (bold && italic) return ARIAL_BOLD_ITALIC;
-                if (bold) return ARIAL_BOLD;
-                if (italic) return ARIAL_ITALIC;
-                return ARIAL;
-            case "couriernew": case "courier":
-                if (bold && italic) return COURIER_NEW_BOLD_ITALIC;
-                if (bold) return COURIER_NEW_BOLD;
-                if (italic) return COURIER_NEW_ITALIC;
-                return COURIER_NEW;
-            case "tahoma": return bold ? TAHOMA_BOLD : TAHOMA;
-            case "verdana": return bold ? VERDANA_BOLD : VERDANA;
-            default: return null;
+    /**
+    * 这个字体名在字库里有没有本尊。没有就说清换成了哪张脸——这一句要能进界面，
+    * 用户不该靠眼睛去发现标题变成了宋体。
+    */
+    public static String substitution(String family) {
+        String wanted = key(family);
+        if (wanted.isEmpty()) return "";
+        String path = pathFor(family);
+        return isOwnName(path, wanted) ? ""
+                : "字库没有「" + family.trim() + "」，用「" + label(path) + "」显示";
+    }
+
+    /** The face a path really is, in the name a user would recognise. */
+    public static String label(String path) {
+        if (SONG.equals(path)) return "宋体";
+        if (HEI.equals(path)) return "黑体";
+        if (KAI.equals(path)) return "楷体";
+        if (FANG.equals(path)) return "仿宋";
+        if (FZ_SMALL_SONG.equals(path)) return "方正小标宋";
+        if (ST_XINWEI.equals(path)) return "华文新魏";
+        if (ST_LITI.equals(path)) return "华文隶书";
+        if (ST_XINGKAI.equals(path)) return "华文行楷";
+        if (LI_SU.equals(path)) return "隶书";
+        if (YOU_YUAN.equals(path)) return "幼圆";
+        if (DENG_XIAN.equals(path)) return "等线";
+        if (MS_GOTHIC.equals(path)) return "ＭＳ ゴシック";
+        if (ST_SONG.equals(path)) return "华文宋体";
+        if (ST_ZHONGSONG.equals(path)) return "华文中宋";
+        if (ST_KAITI.equals(path)) return "华文楷体";
+        if (ST_FANGSONG.equals(path)) return "华文仿宋";
+        if (ST_XIHEI.equals(path)) return "华文细黑";
+        if (COURIER_NEW.equals(path)) return "Courier New";
+        if (CONSOLAS.equals(path)) return "Consolas";
+        if (CALIBRI.equals(path)) return "Calibri";
+        if (CAMBRIA.equals(path)) return "Cambria";
+        if (ARIAL_BOLD.equals(path) || ARIAL.equals(path)) return "Arial";
+        if (MATH.equals(path)) return "STIX Two Math";
+        if (TIMES.equals(path) || TIMES_BOLD.equals(path) || TIMES_ITALIC.equals(path)
+                || TIMES_BOLD_ITALIC.equals(path)) return "Times New Roman";
+        return path == null ? "系统字体" : path;
+    }
+
+    /** The names a file really IS; any other name that lands here got substituted. */
+    private static boolean isOwnName(String path, String wanted) {
+        if (SONG.equals(path))
+            return oneOf(wanted, "宋体", "simsun", "nsimsun", "songti", "song", "新宋体", "simsunb", "原版宋体");
+        if (HEI.equals(path)) return oneOf(wanted, "黑体", "simhei", "heiti", "黑体gb2312");
+        if (KAI.equals(path)) return oneOf(wanted, "楷体", "simkai", "kaiti", "楷体gb2312");
+        if (FANG.equals(path)) return oneOf(wanted, "仿宋", "simfang", "fangsong", "仿宋gb2312");
+        if (FZ_SMALL_SONG.equals(path))
+            return oneOf(wanted, "方正小标宋", "方正公文小标宋", "fzxiaobiaosong", "fzdocxiaobiaosong", "小标宋");
+        if (ST_XINWEI.equals(path)) return oneOf(wanted, "华文新魏", "stxinwei", "xinwei");
+        if (ST_LITI.equals(path)) return oneOf(wanted, "华文隶书", "stliti");
+        if (ST_XINGKAI.equals(path)) return oneOf(wanted, "华文行楷", "stxingkai", "xingkai");
+        if (LI_SU.equals(path)) return oneOf(wanted, "隶书", "lisu", "lishu");
+        if (YOU_YUAN.equals(path)) return oneOf(wanted, "幼圆", "youyuan", "幼圆gb2312");
+        if (DENG_XIAN.equals(path)) return oneOf(wanted, "等线", "dengxian");
+        if (MS_GOTHIC.equals(path)) return oneOf(wanted, "msgothic", "mspgothic", "msゴシック", "msｐゴシック");
+        if (ST_SONG.equals(path)) return oneOf(wanted, "华文宋体", "stsong");
+        if (ST_ZHONGSONG.equals(path)) return oneOf(wanted, "华文中宋", "stzhongsong");
+        if (ST_KAITI.equals(path)) return oneOf(wanted, "华文楷体", "stkaiti");
+        if (ST_FANGSONG.equals(path)) return oneOf(wanted, "华文仿宋", "stfangsong");
+        if (ST_XIHEI.equals(path)) return oneOf(wanted, "华文细黑", "stxihei");
+        if (COURIER_NEW.equals(path)) return oneOf(wanted, "courier", "couriernew");
+        if (CONSOLAS.equals(path)) return oneOf(wanted, "consolas");
+        if (CALIBRI.equals(path)) return oneOf(wanted, "calibri");
+        if (CAMBRIA.equals(path)) return oneOf(wanted, "cambria");
+        if (ARIAL.equals(path) || ARIAL_BOLD.equals(path)) return oneOf(wanted, "arial");
+        if (MATH.equals(path)) return wanted.contains("math");
+        return wanted.contains("times") || oneOf(wanted, "serif", "tnr");
+    }
+
+    /** 名字里带中日韩字符：认不出时落到宋体，而不是落到系统的拉丁字体上。 */
+    static boolean hasCjk(String family) {
+        if (family == null) return false;
+        for (int i = 0; i < family.length(); i++) {
+            char c = family.charAt(i);
+            if (c >= 0x2E80 && c <= 0x9FFF) return true;
         }
+        return false;
+    }
+
+    private static boolean oneOf(String wanted, String... names) {
+        for (String name : names) if (wanted.equals(name)) return true;
+        return false;
     }
 
     public static boolean isTimes(String family) {
         if (family == null) return false;
-        String key = family.trim().toLowerCase(Locale.ROOT).replace(" ", "");
+        String key = key(family);
         return key.contains("times") || "serif".equals(key);
+    }
+
+    /**
+     * Word writes these names with stray spaces, underscores, and (for the Japanese faces) full-width
+     * characters: eastAsia="ＭＳ 明朝". Folding full-width ASCII to ASCII is what makes those match.
+     */
+    private static String key(String family) {
+        if (family == null) return "";
+        String trimmed = family.trim().toLowerCase(Locale.ROOT);
+        StringBuilder out = new StringBuilder(trimmed.length());
+        for (int i = 0; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            if (c >= 0xFF01 && c <= 0xFF5E) c = (char) (c - 0xFEE0);
+            else if (c == 0x3000) c = ' ';
+            if (c == ' ' || c == '_' || c == '-') continue;
+            out.append(c);
+        }
+        return out.toString();
+    }
+
+    private static String exactPathFor(String family, int style) {
+        String key = key(family);
+        if (key.isEmpty()) return null;
+        boolean bold = (style & 1) != 0;
+        boolean italic = (style & 2) != 0;
+        if (key.contains("math") || key.contains("symbol")) return MATH;
+        if (key.equals("simsun") || key.equals("nsimsun") || key.equals("songti")
+                || key.equals("song") || key.equals("宋体") || key.equals("原版宋体")
+                || key.equals("simsunb") || key.equals("新宋体")) return SONG;
+        if (key.equals("simhei") || key.equals("heiti") || key.equals("黑体") || key.equals("黑体gb2312")
+                || key.equals("微软雅黑") || key.equals("microsoftyahei")) return HEI;
+        if (key.equals("kaiti") || key.equals("simkai") || key.equals("楷体") || key.equals("楷体gb2312")
+                || key.equals("楷")) return KAI;
+        if (key.equals("fangsong") || key.equals("simfang") || key.equals("仿宋")
+                || key.equals("仿宋gb2312")) return FANG;
+        if (key.equals("stxinwei") || key.equals("华文新魏") || key.equals("xinwei")) return ST_XINWEI;
+        if (key.equals("stliti") || key.equals("华文隶书")) return ST_LITI;
+        if (key.equals("stxingkai") || key.equals("华文行楷") || key.equals("xingkai")) return ST_XINGKAI;
+        if (key.equals("隶书") || key.equals("lishu") || key.equals("lisu")) return LI_SU;
+        if (key.equals("幼圆") || key.equals("youyuan") || key.equals("幼圆gb2312")) return YOU_YUAN;
+        if (key.equals("等线") || key.equals("dengxian") || key.equals("等线light")) return DENG_XIAN;
+        if (key.equals("stxihei") || key.equals("华文细黑")) return ST_XIHEI;
+        if (key.equals("stkaiti") || key.equals("华文楷体")) return ST_KAITI;
+        if (key.equals("stfangsong") || key.equals("华文仿宋")) return ST_FANGSONG;
+        if (key.equals("stsong") || key.equals("华文宋体")) return ST_SONG;
+        if (key.equals("stzhongsong") || key.equals("华文中宋")) return ST_ZHONGSONG;
+        if (key.equals("msgothic") || key.equals("mspgothic") || key.equals("msゴシック")
+                || key.equals("msｐゴシック")) return MS_GOTHIC;
+        /* ＭＳ 明朝本机就没有字库（mincho 只在装了日文语言的 Windows 上），落到宋体：
+           同为衬线宋体骨架，差在笔形，替换话术会照实说。 */
+        if (key.equals("msmincho") || key.equals("mspmincho") || key.equals("明朝")
+                || key.equals("ms明朝")) return SONG;
+        if (key.equals("方正小标宋") || key.equals("方正公文小标宋") || key.equals("fzxiaobiaosong")
+                || key.equals("fzdocxiaobiaosong") || key.equals("小标宋")) return FZ_SMALL_SONG;
+        if (key.equals("cambria")) return bold && italic ? TIMES_BOLD_ITALIC : bold ? CAMBRIA : CAMBRIA;
+        if (key.equals("calibri") || key.equals("aptos")) return CALIBRI;
+        if (key.equals("arial")) return bold ? ARIAL_BOLD : ARIAL;
+        if (key.equals("tahoma") || key.equals("verdana")) return ARIAL;
+        if (key.equals("courier") || key.equals("couriernew")) return COURIER_NEW;
+        if (key.equals("consolas") || key.equals("menlo") || key.equals("monaco")) return CONSOLAS;
+        if (key.equals("timesnewroman") || key.equals("timesnewromanpsmt") || key.equals("times")
+                || key.equals("tnr") || key.equals("serif") || key.equals("georgia"))
+            return bold && italic ? TIMES_BOLD_ITALIC : bold ? TIMES_BOLD : italic ? TIMES_ITALIC : TIMES;
+        return null;
     }
 }

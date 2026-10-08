@@ -72,11 +72,11 @@ public final class FontAssetsRegression {
                 "Hei and Kai aliases resolve correctly");
         check(DocxFontAssets.FZ_SMALL_SONG.equals(DocxFontAssets.pathFor("FZDocXiaoBiaoSong")),
                 "Founder Small Song resolves independently");
-        check(DocxFontAssets.SONG.equals(DocxFontAssets.pathFor("\u534e\u6587\u65b0\u9b4f"))
+        check(DocxFontAssets.ST_XINWEI.equals(DocxFontAssets.pathFor("\u534e\u6587\u65b0\u9b4f"))
                         && DocxFontAssets.ARIAL.equals(DocxFontAssets.pathFor("Arial"))
                         && DocxFontAssets.SONG.equals(DocxFontAssets.pathFor("MS Mincho"))
                         && DocxFontAssets.SONG.equals(DocxFontAssets.pathFor("\uff2d\uff33 \u660e\u671d")),
-                "removed decorative families have explicit safe fallbacks");
+                "华文新魏/MS Mincho: 真字库在包里，明朝仍落宋体");
         check(DocxFontAssets.pathFor("NonexistentFont123") == null
                         && DocxFontAssets.pathFor("") == null,
                 "truly unknown fonts correctly return null");
