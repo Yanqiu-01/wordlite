@@ -143,9 +143,16 @@ if (($committed -join " ") -match "nothing to commit") {
 $sha = (& git rev-parse HEAD).Trim()
 # The release targets a commit that must already exist on the remote, so push first and let
 # gh cut the tag there; a stale local tag of the same name only makes gh refuse.
+#
+# 推 HEAD，不推分支名。发版在 `git worktree add --detach` 出来的干净树里做（主工作区里还有
+# 别人没提交的改动，混进去就把没量过的东西发出去了），这时 HEAD 是游离的：
+# `push origin main` 推的是仓库里那个 main，不是刚出包的这一版——远端于是只有上一版的提交，
+# gh 拿这一版的 $sha 当 target 直接 422（Release.target_commitish is invalid），
+# APK 已经出好、签名也对，就是发不出去。`HEAD:main` 两种树下都对：
+# 正常树上与 `push origin main` 等价，游离头上推的就是这一版。
 if ($NoPush) { Write-Warning "-NoPush: the release step will fail unless $sha is already on the remote" }
 else {
-    & git -c ("http.proxy=" + $Proxy) -c ("https.proxy=" + $Proxy) push origin main
+    & git -c ("http.proxy=" + $Proxy) -c ("https.proxy=" + $Proxy) push origin ("HEAD:main")
     if ($LASTEXITCODE -ne 0) { throw "git push failed" }
 }
 & git tag -d ("v" + $Version) 2>&1 | Out-Null
