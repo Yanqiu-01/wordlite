@@ -7,6 +7,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Duplication and AIGC orchestration: citation marking, bounded retrieval, corpus match, one report. */
 public final class DuplicateEngine {
@@ -23,6 +24,10 @@ public final class DuplicateEngine {
     static final long MAX_SEARCH_MILLIS = 180000L, MIN_ENGINE_GAP_MILLIS = 400L;
     /** 同一源被限流后整轮还允许的补试次数：实测 Semantic Scholar 匿名配额一进就 429。 */
     static final int MAX_THROTTLE_RETRIES = 1;
+    /* 泳道上限：一条泳道一个线程、一条在飞的连接（单条响应体上限 2MB，四路并发就是 8MB 顶）。
+       四路是"最慢的源再也拖不住其余源"与"手机上不要同时开十条连接"之间的取舍；真机上常用的
+       中文三库（知网/万方/维普）正好全部并行，九个源全选时每道摊到两三个源。 */
+    static final int MAX_LANES = 4;
     /* 回归夹具注入点：跑完必须还原，做法参照 TextCorpus.restoreThresholds()。
        真机上这两个值就是上面两个常量，测试把它们压小，免得回归白等几分钟。 */
     static long searchMillis = MAX_SEARCH_MILLIS, engineGapMillis = MIN_ENGINE_GAP_MILLIS;
@@ -357,103 +362,300 @@ public final class DuplicateEngine {
         if (plan.groups.isEmpty()) { note(report, "正文没有可用于检索的段落"); return; }
         int planned = Math.min(plan.groups.size(), Math.max(1, Math.min(limits.windows, MAX_WINDOWS)));
         report.windowsPlanned = planned;
-        /* perEngine 只管"每次向该源要几条"；逐源入库上限取同一个数，9 个源 x 12 篇 = 108 篇，
-           与 MAX_CORPUS_PAPERS = 120 自洽，不必再拍第三个数。 */
         int perSourceCap = Math.max(1, limits.perEngine);
         int poolCap = Math.max(60, 8 * perSourceCap * engines.size());
-        long deadline = System.currentTimeMillis() + Math.max(1L, searchMillis);
-        long gap = Math.max(0L, engineGapMillis);
-        LinkedHashMap<String, Long> lastAsk = new LinkedHashMap<String, Long>();
-        LinkedHashMap<String, Boolean> askedPhrase = new LinkedHashMap<String, Boolean>();
-        LinkedHashMap<String, Boolean> poolKeys = new LinkedHashMap<String, Boolean>();
-        LinkedHashMap<String, Boolean> skipped = new LinkedHashMap<String, Boolean>();
-        LinkedHashMap<String, Boolean> exhausted = new LinkedHashMap<String, Boolean>();
-        LinkedHashMap<String, Boolean> silent = new LinkedHashMap<String, Boolean>();
-        LinkedHashMap<String, Boolean> failedLast = new LinkedHashMap<String, Boolean>();
-        LinkedHashMap<String, Integer> retries = new LinkedHashMap<String, Integer>();
-        LinkedHashMap<String, Integer> quiet = new LinkedHashMap<String, Integer>();
-        ArrayList<PaperSources.Candidate> pool = new ArrayList<PaperSources.Candidate>();
-        int requests = 0, poolDropped = 0, done = 0, total = planned * engines.size();
+        /* 检索式在起线程之前全部算好：泳道之间只共用这一排算完的检索式与候选池，
+           谁都不把自己的检索现场摊给别的线程看。 */
+        Sweep sweep = new Sweep(limits, cancellation, progress, planned, poolCap,
+                Math.max(0L, engineGapMillis), System.currentTimeMillis() + Math.max(1L, searchMillis),
+                planned * engines.size());
+        for (int w = 0; w < planned; w++)
+            sweep.addWindow(windowProbes(plan.members.get(w)), plan.chars.get(w).intValue());
+        ArrayList<Lane> lanes = lanes(sweep, engines);
+        runLanes(lanes);
+        /* 注记与逐源状态等全部泳道收工后，按设置里的源顺序并回来：谁先回来不得影响注记顺序。 */
+        LinkedHashMap<String, Boolean> failed = new LinkedHashMap<String, Boolean>();
+        LinkedHashMap<String, Boolean> rawSkipped = new LinkedHashMap<String, Boolean>();
+        LinkedHashMap<String, Boolean> rawExhausted = new LinkedHashMap<String, Boolean>();
+        LinkedHashMap<String, Boolean> rawSilent = new LinkedHashMap<String, Boolean>();
         boolean requestCap = false, timeCap = false;
+        for (int i = 0; i < lanes.size(); i++) {
+            Lane lane = lanes.get(i);
+            rawSkipped.putAll(lane.skipped);
+            rawExhausted.putAll(lane.exhausted);
+            rawSilent.putAll(lane.silent);
+            failed.putAll(lane.failedLast);
+            requestCap = requestCap || lane.quotaCap;
+            timeCap = timeCap || lane.timeCap;
+        }
+        LinkedHashMap<String, Boolean> skipped = orderedFlags(engines, rawSkipped);
+        LinkedHashMap<String, Boolean> exhausted = orderedFlags(engines, rawExhausted);
+        LinkedHashMap<String, Boolean> silent = orderedFlags(engines, rawSilent);
+        LinkedHashMap<String, Boolean> failedLast = orderedFlags(engines, failed);
+        for (int i = 0; i < lanes.size(); i++)
+            for (int n = 0; n < lanes.get(i).notes.size(); n++) note(report, lanes.get(i).notes.get(n));
+        for (int i = 0; i < engines.size(); i++) {
+            int times = 0;
+            for (int j = 0; j < lanes.size(); j++) times += lanes.get(j).asksOf(engines.get(i));
+            if (times > 0) report.windowsAsked.put(engines.get(i), Integer.valueOf(times));
+        }
+        if (cancelled(cancellation)) note(report, "检索已取消，结果只覆盖已完成的窗口");
+        report.windowsRetrieved = sweep.windowsRetrieved();
+        report.coveredChars = sweep.coveredChars();
+        phaseB(sweep.askedQueries(), corpus, report, engines, limits, cancellation, sweep.pool, skipped,
+                failedLast, exhausted, silent, requestCap, timeCap, poolCap, sweep.droppedCandidates(), sweep.deadline);
+    }
 
-        /* 这一轮真正问出去的检索式，排序阶段要用（见 phaseB 的 ranking）。 */
-        ArrayList<String> askedQueries = new ArrayList<String>();
-        for (int w = 0; w < planned; w++) {
-            if (cancelled(cancellation)) { note(report, "检索已取消，结果只覆盖已完成的窗口"); break; }
-            /* 一扇窗口可能压着两种主题：抄来的一段会被邻居的关键词盖住，整窗检索式问不到它。 */
-            ArrayList<String> probes = windowProbes(plan.members.get(w));
-            LinkedHashMap<String, Integer> gained = new LinkedHashMap<String, Integer>();
-            LinkedHashMap<String, Boolean> askedNow = new LinkedHashMap<String, Boolean>();
-            boolean asked = false, poolFull = false;
-            for (int p = 0; p < probes.size(); p++) {
-                String phrase = probes.get(p);
-                if (phrase.isEmpty()) continue;
-                if (!askedQueries.contains(phrase)) askedQueries.add(phrase);
-                for (String engine : engines) {
-                    if (phrase.isEmpty() || Boolean.TRUE.equals(skipped.get(engine))
-                            || Boolean.TRUE.equals(exhausted.get(engine))) continue;
-                    if (requests >= MAX_REQUESTS) { requestCap = true; break; }
-                    /* 剩余额度连一次带超时的请求都放不下就不再发：那是发出去必死的请求。 */
-                    if (deadline - System.currentTimeMillis() <= limits.timeoutSeconds * 1000L + 1000L) { timeCap = true; break; }
-                    /* 相邻窗口的重复段落会凑出同一个 48 字短语，这种请求纯属白送。 */
-                    if (Boolean.TRUE.equals(askedPhrase.get(engine + "|" + phrase))) continue;
-                    waitTurn(lastAsk, engine, gap, deadline, cancellation);
-                    askedPhrase.put(engine + "|" + phrase, Boolean.TRUE);
-                    askedNow.put(engine, Boolean.TRUE);
-                    asked = true;
-                    requests++;
-                    bump(report.windowsAsked, engine);
-                    step(progress, "检索 " + PaperSources.label(engine), Math.min(++done, total), total);
-                    try {
-                        ArrayList<PaperSources.Candidate> found = PaperSources.search(engine, phrase, limits, cancellation);
-                        failedLast.remove(engine);
-                        for (PaperSources.Candidate candidate : found) {
-                            String key = poolKey(engine, candidate);
-                            if (key.isEmpty()) continue;
-                            if (pool.size() >= poolCap) { poolDropped++; poolFull = true; continue; }
-                            if (Boolean.TRUE.equals(poolKeys.get(key))) continue;
-                            poolKeys.put(key, Boolean.TRUE);
-                            pool.add(candidate);
-                            bump(gained, engine);
-                        }
-                    } catch (IllegalArgumentException error) {
-                        skipped.put(engine, Boolean.TRUE); failedLast.put(engine, Boolean.TRUE);
-                        note(report, "已跳过 " + PaperSources.label(engine) + "：" + message(error));
-                    } catch (IOException error) {
-                        /* 429 与"这个源挂了"不是一回事：匿名共享配额是暂时的，一次失败就整轮放弃太狠。
-                           判据用注记前缀而不是状态码，因为 PaperSources.search() 只往上抛 IOException。 */
-                        failedLast.put(engine, Boolean.TRUE);
-                        boolean throttled = message(error).startsWith(THROTTLED_PREFIX)
-                                && count(retries, engine) < MAX_THROTTLE_RETRIES;
-                        if (throttled) {
-                            bump(retries, engine);
-                            note(report, "已重试 " + PaperSources.label(engine) + "：" + message(error));
-                        } else {
-                            skipped.put(engine, Boolean.TRUE);
-                            note(report, "已跳过 " + PaperSources.label(engine) + "：" + message(error));
+    /**
+     * 一轮检索共用的东西：算好的检索式、候选池、挂钟、进度。
+     *
+     * 泳道之间只经由这个类的同步方法碰彼此；每个源自己的会话状态（维普的 sessionid、知网的检索页
+     * token）留在自己那条泳道的线程里，一次请求从头到尾在同一个线程内完成，不跨线程交接。
+     */
+    private static final class Sweep {
+        final PaperSources.Limits limits; final ApiClient.Cancellation cancellation;
+        final Progress progress; final int planned; final int poolCap; final long gap; final long deadline;
+        final int total;
+        final ArrayList<ArrayList<String>> probes = new ArrayList<ArrayList<String>>();
+        final ArrayList<Integer> chars = new ArrayList<Integer>();
+        final ArrayList<PaperSources.Candidate> pool = new ArrayList<PaperSources.Candidate>();
+        final Object lock = new Object();
+        /** 主线程被打断时置位：泳道在每一扇窗口、每一次请求之前都看它一眼。 */
+        volatile boolean stop;
+        private final LinkedHashMap<String, Boolean> poolKeys = new LinkedHashMap<String, Boolean>();
+        private final ArrayList<Boolean[]> sent = new ArrayList<Boolean[]>();
+        private boolean[] askedWindow;
+        private int dropped;
+        private final AtomicInteger done = new AtomicInteger();
+        Sweep(PaperSources.Limits limits, ApiClient.Cancellation cancellation, Progress progress, int planned,
+              int poolCap, long gap, long deadline, int total) {
+            this.limits = limits; this.cancellation = cancellation; this.progress = progress;
+            this.planned = planned; this.poolCap = poolCap; this.gap = gap; this.deadline = deadline;
+            this.total = total; this.askedWindow = new boolean[planned];
+        }
+        void addWindow(ArrayList<String> phrases, int validChars) {
+            synchronized (lock) {
+                probes.add(phrases);
+                chars.add(Integer.valueOf(validChars));
+                sent.add(new Boolean[phrases.size()]);
+            }
+        }
+        /** 一次检索的候选并进池子：返回 true 表示池子已经装到顶，那一次的沉默不能算成源自己取尽。 */
+        boolean collect(String engine, ArrayList<PaperSources.Candidate> found,
+                        LinkedHashMap<String, Integer> gained) {
+            synchronized (lock) {
+                boolean full = false;
+                for (int i = 0; i < found.size(); i++) {
+                    PaperSources.Candidate candidate = found.get(i);
+                    String key = poolKey(engine, candidate);
+                    if (key.isEmpty()) continue;
+                    if (pool.size() >= poolCap) { dropped++; full = true; continue; }
+                    if (Boolean.TRUE.equals(poolKeys.get(key))) continue;
+                    poolKeys.put(key, Boolean.TRUE);
+                    pool.add(candidate);
+                    bump(gained, engine);
+                }
+                return full;
+            }
+        }
+        /** 记"这一扇窗口的这一条检索式真的问出去了"：覆盖字数与排序式都从这儿出。 */
+        void sent(int window, int probe) {
+            synchronized (lock) {
+                askedWindow[window] = true;
+                sent.get(window)[probe] = Boolean.TRUE;
+            }
+        }
+        int windowsRetrieved() {
+            synchronized (lock) {
+                int count = 0;
+                for (int w = 0; w < planned; w++) if (askedWindow[w]) count++;
+                return count;
+            }
+        }
+        int coveredChars() {
+            synchronized (lock) {
+                int sum = 0;
+                for (int w = 0; w < planned; w++) if (askedWindow[w]) sum += chars.get(w).intValue();
+                return sum;
+            }
+        }
+        int droppedCandidates() { synchronized (lock) { return dropped; } }
+        /**
+         * 这一轮真正问出去的检索式，按窗口顺序重排（排序阶段要用，见 phaseB 的 ranking）。
+         * 并行之下"谁先回来"是不确定的，所以排序式必须按文档顺序重建，不许按完成顺序。
+         */
+        ArrayList<String> askedQueries() {
+            synchronized (lock) {
+                ArrayList<String> out = new ArrayList<String>();
+                for (int w = 0; w < probes.size(); w++) {
+                    ArrayList<String> phrases = probes.get(w);
+                    Boolean[] flags = sent.get(w);
+                    for (int p = 0; p < phrases.size(); p++)
+                        if (Boolean.TRUE.equals(flags[p]) && !out.contains(phrases.get(p))) out.add(phrases.get(p));
+                }
+                return out;
+            }
+        }
+        void step(String label) {
+            int doneSoFar = done.incrementAndGet();
+            if (progress != null) progress.step(label, Math.min(doneSoFar, total), total);
+        }
+    }
+
+    /**
+     * 一条泳道 = 若干个源：道内串行、道间并行。
+     *
+     * 为什么必须并行：真机实测一篇 6376 字的稿子问三个中文源，一扇窗口串行要 19 秒（维普单源实测
+     * 4062ms，知网匿名口常拖到十几秒），180 秒那道挂钟闸门只够问完 8/11 扇——最慢的那个源把其余
+     * 两个源的时间一起花掉了，覆盖率的天花板是它给的，不是论文给的。防封 IP 那道 400ms 是
+     * "同一个源两次提问之间"的规矩，跨源并行不碰它：每个源仍然只在自己的线程里被逐次提问。
+     */
+    private static final class Lane implements Runnable {
+        final ArrayList<String> engines; int quota;
+        final LinkedHashMap<String, Boolean> skipped = new LinkedHashMap<String, Boolean>();
+        final LinkedHashMap<String, Boolean> exhausted = new LinkedHashMap<String, Boolean>();
+        final LinkedHashMap<String, Boolean> silent = new LinkedHashMap<String, Boolean>();
+        final LinkedHashMap<String, Boolean> failedLast = new LinkedHashMap<String, Boolean>();
+        final ArrayList<String> notes = new ArrayList<String>();
+        boolean quotaCap, timeCap;
+        private final Sweep sweep;
+        private int asks;
+        private final LinkedHashMap<String, Long> lastAsk = new LinkedHashMap<String, Long>();
+        private final LinkedHashMap<String, Boolean> askedPhrase = new LinkedHashMap<String, Boolean>();
+        private final LinkedHashMap<String, Integer> gained = new LinkedHashMap<String, Integer>();
+        private final LinkedHashMap<String, Integer> quiet = new LinkedHashMap<String, Integer>();
+        private final LinkedHashMap<String, Integer> retries = new LinkedHashMap<String, Integer>();
+        private final LinkedHashMap<String, Integer> askedBy = new LinkedHashMap<String, Integer>();
+        private final LinkedHashMap<String, Boolean> askedNow = new LinkedHashMap<String, Boolean>();
+        Lane(Sweep sweep, ArrayList<String> engines, int quota) {
+            this.sweep = sweep; this.engines = engines; this.quota = quota;
+        }
+        int asksOf(String engine) { return count(askedBy, engine); }
+        public void run() {
+            for (int w = 0; w < sweep.planned; w++) {
+                if (cancelled(sweep.cancellation) || sweep.stop) return;
+                if (asks >= quota) { quotaCap = true; return; }
+                ArrayList<String> phrases = sweep.probes.get(w);
+                boolean poolFull = false;
+                askedNow.clear();
+                gained.clear();
+                for (int p = 0; p < phrases.size() && !quotaCap && !timeCap; p++) {
+                    String phrase = phrases.get(p);
+                    if (phrase.isEmpty()) continue;
+                    for (int e = 0; e < engines.size(); e++) {
+                        String engine = engines.get(e);
+                        if (Boolean.TRUE.equals(skipped.get(engine))
+                                || Boolean.TRUE.equals(exhausted.get(engine))) continue;
+                        if (asks >= quota) { quotaCap = true; break; }
+                        /* 剩余额度连一次带超时的请求都放不下就不再发：那是发出去必死的请求。 */
+                        if (sweep.deadline - System.currentTimeMillis()
+                                <= sweep.limits.timeoutSeconds * 1000L + 1000L) { timeCap = true; break; }
+                        /* 相邻窗口的重复段落会凑出同一个 48 字短语，这种请求纯属白送。 */
+                        if (Boolean.TRUE.equals(askedPhrase.get(engine + "|" + phrase))) continue;
+                        waitTurn(lastAsk, engine, sweep.gap, sweep.deadline, sweep.cancellation);
+                        askedPhrase.put(engine + "|" + phrase, Boolean.TRUE);
+                        askedNow.put(engine, Boolean.TRUE);
+                        bump(askedBy, engine);
+                        asks++;
+                        sweep.sent(w, p);
+                        sweep.step("检索 " + PaperSources.label(engine));
+                        try {
+                            ArrayList<PaperSources.Candidate> found =
+                                    PaperSources.search(engine, phrase, sweep.limits, sweep.cancellation);
+                            failedLast.remove(engine);
+                            poolFull = poolFull | sweep.collect(engine, found, gained);
+                        } catch (IllegalArgumentException error) {
+                            skipped.put(engine, Boolean.TRUE); failedLast.put(engine, Boolean.TRUE);
+                            notes.add("已跳过 " + PaperSources.label(engine) + "：" + message(error));
+                        } catch (IOException error) {
+                            /* 429 与"这个源挂了"不是一回事：匿名共享配额是暂时的，一次失败就整轮放弃太狠。
+                               判据用注记前缀而不是状态码，因为 PaperSources.search() 只往上抛 IOException。 */
+                            failedLast.put(engine, Boolean.TRUE);
+                            boolean throttled = message(error).startsWith(THROTTLED_PREFIX)
+                                    && count(retries, engine) < MAX_THROTTLE_RETRIES;
+                            if (throttled) {
+                                bump(retries, engine);
+                                notes.add("已重试 " + PaperSources.label(engine) + "：" + message(error));
+                            } else {
+                                skipped.put(engine, Boolean.TRUE);
+                                notes.add("已跳过 " + PaperSources.label(engine) + "：" + message(error));
+                            }
                         }
                     }
                 }
-                if (requestCap || timeCap) break;
+                /* 取尽判据原样留在"同一个源"这一格：连着两个窗口一篇新的都没多就不再花配额问它。
+                   池子被我们自己装满的那些轮不算它沉默，否则是把内存上限伪装成源的意愿。 */
+                if (!poolFull) for (int e = 0; e < engines.size(); e++) {
+                    String engine = engines.get(e);
+                    if (!Boolean.TRUE.equals(askedNow.get(engine))) continue;
+                    /* 刚报错的源不配被说成"已取尽"：它没有沉默，是失败了，"本次不可用"才是它的账。 */
+                    if (Boolean.TRUE.equals(failedLast.get(engine))) continue;
+                    if (count(gained, engine) > 0) { quiet.put(engine, Integer.valueOf(0)); silent.remove(engine); continue; }
+                    silent.put(engine, Boolean.TRUE);
+                    int streak = count(quiet, engine) + 1;
+                    quiet.put(engine, Integer.valueOf(streak));
+                    if (streak >= 2) exhausted.put(engine, Boolean.TRUE);
+                }
             }
-            /* 取尽判据：同一个源连着两个窗口一篇新的都没多，就别再花配额问它。池子被我们自己
-               装满的那些轮不算它沉默，否则是把内存上限伪装成源的意愿。 */
-            if (!poolFull) for (String engine : engines) {
-                if (!Boolean.TRUE.equals(askedNow.get(engine))) continue;
-                /* 刚报错的源不配被说成"已取尽"：它没有沉默，是失败了，"本次不可用"才是它的账。 */
-                if (Boolean.TRUE.equals(failedLast.get(engine))) continue;
-                if (count(gained, engine) > 0) { quiet.put(engine, Integer.valueOf(0)); silent.remove(engine); continue; }
-                silent.put(engine, Boolean.TRUE);
-                int streak = count(quiet, engine) + 1;
-                quiet.put(engine, Integer.valueOf(streak));
-                if (streak >= 2) exhausted.put(engine, Boolean.TRUE);
-            }
-            if (asked) { report.windowsRetrieved++; report.coveredChars += plan.chars.get(w).intValue(); }
-            if (requestCap || timeCap) break;
         }
+    }
 
-        phaseB(askedQueries, corpus, report, engines, limits, cancellation, pool, skipped, failedLast, exhausted,
-                silent, requestCap, timeCap, poolCap, poolDropped, deadline);
+    /**
+     * 泳道怎么分：源按轮转进道（第 i 个源进第 i mod 道数 条），总配额按泳道里源数的份额切，
+     * 余数发给前面的泳道，各道加起来正好等于 MAX_REQUESTS。
+     *
+     * 为什么是轮转而不是切段：真机上慢的永远是同几个源（维普 4062ms、知网匿名口十几秒），
+     * 按顺序切段会把它们全挤进同一条泳道，那条泳道一慢就等于那个源整轮没被问——
+     * 那正是原来串行实现的病，不能换个名字再犯一遍。
+     */
+    private static ArrayList<Lane> lanes(Sweep sweep, ArrayList<String> engines) {
+        int count = Math.min(engines.size(), MAX_LANES);
+        ArrayList<ArrayList<String>> grouped = new ArrayList<ArrayList<String>>();
+        for (int i = 0; i < count; i++) grouped.add(new ArrayList<String>());
+        for (int i = 0; i < engines.size(); i++) grouped.get(i % count).add(engines.get(i));
+        ArrayList<Lane> out = new ArrayList<Lane>();
+        int assigned = 0;
+        for (int i = 0; i < count; i++) {
+            int share = (int) ((long) MAX_REQUESTS * grouped.get(i).size() / engines.size());
+            out.add(new Lane(sweep, grouped.get(i), share));
+            assigned += share;
+        }
+        for (int i = 0; i < count && assigned < MAX_REQUESTS; i++) {
+            out.get(i).quota = out.get(i).quota + 1;
+            assigned++;
+        }
+        return out;
+    }
+
+    /** 起线程与收线程：只有一个源就不值得起线程，那条路走的还是原来那条串行代码。 */
+    private static void runLanes(ArrayList<Lane> lanes) {
+        if (lanes.size() == 1) { lanes.get(0).run(); return; }
+        ArrayList<Thread> threads = new ArrayList<Thread>();
+        for (int i = 0; i < lanes.size(); i++) {
+            Thread thread = new Thread(lanes.get(i), "wordlite-search-" + (i + 1));
+            thread.setDaemon(true);
+            threads.add(thread);
+            thread.start();
+        }
+        for (int i = 0; i < threads.size(); i++) {
+            try {
+                threads.get(i).join();
+            } catch (InterruptedException error) {
+                /* 主线程被打断：让泳道在下一个检查点自己收手，不许留三条线程在下面继续写池子。 */
+                Thread.currentThread().interrupt();
+                for (int j = 0; j < lanes.size(); j++) lanes.get(j).sweep.stop = true;
+                return;
+            }
+        }
+    }
+
+    /** 逐源状态按设置里的源顺序重排：注记的顺序不许受并行完成顺序的影响。 */
+    private static LinkedHashMap<String, Boolean> orderedFlags(ArrayList<String> engines,
+                                                               LinkedHashMap<String, Boolean> from) {
+        LinkedHashMap<String, Boolean> out = new LinkedHashMap<String, Boolean>();
+        for (int i = 0; i < engines.size(); i++)
+            if (Boolean.TRUE.equals(from.get(engines.get(i)))) out.put(engines.get(i), Boolean.TRUE);
+        return out;
     }
 
     /**

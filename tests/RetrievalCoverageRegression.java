@@ -31,6 +31,8 @@ public final class RetrievalCoverageRegression {
     private static final LinkedHashMap<String, AtomicInteger> HITS = new LinkedHashMap<String, AtomicInteger>();
     private static String base = "";
     private static HttpServer server;
+    /** 桩侧的执行线程池：并发回话用的，必须是守护线程并在收尾时关掉，否则它会钉着 JVM 不走。 */
+    private static java.util.concurrent.ExecutorService stubPool;
     /** 桩一次请求回几条候选：真源按 per-page 供货，场景自己定这个数。 */
     private static int responseSize = 12;
     /** semantic-scholar 是否改用「万能句」夹具：题名摘要与检索词零共同词。 */
@@ -45,6 +47,14 @@ public final class RetrievalCoverageRegression {
     private static long slowMillis;
     /** 命中这些路径直接回 429，用来验限流不被误算成整轮不可用。 */
     private static final ArrayList<String> throttled = new ArrayList<String>();
+    /** 逐路径的桩耗时：慢源只许拖死自己这一路，不许把其余源一起拖死，所以慢要能慢在一条路上。 */
+    private static final LinkedHashMap<String, Long> SLOW_MILLIS = new LinkedHashMap<String, Long>();
+    /** 同时在飞的请求数与峰值：跨源并行是这一版的全部理由，必须直接量到，不许拿"整轮快了一点"当证据。 */
+    private static final AtomicInteger IN_FLIGHT = new AtomicInteger();
+    private static final AtomicInteger PEAK_IN_FLIGHT = new AtomicInteger();
+    /** 逐路径上一次被问的时刻，以及整轮里同源相邻两次提问最短的间隔：并行最容易破的就是这条限速。 */
+    private static final LinkedHashMap<String, Long> LAST_ASK = new LinkedHashMap<String, Long>();
+    private static long shortestGapMillis = Long.MAX_VALUE;
 
     private static void check(boolean ok, String message) {
         if (!ok) throw new AssertionError(message);
@@ -54,11 +64,33 @@ public final class RetrievalCoverageRegression {
 
     /** 记一次请求，返回它是该路径的第几次被问：桩靠这个数让每个窗口的候选都是新的。 */
     private static int record(String path) {
+        return entered(path);
+    }
+    /**
+     * 记账在锁里，慢桩的睡眠在锁外：睡在锁里等于桩自己把并行改成串行，那样峰值并发永远量不到 2，
+     * 下面那一组"跨源并行"的断言就成了永远为真的空话。
+     */
+    private static synchronized int entered(String path) {
+        long now = System.currentTimeMillis();
+        Long previous = LAST_ASK.get(path);
+        if (previous != null) shortestGapMillis = Math.min(shortestGapMillis, now - previous.longValue());
+        LAST_ASK.put(path, Long.valueOf(now));
         AtomicInteger counter = HITS.get(path);
         if (counter == null) { counter = new AtomicInteger(); HITS.put(path, counter); }
-        return counter.incrementAndGet();
+        int seq = counter.incrementAndGet();
+        int inflight = IN_FLIGHT.incrementAndGet();
+        if (inflight > PEAK_IN_FLIGHT.get()) PEAK_IN_FLIGHT.set(inflight);
+        return seq;
     }
-    private static int hits(String path) {
+    private static synchronized void left() { IN_FLIGHT.decrementAndGet(); }
+    /** 这条路径该睡多久：整轮一致的 slowMillis 与逐路径的 SLOW_MILLIS 取更慢的那一档。 */
+    private static synchronized long delayMillis(String path) {
+        Long per = SLOW_MILLIS.get(path);
+        return per == null ? slowMillis : Math.max(slowMillis, per.longValue());
+    }
+    private static synchronized int peakInFlight() { return PEAK_IN_FLIGHT.get(); }
+    private static synchronized long shortestGap() { return shortestGapMillis; }
+    private static synchronized int hits(String path) {
         AtomicInteger counter = HITS.get(path);
         return counter == null ? 0 : counter.intValue();
     }
@@ -73,7 +105,13 @@ public final class RetrievalCoverageRegression {
         return total;
     }
     private static void resetCounters() {
-        HITS.clear();
+        synchronized (RetrievalCoverageRegression.class) {
+            HITS.clear();
+            LAST_ASK.clear();
+            IN_FLIGHT.set(0);
+            PEAK_IN_FLIGHT.set(0);
+            shortestGapMillis = Long.MAX_VALUE;
+        }
     }
     private static void resetFixtures() {
         responseSize = 12;
@@ -82,6 +120,7 @@ public final class RetrievalCoverageRegression {
         sticky = false;
         midWindow = false;
         slowMillis = 0L;
+        SLOW_MILLIS.clear();
         throttled.clear();
         resetCounters();
     }
@@ -109,8 +148,9 @@ public final class RetrievalCoverageRegression {
         respondBytes(exchange, status, text.getBytes(StandardCharsets.UTF_8));
     }
     private static void respondBytes(HttpExchange exchange, int status, byte[] bytes) {
+        long wait = delayMillis(exchange.getRequestURI().getPath());
         try {
-            if (slowMillis > 0L) Thread.sleep(slowMillis);
+            if (wait > 0L) Thread.sleep(wait);
             if (!throttled.isEmpty() && throttled.contains(exchange.getRequestURI().getPath())) {
                 exchange.sendResponseHeaders(429, -1);
                 exchange.close();
@@ -122,6 +162,7 @@ public final class RetrievalCoverageRegression {
             out.write(bytes);
             out.close();
         } catch (Exception ignored) { }
+        left();
         exchange.close();
     }
     // ---- 回环桩 ----
@@ -189,7 +230,15 @@ public final class RetrievalCoverageRegression {
             record("/throttled");
             respond(exchange, 200, "{}");
         });
-        server.setExecutor(null);
+        /* 桩自己必须能并发回话：桩按默认单线程回话时，客户端再怎么并行，桩侧看到的峰值永远是 1，
+           那一组断言就成了测桩而不是测引擎。线程取守护线程，配合下面 finally 里的 shutdownNow，
+           免得这套回归把 JVM 钉在退出之前。 */
+        stubPool = java.util.concurrent.Executors.newFixedThreadPool(16, runnable -> {
+            Thread thread = new Thread(runnable, "stub-http");
+            thread.setDaemon(true);
+            return thread;
+        });
+        server.setExecutor(stubPool);
         server.start();
         base = "http://127.0.0.1:" + server.getAddress().getPort();
         PaperSources.setEndpoint("cnki", base + "/cnki");
@@ -610,6 +659,15 @@ public final class RetrievalCoverageRegression {
         check(capped.windowsRetrieved == 14, "第 14 个窗口只问得动前三个源，之后一道闸就落下来了");
         check(asked(capped, "cnki") == 14 && asked(capped, "arxiv") == 13,
                 "被牺牲的是最后一个窗口的尾部源，不是某个源整轮被砍");
+        int lowest = Integer.MAX_VALUE, highest = 0;
+        for (String engine : NINE) {
+            int times = asked(capped, engine);
+            check(times >= 1, engine + " 没有整轮被砍：照样问到了 " + times + " 次");
+            lowest = Math.min(lowest, times);
+            highest = Math.max(highest, times);
+        }
+        check(highest - lowest <= 1, "撞总配额时各源提问次数相差不超过一次（实测 " + lowest + "-" + highest
+                + "）：配额按泳道份额分，快泳道不许把慢泳道的份额花光");
         check(!capped.retrievalIncomplete, "取回了候选的截断轮次是部分完成，不是未完成");
         check(capped.retrievalPartial && capped.retrievalPartialReason.contains("相似率是下限"),
                 "被闸门截断的比率必须自己声明是下限");
@@ -764,6 +822,56 @@ public final class RetrievalCoverageRegression {
         check(paced.elapsedMillis >= 700L,
                 "同一源相邻两次提问之间真的隔开了一个完整间隔：" + paced.elapsedMillis + "ms");
     }
+
+    // ---- F 组：跨源并行。串行时最慢的那个源会把其余源的挂钟一起花掉，这是覆盖率的头号漏洞 ----
+
+    /** 三个源各睡 300ms：串行实现里永远只有一条请求在飞，并行必须一次量到三条。 */
+    private static void sourcesAskAtTheSameTime() {
+        resetFixtures();
+        SLOW_MILLIS.put("/cnki", Long.valueOf(300L));
+        SLOW_MILLIS.put("/cqvip", Long.valueOf(300L));
+        SLOW_MILLIS.put("/wanfang", Long.valueOf(300L));
+        DuplicateEngine.Report report = scan(thesis(200), new TextCorpus(),
+                engines("cnki", "cqvip", "wanfang"), limits(12, 4));
+        check(DuplicateEngine.MAX_LANES >= 3, "泳道上限至少 3，否则三个源永远碰不到一起");
+        check(peakInFlight() >= 3, "三条源同时在飞：峰值 " + peakInFlight() + " 条并发，串行实现里这个数永远是 1");
+        check(asked(report, "cnki") == 4 && asked(report, "cqvip") == 4 && asked(report, "wanfang") == 4,
+                "并行不改变每个源被问的次数：四扇窗口每个源照旧四次");
+        check(report.windowsRetrieved == 4, "四扇窗口全部问出去");
+        check(report.retrievalPartial && report.retrievalPartialReason.contains("按设置在"),
+                "六十七扇窗口只计划了四扇，这一轮照样要自认部分是，原因指向设置里的窗口数");
+    }
+
+    /** 一个慢源挂在一扇窗口上，其余源不许陪它一起等：这一条在串行实现里必输，因为它只能问出一次。 */
+    private static void slowSourceCannotStarveTheOthers() {
+        resetFixtures();
+        SLOW_MILLIS.put("/cqvip", Long.valueOf(1200L));
+        DuplicateEngine.searchMillis = 4000L;
+        PaperSources.Limits budget = limits(12, 12);
+        budget.timeoutSeconds = 2;
+        DuplicateEngine.Report report = scan(thesis(200), new TextCorpus(), engines("cnki", "cqvip"), budget);
+        DuplicateEngine.searchMillis = DuplicateEngine.MAX_SEARCH_MILLIS;
+        int fast = asked(report, "cnki"), slow = asked(report, "cqvip");
+        check(slow >= 1, "慢源一次也没被丢掉，只是问得少：" + slow + " 次");
+        check(fast >= 3 * slow, "慢源只许拖死自己这一路：快的问了 " + fast + " 次，慢的 " + slow + " 次");
+        check(report.windowsRetrieved >= 3 * Math.max(1, slow),
+                "慢源还在第一扇窗口上时，快源已经往前多问了好几扇：覆盖 " + report.windowsRetrieved + " 扇");
+        check(report.retrievalPartial && report.retrievalPartialReason.contains("检索时间已用满"),
+                "时间闸门截断的这一轮照样自认部分完成，原因指向时间");
+    }
+
+    /** 并行最容易破的就是"同一源两次提问之间隔 400ms"——那是给真机防封 IP 的，量的是桩看到的间隔。 */
+    private static void pacingHoldsAcrossLanes() {
+        resetFixtures();
+        DuplicateEngine.engineGapMillis = DuplicateEngine.MIN_ENGINE_GAP_MILLIS;
+        DuplicateEngine.Report report = scan(thesis(200), new TextCorpus(), nine(), limits(12, 6));
+        DuplicateEngine.engineGapMillis = 0L;
+        check(requests(report) == 9 * 6, "六个窗口九个源各问一次，总共 54 次请求：" + requests(report));
+        check(shortestGap() >= DuplicateEngine.MIN_ENGINE_GAP_MILLIS - 40L,
+                "四条泳道同时跑，同一源相邻两次提问仍隔满一个间隔：实测最短 " + shortestGap() + "ms");
+        check(peakInFlight() >= 2, "同源限速没把整轮退回串行：峰值 " + peakInFlight() + " 条并发");
+        check(report.windowsRetrieved == 6, "限速之下六个窗口照样全跑完");
+    }
     private static void cancelledAndPrivate(String documentText) {
         resetFixtures();
         ApiClient.Task task = new ApiClient.Task();
@@ -842,11 +950,15 @@ public final class RetrievalCoverageRegression {
             throttleCountsBySource();
             exhaustedSourceStopsAsking();
             sameSourceIsPaced();
+            sourcesAskAtTheSameTime();
+            slowSourceCannotStarveTheOthers();
+            pacingHoldsAcrossLanes();
             cancelledAndPrivate(thesis(3).paragraphs.get(0).text);
         } finally {
             DuplicateEngine.engineGapMillis = savedGap;
             DuplicateEngine.searchMillis = savedMillis;
             if (server != null) server.stop(0);
+            if (stubPool != null) stubPool.shutdownNow();
             PaperSources.resetEndpoints();
         }
         System.out.println("SUMMARY " + checks + " assertions passed; loopback-only network");
