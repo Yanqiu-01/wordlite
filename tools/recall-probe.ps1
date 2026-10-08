@@ -9,6 +9,7 @@
 #   pwsh tools/recall-probe.ps1                                    # RecallProbe, direct-first
 #   pwsh tools/recall-probe.ps1 -Probe CnkiFormProbe               # 知网检索式对比台
 #   pwsh tools/recall-probe.ps1 -Probe CqvipAlignProbe             # 维普文献号与摘要对不对行
+#   pwsh tools/recall-probe.ps1 -Probe OpenAlexFilterProbe -Proxy 127.0.0.1:7897   # OpenAlex 几种 filter 写法各自问回什么
 #   pwsh tools/recall-probe.ps1 -Proxy 127.0.0.1:7897 -Per 12      # 挂代理再量一遍
 #   pwsh tools/recall-probe.ps1 -Query "深度学习 图像分割" -Corpus tests/corpus/cnki-cross.txt
 #
@@ -16,7 +17,7 @@
 # the order), which is what a phone on plain mobile data does. A phone on the tether can carry the
 # proxy run too: adb reverse tcp:7897 tcp:7897, then -Proxy 127.0.0.1:7897.
 param(
-    [ValidateSet("RecallProbe", "CnkiFormProbe", "CqvipAlignProbe")]
+    [ValidateSet("RecallProbe", "CnkiFormProbe", "CqvipAlignProbe", "OpenAlexFilterProbe")]
     [string]$Probe = "RecallProbe",
     [string]$Proxy = "",
     [int]$Per = 12,
@@ -24,6 +25,9 @@ param(
     [string]$Query = "碳化硅 瞬态液相扩散焊 界面组织 中间层 接头性能",
     [string]$Corpus = "tests/corpus/real-prose.txt",
     [int]$Seeds = 4,
+    [string]$Docx = "tests/samples/input-liu.docx",
+    [int]$Terms = 6,
+    [int]$Windows = 12,
     [string]$JavaHome = ""
 )
 $ErrorActionPreference = "Stop"
@@ -31,6 +35,7 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 if ($Probe -ne "RecallProbe" -and -not (Test-Path "tests/$Probe.java")) { throw "no such probe: tests/$Probe.java" }
 if ($Probe -eq "RecallProbe" -and -not (Test-Path $Corpus)) { throw "no such filler corpus: $Corpus" }
+if ($Probe -eq "OpenAlexFilterProbe" -and -not (Test-Path $Docx)) { throw "no such manuscript: $Docx" }
 if ($JavaHome -and (Test-Path (Join-Path $JavaHome "bin/javac.exe"))) {
     $env:JAVA_HOME = $JavaHome
     $env:PATH = (Join-Path $JavaHome "bin") + ";" + $env:PATH
@@ -51,7 +56,9 @@ $argv = switch ($Probe) {
     "RecallProbe"     { @($Proxy, $Per, $Engines, $Query, $Corpus, $Seeds) }
     "CnkiFormProbe"   { @($(if ($Proxy) { $Proxy } else { "127.0.0.1:7897" }), $Per, $Query) }
     "CqvipAlignProbe" { @($Query) }
+    "OpenAlexFilterProbe" { @($Docx, $Proxy, $Windows, $Per, $Terms) }
 }
 Write-Host ("== {0} (live) ==" -f $Probe) -ForegroundColor Cyan
-& java "-Dfile.encoding=UTF-8" -classpath $classes "com.rikkahub.wordlite.$Probe" @argv
+$cp = if ($Probe -eq "OpenAlexFilterProbe") { "$classes;$android" } else { $classes }
+& java "-Dfile.encoding=UTF-8" -classpath $cp "com.rikkahub.wordlite.$Probe" @argv
 exit $LASTEXITCODE
