@@ -27,6 +27,10 @@ public final class DetectRegression {
     private static byte[] lastBinaryBody = new byte[0];
     /** tests/fixture-cidcmap.pdf：一张 CID 字体自带的 cmap，真值是铜焊图陆那四个字。 */
     private static byte[] oaPdf = new byte[0];
+    /** tests/fixture-gb1-gb1.pdf：只有 Adobe-GB1 的 CID，没有 ToUnicode 也没有内嵌字体，随包表才读得出。 */
+    private static byte[] gb1Pdf = new byte[0];
+    /** 上面那份夹具的真值（由 tests/make_cid_cmap_fixture.py 的构造决定）。 */
+    private static final String GB1_TRUTH = "碳纳米管网络在180℃下大量自组装成一根，孔隙率随之上升。";
     private static String lastContentType = "";
     private static void check(boolean ok, String message) {
         if (!ok) throw new AssertionError(message);
@@ -137,11 +141,12 @@ public final class DetectRegression {
         /* 期刊官网自己发 PDF 的那一路：字节进、正文出，全走回环，不碰真网。 */
         server.createContext("/oa/", exchange -> {
             record("/oa", queryOf(exchange));
+            byte[] body = exchange.getRequestURI().getPath().endsWith("gb1.pdf") ? gb1Pdf : oaPdf;
             try {
                 exchange.getResponseHeaders().set("Content-Type", "application/pdf");
-                exchange.sendResponseHeaders(200, oaPdf.length);
+                exchange.sendResponseHeaders(200, body.length);
                 OutputStream out = exchange.getResponseBody();
-                out.write(oaPdf);
+                out.write(body);
                 out.close();
             } catch (Exception ignored) { }
             exchange.close();
@@ -243,6 +248,9 @@ public final class DetectRegression {
             respond(exchange, 200, "{}");
         });
         oaPdf = binary("tests/fixture-cidcmap.pdf");
+        gb1Pdf = binary("tests/fixture-gb1-gb1.pdf");
+        // 随包的字符集表：app 里由 ApiWorkflow 从 assets 装载，这里按同一个入口从包内文件装。
+        CidUnicodeTables.install(new java.io.FileInputStream("app/src/main/assets/cmaps/adobe-gb1.cid"));
         server.start();
         String base = "http://127.0.0.1:" + server.getAddress().getPort();
         try {
@@ -258,6 +266,7 @@ public final class DetectRegression {
             unreachable(base);
             reports();
             unfinishedReport();
+            cidTableBody(base);
         } finally {
             server.stop(0);
             PaperSources.resetEndpoints();
@@ -887,6 +896,44 @@ public final class DetectRegression {
         TextSelection only = TextSelection.all(empty);
         check(DuplicateEngine.citationSpans(only, empty).length == 0 && DuplicateEngine.citationSpans(null, document).length == 0,
                 "empty selection yields no citation spans");
+    }
+
+    /**
+     * 抓回来的 OA 正文只写着 Adobe-GB1 的 CID（方正那一族）时，查重必须还拿得到可比正文：
+     * 这就是"查重率 0%"里最硬的那一段——抓回来的 PDF 一个字都读不出，判据再好也比不出东西。
+     */
+    private static void cidTableBody(String base) throws Exception {
+        PaperSources.Candidate candidate = new PaperSources.Candidate();
+        candidate.source.engine = "openalex";
+        candidate.source.title = "碳纳米管自组装";
+        candidate.fullTextUrl = base + "/oa/gb1.pdf";
+        int before = totalHits();
+        String body = PaperSources.fullText(candidate, limits(), null);
+        check(body.contains(GB1_TRUTH) && totalHits() == before + 1,
+                "只有 Adobe-GB1 码位的 OA PDF 也拿到正文：" + body.trim().length() + " 字");
+
+        // 抓回来的正文进语料、稿子里抄一句：判据必须报出非零，不能因为"读不出"冒充"没重复"。
+        TextCorpus corpus = new TextCorpus();
+        TextCorpus.Source source = new TextCorpus.Source();
+        source.engine = "openalex";
+        source.title = "碳纳米管自组装";
+        corpus.add(source, body + "保温时间过长会让反应层增厚，接头强度反而下降。");
+        DocxDocument document = new DocxDocument();
+        add(document, paragraph(0, GB1_TRUTH + "实验在三种温度下各重复五次，取样位置固定在接头中心两侧。", "", ""));
+        DuplicateEngine.Report report = DuplicateEngine.scan(TextSelection.all(document), corpus,
+                false, null, null, null, null);
+        int spans = 0;
+        for (TextCorpus.Hit hit : report.hits) if (hit.source == source) spans++;
+        check(report.overallRate > 0 && spans > 0,
+                "抄了这份正文的一句就要判出来：头条 " + report.overallRate + "% / 落到这篇的命中 " + spans + " 段");
+
+        // 没有这张表就是改前的样子：抓回来的正文是空的，比对没有可比正文（当年印 0.13% 的那个坑）。
+        CidUnicodeTables.uninstall();
+        int beforeNoTable = totalHits();
+        String empty = PaperSources.fullText(candidate, limits(), null);
+        CidUnicodeTables.install(new java.io.FileInputStream("app/src/main/assets/cmaps/adobe-gb1.cid"));
+        check(empty.trim().isEmpty() && totalHits() == beforeNoTable + 1,
+                "撤掉表以后这份 PDF 一个正文字都读不出（这就是当年 0% 的来路）");
     }
 
     private static DocxDocument essay() {

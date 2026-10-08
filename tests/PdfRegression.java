@@ -68,6 +68,65 @@ public final class PdfRegression {
                 new File("tests/fixture-cidcmap-partial.pdf").toPath()));
         check(partial.text.equals("\u94dc\u710a\n") && partial.undecodable && partial.undecodableGlyphs == 2,
                 "\u5b57\u5f62\u53f7\u5bf9\u4e0d\u4e0a cmap \u7684\u90a3\u4e24\u4e2a\u5b57\u4e0d\u731c\u5b57\uff0c\u53ea\u628a\u5b83\u4eec\u6309\u4e2a\u6570\u8bb0\u8fdb\u8d26");
+        /* ---------- 随包字符集表：方正那一族期刊 PDF 的码到字（真值由夹具构造决定）----------
+           夹具由 tests/make_cid_cmap_fixture.py 生成，字形码取自 Adobe 公布的 UniGB-UTF16-H。 */
+        String cmapAsset = "app/src/main/assets/cmaps/adobe-gb1.cid";
+        check(new File(cmapAsset).isFile(), "随包的 Adobe-GB1 表在包里（" + cmapAsset + "）");
+        CidUnicodeTables tables = CidUnicodeTables.install(new java.io.FileInputStream(cmapAsset));
+        check(tables.describe().startsWith("Adobe-GB1="), "装进来的是 Adobe-GB1 那一套：" + tables.describe());
+        CidUnicodeTables.Section gb1 = CidUnicodeTables.section("Adobe", "GB1");
+        check(gb1 != null && gb1.slots() > 30000, "表覆盖 3 万多个 CID：" + (gb1 == null ? 0 : gb1.slots()));
+        check("中".equals(gb1.get(4559)) && "一".equals(gb1.get(4162))
+                        && "册".equals(gb1.get(1192)) && "碳".equals(gb1.get(3599)) && "网".equals(gb1.get(3753)),
+                "抽查 CID：4559=中、4162=一、1192=册、3599=碳、3753=网（码位取自 Adobe 公布的 UniGB-UTF16-H）");
+        check(String.valueOf(Character.toChars(0x2CE93)).equals(gb1.get(30571)),
+                "U+FFFF 以上的 CID 也查得出（CID 30571 = U+2CE93，走代理对那条路）");
+        check(gb1.get(0) == null && gb1.get(99999) == null && gb1.get(-1) == null,
+                "notdef 与越界的 CID 返回空，绝不猜字");
+        check(CidUnicodeTables.section("Adobe", "Identity") == null
+                        && CidUnicodeTables.section("Microsoft", "GB1") == null
+                        && CidUnicodeTables.section(null, "GB1") == null,
+                "Ordering=Identity 或不是 Adobe 的 Registry 一律拿不到表");
+
+        String gb1Truth = "碳纳米管网络在180℃下大量自组装成一根，孔隙率随之上升。";
+        PdfFile.Extracted fromCid = PdfFile.extractText(java.nio.file.Files.readAllBytes(
+                new File("tests/fixture-gb1-gb1.pdf").toPath()));
+        check(fromCid.text.contains(gb1Truth),
+                "没有 ToUnicode、没有内嵌字体的 GB1 字体拼得出正文：" + fromCid.text.trim());
+        check(!fromCid.undecodable && fromCid.undecodableGlyphs == 0, "这份 PDF 一个字都没丢");
+        check(fromCid.cidTableChars == gb1Truth.length() && "GB1".equals(fromCid.cidTableOrderings),
+                "回执说清补回多少字、查的哪套表：" + fromCid.cidTableChars + " 字 / " + fromCid.cidTableOrderings);
+
+        PdfFile.Extracted radical = PdfFile.extractText(java.nio.file.Files.readAllBytes(
+                new File("tests/fixture-gb1-radical.pdf").toPath()));
+        check(radical.text.contains("一册") && radical.text.indexOf('\u2f00') < 0,
+                "Adobe 官方把 CID 4162 写成康熙部首\u2f00，这里必须读成汉字本体「一」（实测读出：" + radical.text.trim() + "）");
+        check(radical.undecodableGlyphs == 1, "CID 0（notdef）按读不出记账，不许蒙一个字：" + radical.undecodableGlyphs);
+
+        PdfFile.Extracted identity = PdfFile.extractText(java.nio.file.Files.readAllBytes(
+                new File("tests/fixture-gb1-identity.pdf").toPath()));
+        check(identity.text.trim().isEmpty() && identity.undecodableGlyphs == gb1Truth.length(),
+                "同一批码声明 Ordering=Identity 时不许套表：" + identity.undecodableGlyphs + " 个字全按读不出记账");
+
+        // 把表撤掉必须退回改前那一版：这一路字一个都不许读出来（钉住"是这张表在起作用"）
+        CidUnicodeTables.uninstall();
+        check(CidUnicodeTables.active() == null, "卸载之后没有表可用");
+        PdfFile.Extracted noTable = PdfFile.extractText(java.nio.file.Files.readAllBytes(
+                new File("tests/fixture-gb1-gb1.pdf").toPath()));
+        check(noTable.text.trim().isEmpty() && noTable.undecodableGlyphs == gb1Truth.length()
+                        && noTable.undecodableFonts.contains("FZCIDSJW"),
+                "没有表时那一路字退回读不出，并报出卡在哪个字体：" + noTable.undecodableFonts);
+        CidUnicodeTables.install(new java.io.FileInputStream(cmapAsset));
+
+        /* 两页都用 /C1 这个名字、指的却是两张脸：按资源名缓存字体会让第二页整页丢字
+           （真刊 scichina.pdf 就是这么少读 2,447 字：整份只读出 1,846 字，真值 9,414 字）。 */
+        PdfFile.Extracted collide = PdfFile.extractText(java.nio.file.Files.readAllBytes(
+                new File("tests/fixture-font-key-collision.pdf").toPath()));
+        check(collide.pages == 2 && collide.text.contains("三维碳纳米管网络状结构")
+                        && collide.text.contains("接头导电率保持在两者之间") && collide.undecodableGlyphs == 0,
+                "同名字体名跨页不串味：第一页查表、第二页用自带 cmap，两页都要读出来（" + collide.text.trim().replace("\n", " / ") + "）");
+        check(!collide.text.contains(gb1Truth), "串味时才会出现的串读：第二页不许拿第一页的表去解自己的字形码");
+
         System.out.println("SUMMARY " + checks + " PDF range/metadata assertions passed; Android native rendering not simulated");
     }
 }

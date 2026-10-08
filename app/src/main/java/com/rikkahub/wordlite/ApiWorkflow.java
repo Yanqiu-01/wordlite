@@ -240,6 +240,8 @@ public final class ApiWorkflow {
         final DocxDocument document = host.document();
         // 随包的离线 AIGC 模型在查重线程外装载一次；不达标时 engaged() 为 false，一个百分比都不印。
         AigcNgramModel.loadFromAssets(activity);
+        // 随包的 Adobe-GB1 表也装载一次：方正那一族期刊 PDF 的码到字全靠它，缺表时那一路字按读不出算。
+        CidUnicodeTables.loadFromAssets(activity);
         final ApiClient.Task task = begin(aigcOnly ? "AIGC 检测" : useWeb ? "联网查重" : "本机查重");
         final EngineSettings options = engine.copy();
         final boolean wantWeb = useWeb && options.web && !aigcOnly;
@@ -398,6 +400,8 @@ public final class ApiWorkflow {
     /** 下载一篇开放获取 PDF 并导入自建库。下载与导入的成败都在最后那句提示里，一个字都不吹。 */
     private void importFromUrl(final DuplicateEngine.Downloadable pick) {
         if (job != null) { toast("有任务在跑，稍后再试"); return; }
+        // 导入那一步也要这张表：PDF 是在 CorpusImport 里解析的，没跑过查重时它可能还没装载。
+        CidUnicodeTables.loadFromAssets(activity);
         new AlertDialog.Builder(activity).setTitle("下进自建库")
                 .setMessage(pick.title + "\n\n下载这篇开放获取 PDF 并导入自建库？导入后它按正文参与下一次比对。")
                 .setPositiveButton("下载", (dialog, which) -> {

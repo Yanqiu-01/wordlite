@@ -9,7 +9,18 @@ import java.nio.file.Files;
  */
 public final class PdfExtractProbe {
     public static void main(String[] args) throws Exception {
-        long bytes = 0L, chars = 0L, cjk = 0L, lost = 0L, ms = 0L, ops = 0L;
+        java.util.ArrayList<String> files = new java.util.ArrayList<String>();
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].equals("-cmap")) {
+                CidUnicodeTables.install(new java.io.FileInputStream(args[++i]));
+            } else if (!args[i].equals("-no-cmap")) {
+                files.add(args[i]);
+            }
+        }
+        System.out.println("CID_TABLE " + (CidUnicodeTables.active() == null
+                ? "not installed (改前状态)" : "installed " + CidUnicodeTables.active().describe()));
+        args = files.toArray(new String[0]);
+        long bytes = 0L, chars = 0L, cjk = 0L, lost = 0L, ms = 0L, ops = 0L, cid = 0L;
         for (String path : args) {
             File file = new File(path);
             byte[] data = Files.readAllBytes(file.toPath());
@@ -19,15 +30,15 @@ public final class PdfExtractProbe {
             long readable = count(out.text);
             long han = countHan(out.text);
             bytes += data.length; chars += readable; cjk += han; ms += cost; ops += out.textOps;
-            lost += out.undecodableGlyphs;
+            lost += out.undecodableGlyphs; cid += out.cidTableChars;
             System.out.printf(java.util.Locale.US,
-                    "FILE %-24s bytes=%-9d pages=%-4d textOps=%-6d chars=%-6d hanzi=%-6d lost=%-6d ms=%d  fonts=[%s]%n",
+                    "FILE %-24s bytes=%-9d pages=%-4d textOps=%-6d chars=%-6d hanzi=%-6d lost=%-6d 随包表=%-6d ms=%d 表=[%s] 卡住的字体=[%s]%n",
                     file.getName(), data.length, out.pages, out.textOps, readable, han,
-                    out.undecodableGlyphs, cost, out.undecodableFonts);
+                    out.undecodableGlyphs, out.cidTableChars, cost, out.cidTableOrderings, out.undecodableFonts);
         }
         System.out.printf(java.util.Locale.US,
-                "TOTAL files=%d bytes=%d textOps=%d chars=%d hanzi=%d lost=%d ms=%d%n",
-                args.length, bytes, ops, chars, cjk, lost, ms);
+                "TOTAL files=%d bytes=%d textOps=%d chars=%d hanzi=%d lost=%d 随包表=%d ms=%d%n",
+                args.length, bytes, ops, chars, cjk, lost, cid, ms);
     }
 
     /** 可读正文按非空白字符数，和 PyMuPDF 那份真值同口径去比。 */

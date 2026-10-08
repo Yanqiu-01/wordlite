@@ -1,0 +1,42 @@
+%PDF-1.4
+% identity ordering: no external table may be applied
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 220] /Resources << /Font << /C1 4 0 R >> >> /Contents 6 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type0 /BaseFont /FZCIDSJW--GB1-0 /Encoding /Identity-H /DescendantFonts [5 0 R] >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /CIDFontType0 /BaseFont /FZCIDSJW--GB1-0 /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 7 0 R /DW 1000 >>
+endobj
+6 0 obj
+<< /Length 148 >>
+stream
+BT /C1 11 Tf 20 150 Td <0E0F0B2C0ADC07350EA90A8E111D00120019001100A50F2F05760A0812311246120D04EE104206F4011109640F230A710DDB11AD0D080D360062> Tj ET
+
+endstream
+endobj
+7 0 obj
+<< /Type /FontDescriptor /FontName /FZCIDSJW--GB1-0 /Flags 4 /FontBBox [-100 -200 1000 900] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000063 00000 n 
+0000000112 00000 n 
+0000000169 00000 n 
+0000000295 00000 n 
+0000000418 00000 n 
+0000000606 00000 n 
+0000000805 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+981
+%%EOF

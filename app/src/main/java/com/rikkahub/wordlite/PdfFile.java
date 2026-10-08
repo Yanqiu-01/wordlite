@@ -78,6 +78,9 @@ public final class PdfFile {
         public int undecodableGlyphs;
         /** 那些映射不出字的字体叫什么（最多三个短名）：导入回执与报告用它说清"少的是哪一路字"。 */
         public String undecodableFonts = "";
+        /** 靠随包字符集表（Adobe-GB1 那一族）补回的字形数：说清"少字"还剩多少、补的是哪一套表。 */
+        public int cidTableChars;
+        public String cidTableOrderings = "";
     }
 
     /** 抽正文。不是 PDF / 已加密 / 结构坏了抛 IOException；"没有文字层"用 textOps == 0 表示。 */
@@ -134,6 +137,13 @@ public final class PdfFile {
             if (line.length() + font.length() + 2 > 120) return;
             out.undecodableFonts = line.length() == 0 ? font : line + ", " + font;
         }
+        /** 用过的随包字符集表（最多两套，短名）：回执里要能说"这几个字是查 Adobe-GB1 补的"。 */
+        void noteOrdering(String ordering) {
+            String name = ordering == null ? "" : ordering.trim();
+            if (name.isEmpty() || out.cidTableOrderings.contains(name) || out.cidTableOrderings.length() > 60) return;
+            out.cidTableOrderings = out.cidTableOrderings.length() == 0
+                    ? name : out.cidTableOrderings + ", " + name;
+        }
     }
 
     /**
@@ -148,6 +158,15 @@ public final class PdfFile {
         int[] glyphs;
         /** /CIDToGIDMap 给了流时的那张表；null 且 below 的 identity 为真时按"码即字形号"用。 */
         int[] cidToGid;
+        /**
+         * 随包的字符集表：PDF 自己在 /CIDSystemInfo 里声明了 Registry=Adobe、Ordering=GB1，
+         * 而码到字的表又不在文件里（没有 ToUnicode、没有内嵌字体）时，用它把 CID 换成字。
+         * 只有 /Encoding 是 Identity-H/V（码就是 CID）才会挂上，见 fontFor。
+         */
+        CidUnicodeTables.Section cidTable;
+        String cidOrdering = "";
+        /** 这一路靠随包表补回的字形数，报完一次清一次，免得重复计。 */
+        int cidTableGlyphs;
         Charset charset;
         boolean twoByte;
         boolean missing;
@@ -156,7 +175,7 @@ public final class PdfFile {
         String decode(byte[] raw) {
             if (raw == null || raw.length == 0) return "";
             int step = twoByte ? 2 : 1;
-            if (toUnicode != null || glyphs != null) {
+            if (toUnicode != null || glyphs != null || cidTable != null) {
                 StringBuilder out = new StringBuilder();
                 for (int i = 0; i + step <= raw.length; i += step) {
                     int code = 0;
@@ -171,12 +190,26 @@ public final class PdfFile {
             if (twoByte && raw.length % 2 != 0) return new String(raw, 0, raw.length - 1, charset);
             return new String(raw, charset);
         }
-        /** 码 → 字：先问 ToUnicode，它没写这个码才问字体自带的 cmap。两个都没有返回 null。 */
+        /**
+         * 码 → 字，三层按可信度排：这份 PDF 自己写的 ToUnicode 最优先，其次是字体自带的 cmap，
+         * 最后才是随包的字符集表（只补前两层都没写的那些码）。三层都给不出返回 null。
+         */
         private String lookup(int code) {
             if (toUnicode != null) {
                 String mapped = toUnicode.get(Integer.valueOf(code));
                 if (mapped != null) return mapped;
             }
+            String glyph = glyphChar(code);
+            if (glyph != null) return glyph;
+            if (cidTable != null) {
+                String mapped = cidTable.get(code);
+                if (mapped != null) cidTableGlyphs++;
+                return mapped;
+            }
+            return null;
+        }
+        /** 内嵌 TrueType 的 cmap 倒排表：字形号 → 字。没内嵌或这个号没字返回 null。 */
+        private String glyphChar(int code) {
             if (glyphs == null || glyphs.length == 0) return null;
             int gid = code;
             if (cidToGid != null) gid = code >= 0 && code < cidToGid.length ? cidToGid[code] : 0;
@@ -217,6 +250,14 @@ public final class PdfFile {
         }
 
         static String nameOf(Object value) { return value instanceof Name ? ((Name) value).value : null; }
+
+        /** 名字和字面串都当文本读：/CIDSystemInfo 里的 (Adobe)、(GB1) 写的是字面串，不是名字。 */
+        static String textOf(Object value) {
+            if (value instanceof Name) return ((Name) value).value;
+            if (value instanceof Bin)
+                return new String(((Bin) value).bytes, StandardCharsets.ISO_8859_1).trim();
+            return null;
+        }
 
         static float numOf(Object value) {
             return value instanceof Number ? ((Number) value).floatValue() : Float.NaN;
@@ -481,13 +522,7 @@ public final class PdfFile {
                     if (array instanceof List) for (Object item : (List<?>) array) show(resolve(item), font, state);
                 } else if (operator.equals("Tf") && size >= 2) {
                     String key = nameOf(operands.get(size - 2));
-                    if (key != null) {
-                        font = state.fonts.get(key);
-                        if (font == null) {
-                            font = fontFor(key, resources);
-                            state.fonts.put(key, font);
-                        }
-                    }
+                    if (key != null) font = fontFor(key, resources, state);
                 } else if (operator.equals("Td") || operator.equals("TD")) {
                     if (size >= 2) {
                         state.penX += numOf(operands.get(size - 2));
@@ -550,6 +585,11 @@ public final class PdfFile {
                 font.unmapped = 0;
                 state.noteFont(font.name);
             }
+            if (font.cidTableGlyphs > 0) {
+                state.out.cidTableChars += font.cidTableGlyphs;
+                state.noteOrdering(font.cidOrdering);
+                font.cidTableGlyphs = 0;
+            }
             if (decoded.length() == 0) { state.out.undecodable |= font.missing; return; }
             if (state.lineY != null && Math.abs(state.penY - state.lineY.floatValue()) > 0.75f) state.text.append('\n');
             state.lineY = Float.valueOf(state.penY);
@@ -557,11 +597,15 @@ public final class PdfFile {
             if (state.text.length() >= state.limit) state.reachedLimit = true;
         }
 
-        private Font fontFor(String key, Dict resources) {
-            Font font = new Font();
+        private Font fontFor(String key, Dict resources, PageState state) {
             Dict fonts = resources == null ? null : dictOf(resources.values.get("Font"));
             Dict descriptor = fonts == null ? null : dictOf(fonts.values.get(key));
-            if (descriptor == null) { font.missing = true; return font; }
+            if (descriptor == null) { Font broken = new Font(); broken.missing = true; return broken; }
+            /* 缓存的键是解析到的那个字体对象本身，不是资源名：/C2_1 在这一页是宋体、下一页可能是楷体，
+               按资源名缓存会让后一页整页的字丢掉——实测一份 6 页期刊 PDF 因此只剩 1,846 字（真值 9,414）。 */
+            Font cached = state.fonts.get(descriptor);
+            if (cached != null) return cached;
+            Font font = new Font();
             String base = nameOf(descriptor.values.get("BaseFont"));
             font.name = base == null || base.trim().isEmpty() ? key : base.trim();
             font.twoByte = "Type0".equals(nameOf(descriptor.values.get("Subtype")));
@@ -603,6 +647,19 @@ public final class PdfFile {
                 if (!identity && map instanceof StreamObj) font.cidToGid = cidToGid((StreamObj) map);
                 if (identity || font.cidToGid != null) font.glyphs = glyphMap(holder);
             }
+            if (font.twoByte) {
+                /* 只有 /Encoding 是 Identity-H/V 时"码就是 CID"才成立；换成 GBK-EUC-H 这类具名 CMap，
+                   码是字节串，套任何字符集表都成了猜字。字符集由这份 PDF 自己在 /CIDSystemInfo 里声明，
+                   它没声明 Adobe/GB1 就不许套。 */
+                String codeSpace = encoding == null ? "" : encoding.toUpperCase(java.util.Locale.US);
+                if (codeSpace.startsWith("IDENTITY-")) {
+                    Dict info = dictOf(holder.values.get("CIDSystemInfo"));
+                    font.cidTable = CidUnicodeTables.section(info == null ? null : textOf(info.values.get("Registry")),
+                            info == null ? null : textOf(info.values.get("Ordering")));
+                    font.cidOrdering = font.cidTable == null ? "" : font.cidTable.ordering;
+                }
+            }
+            state.fonts.put(descriptor, font);
             return font;
         }
 
