@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -42,9 +43,57 @@ public final class LocalRewriter {
 
     private LocalRewriter() { }
 
+    /**
+     * Measurement-only per-rule tally. The product path never installs it: TALLY stays null and every
+     * recording point below is one null check, so the rewrite output is byte-identical with or without.
+     *
+     * <p>Why it exists: "how many content words in this flagged span actually got swapped, and which
+     * rule refused the rest" cannot be read back out of the rewritten text. The rules have to report it.
+     * rewrite() runs each rule's audit scan once over the masked paragraph, so a rule's numbers describe
+     * that paragraph once instead of once per candidate pass. Cells per rule, in this order: legal match
+     * points, points dropped by island mismatch, points dropped by the reject list, points dropped by the
+     * clause-start guard, legal points past the times cap, legal points past the single point a depth-1
+     * pass may take. Guard cells count every point the scan sees, not just the ones up to the loop's
+     * break, so they answer "what is this guard costing" rather than "where did this call stop".
+     * Which substitutions survived into the adopted text is measured outside, by comparing the adopted
+     * paragraph with the original one word at a time.
+     */
+    static final class Tally {
+        final LinkedHashMap<String, int[]> rows = new LinkedHashMap<String, int[]>();
+        final ArrayList<String[]> masked = new ArrayList<String[]>();
+        int seen, offered, rejectedValidity;
+
+        int[] row(String key) {
+            int[] row = rows.get(key);
+            if (row == null) { row = new int[REASONS.length]; rows.put(key, row); }
+            return row;
+        }
+
+    }
+    /** Column names of Tally.rows, in order. */
+    static final String[] REASONS = { "legal points", "island mismatch", "reject list",
+            "clause-start guard", "past times cap", "single-point rule" };
+    private static Tally TALLY;
+    private static final int CELL_LEGAL = 0, CELL_ISLAND = 1, CELL_REJECT = 2,
+            CELL_CLAUSE = 3, CELL_PAST_CAP = 4, CELL_SINGLE = 5;
+
+    static void startTally() { TALLY = new Tally(); }
+
+    static Tally stopTally() { Tally out = TALLY; TALLY = null; return out; }
+
+    /** Read-only view of the lexical table for the measurement harness: {strategy, from, to, banBefore, banAfter}. */
+    static List<String[]> lexicalTable() {
+        ArrayList<String[]> out = new ArrayList<String[]>();
+        for (String[] row : LEXICAL) out.add(row.clone());
+        return out;
+    }
+
     private interface Rule {
         String apply(String source);
         String apply(String source, int times);
+        /** Measurement harness only: name (empty = not tallied) and the point-by-point audit scan. */
+        String name();
+        void scan(String source, int times);
     }
 
     private static final class Entry {
@@ -60,6 +109,7 @@ public final class LocalRewriter {
         private final String template;
         private final boolean clauseStart;
         private final Pattern rejects;
+        private String name = "";
         Regex(Pattern pattern, String template, boolean clauseStart, String rejects) {
             this.pattern = pattern;
             this.template = template;
@@ -70,6 +120,8 @@ public final class LocalRewriter {
         Regex(String regex, String template) { this(Pattern.compile(regex), template, false, ""); }
         Regex(String regex, String template, boolean clauseStart) { this(Pattern.compile(regex), template, clauseStart, ""); }
         Regex(String regex, String template, boolean clauseStart, String rejects) { this(Pattern.compile(regex), template, clauseStart, rejects); }
+        Regex named(String value) { name = value; return this; }
+        public String name() { return name; }
         public String apply(String source) { return once(source); }
 
         /**
@@ -98,6 +150,30 @@ public final class LocalRewriter {
             if (done == 0) return null;
             out.append(source, kept, source.length());
             return out.toString();
+        }
+
+        /**
+         * Harness only: walk every match point of this rule and let the rule itself say what stopped it.
+         * The scan keeps going where the real loops break, so the guard columns answer "what is this guard
+         * costing in total" instead of "where did this one call stop".
+         */
+        public void scan(String source, int times) {
+            if (TALLY == null || name.isEmpty()) return;
+            int[] row = TALLY.row(name);
+            int legal = 0, kept = 0;
+            Matcher matcher = pattern.matcher(source);
+            while (matcher.find()) {
+                if (matcher.end() <= matcher.start()) continue;
+                if (clauseStart && !atClauseStart(source, matcher.start())) { row[CELL_CLAUSE]++; continue; }
+                String replacement = expand(matcher, template);
+                if (replacement == null || !sameIslands(matcher.group(), replacement)) { row[CELL_ISLAND]++; continue; }
+                if (rejected(matcher.group())) { row[CELL_REJECT]++; continue; }
+                legal++;
+                if (kept < times) kept++;
+            }
+            row[CELL_LEGAL] += legal;
+            if (times > 1) row[CELL_PAST_CAP] += Math.max(0, legal - times);
+            else row[CELL_SINGLE] += Math.max(0, legal - 1);
         }
 
         /** One rule, one match point: the first legal match is rewritten, everything else stays put. */
@@ -380,6 +456,13 @@ public final class LocalRewriter {
         { "词汇", "高于", "大于", "", "" },
         { "词汇", "低于", "小于", "", "" },
         { "词汇", "受到", "承受", "接遭", "影响关注欢迎启发教育限制约束" },
+        // 下面三对是照着"改完仍在命中的段里换不掉的词位"加的（tests/RewriteCoverageAudit 表 2c）：
+        // 只挑同词性、且不碰数字/单位/程度/否定/比较方向/因果的。禁字是为了守住具体搭配——
+        // 出现在 / 出现时间（改成"产生"会把"什么时候被发现"变成"什么时候生成"）；
+        // 完全相同 / 不相同 / 均相同 / 相同SAC305（这些位置换成"同样"要么不通，要么改掉范围）。
+        { "词汇", "出现", "产生", "", "在时频，。；：、！？" },
+        { "词汇", "起到", "发挥", "", "" },
+        { "词汇", "相同", "同样", "全不致略本均", "点处A-Za-z0-9" },
         { "语气", "较小", "偏小", "", "" },
         { "语气", "偏小", "较小", "", "" },
         { "语气", "较大", "偏大", "", "" },
@@ -460,27 +543,31 @@ public final class LocalRewriter {
 
     private static Entry[] buildRules() {
         ArrayList<Entry> rules = new ArrayList<Entry>();
-        rules.add(new Entry("结构", new Regex(DUI_JINXING, "$2了$1", false, "")));
-        rules.add(new Entry("结构", new Regex(LE_OBJ, "对$2进行了$1", true, "")));
-        rules.add(new Entry("结构", new Regex(BEI_ACTIVE, "将$1$2$3", true, "")));
-        rules.add(new Entry("结构", new Regex(BEI_ADVERB, "", false, "")));
-        rules.add(new Entry("结构", new Regex(BA_JIANG, "将$1$2", false, "")));
-        rules.add(new Entry("结构", new Regex(TONGGUO_KEYI, "借助$2$3", true, "")));
-        rules.add(new Entry("结构", new Regex(TONGGUO_LAI, "借助$2$3", true, "")));
-        rules.add(new Entry("结构", new Regex(DI_DELETE, "$1$2", false, "")));
-        rules.add(new Entry("结构", new Regex(SHOU_YINGXIANG, "在$1的作用下", false, "")));
-        rules.add(new Entry("结构", new Regex(ZHE_SHI_Jieguo, "由$1造成", false, "")));
-        rules.add(new Entry("结构", new Regex(EN_REDUCED, " $1", false, "not|never")));
+        rules.add(new Entry("结构", new Regex(DUI_JINXING, "$2了$1", false, "").named("结构:对X进行了V")));
+        rules.add(new Entry("结构", new Regex(LE_OBJ, "对$2进行了$1", true, "").named("结构:X+V了O")));
+        rules.add(new Entry("结构", new Regex(BEI_ACTIVE, "将$1$2$3", true, "").named("结构:被字句改将字句")));
+        rules.add(new Entry("结构", new Regex(BEI_ADVERB, "", false, "").named("结构:被+副词")));
+        rules.add(new Entry("结构", new Regex(BA_JIANG, "将$1$2", false, "").named("结构:把改将")));
+        rules.add(new Entry("结构", new Regex(TONGGUO_KEYI, "借助$2$3", true, "").named("结构:通过X可以Y")));
+        rules.add(new Entry("结构", new Regex(TONGGUO_LAI, "借助$2$3", true, "").named("结构:通过X来Y")));
+        rules.add(new Entry("结构", new Regex(DI_DELETE, "$1$2", false, "").named("结构:删地")));
+        rules.add(new Entry("结构", new Regex(SHOU_YINGXIANG, "在$1的作用下", false, "").named("结构:受X影响")));
+        rules.add(new Entry("结构", new Regex(ZHE_SHI_Jieguo, "由$1造成", false, "").named("结构:这是X的结果")));
+        rules.add(new Entry("结构", new Regex(EN_REDUCED, " $1", false, "not|never").named("结构:英文减少式")));
         rules.add(new Entry("词序", new Regex(EN_PASSIVE, "$u4 $3 $l1 $2", false,
-                "that|which|who|whom|whose|and|but|because|when|where|while|not|have|has|used")));
+                        "that|which|who|whom|whose|and|but|because|when|where|while|not|have|has|used")
+                        .named("词序:英文被动")));
         for (String[] pair : COMPARATIVES) {
             rules.add(new Entry("词序", new Regex(NOT_CAUSATIVE_HEAD + "(" + HEAD_SPAN + ")" + TAIL_GUARD
-                    + pair[0] + "(" + SPAN_CHAR + "{1,12}?)" + CLAUSE_END, "$2" + pair[1] + "$1", true, "")));
+                    + pair[0] + "(" + SPAN_CHAR + "{1,12}?)" + CLAUSE_END, "$2" + pair[1] + "$1", true, "")
+                    .named("词序:" + pair[0] + "与" + pair[1] + "两侧对调")));
             rules.add(new Entry("词序", new Regex(NOT_CAUSATIVE_HEAD + "(" + HEAD_SPAN + ")" + TAIL_GUARD
-                    + pair[1] + "(" + SPAN_CHAR + "{1,12}?)" + CLAUSE_END, "$2" + pair[0] + "$1", true, "")));
+                    + pair[1] + "(" + SPAN_CHAR + "{1,12}?)" + CLAUSE_END, "$2" + pair[0] + "$1", true, "")
+                    .named("词序:" + pair[1] + "与" + pair[0] + "两侧对调")));
         }
         for (String[] row : LEXICAL)
-            rules.add(new Entry(row[0], new Regex(literal(row[1], row[3], row[4]), row[2], false, "")));
+            rules.add(new Entry(row[0], new Regex(literal(row[1], row[3], row[4]), row[2], false, "")
+                    .named(row[0] + ":" + row[1])));
         for (String[] row : EN_WORDS) {
             addEnglish(rules, row[0], row[1], row[2]);
             addEnglish(rules, row[0], capitalize(row[1], true), capitalize(row[2], true));
@@ -560,11 +647,20 @@ public final class LocalRewriter {
             int[] range = merged.get(i);
             working.append(text, cursor, range[0]);
             working.append((char) (PH_BASE + i));
-            parts.add(text.substring(range[0], range[1]));
+            String part = text.substring(range[0], range[1]);
+            parts.add(part);
+            if (TALLY != null) TALLY.masked.add(new String[]{ maskKind(part, terms), part });
             cursor = range[1];
         }
         working.append(text, cursor, text.length());
         return new Plan(working.toString(), parts);
+    }
+
+    /** Harness only: which kind of protected span this is. */
+    private static String maskKind(String part, List<String> terms) {
+        if (terms != null) for (int i = 0; i < terms.size(); i++) if (part.equals(terms.get(i))) return "术语";
+        if (part.length() > 0 && part.charAt(0) == '\u27e6') return "占位符";
+        return "数字/单位/型号/引用";
     }
 
     /** Validation reuses the caller's own semantics: one occurrence per island, in order, no stray marker. */
@@ -662,6 +758,8 @@ public final class LocalRewriter {
             ArrayList<Entry> hits = new ArrayList<Entry>();
             for (Entry entry : RULES) if (entry.rule.apply(plan.working) != null) hits.add(entry);
             if (hits.isEmpty()) return options;
+            // Harness only: one audit scan per rule per paragraph, at the depth this call will use.
+            if (TALLY != null) for (Entry entry : RULES) entry.rule.scan(plan.working, rounds);
             ArrayList<String> texts = new ArrayList<String>();
             ArrayList<String> labels = new ArrayList<String>();
             for (String[] recipe : RECIPES) collect(plan.working, hits, recipe, texts, labels, rounds);
@@ -673,10 +771,14 @@ public final class LocalRewriter {
                 }
             }
             TextProtection.Mask mask = maskOf(text);
+            if (TALLY != null) TALLY.seen += texts.size();
             for (int i = 0; i < texts.size() && options.size() < cap; i++) {
                 String candidate = plan.restore(texts.get(i));
                 if (candidate.equals(text) || holds(options, candidate)) continue;
-                if (!islandsIntact(mask, candidate) || brackets(candidate) > brackets(text)) continue;
+                if (!islandsIntact(mask, candidate) || brackets(candidate) > brackets(text)) {
+                    if (TALLY != null) TALLY.rejectedValidity++;
+                    continue;
+                }
                 Option option = new Option();
                 option.text = candidate;
                 option.strategy = labelOf(labels.get(i));
