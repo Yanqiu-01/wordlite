@@ -92,9 +92,15 @@ if (-not $SkipBuild) {
         & javac -nowarn -encoding UTF-8 -classpath $android -d $classes "@$list"
         if ($LASTEXITCODE -ne 0) { throw "javac failed for $name" }
         $dexDir = Join-Path $tmp "$name-dex"; New-Item -ItemType Directory -Force -Path $dexDir | Out-Null
+        # One jar into d8, not several hundred .class paths: expanded, that command line is over
+        # Windows' limit and the failure only reads as "the filename or extension is too long".
+        $packed = Join-Path $tmp "$name-classes.jar"
+        if (Test-Path $packed) { [System.IO.File]::Delete($packed) }
+        Push-Location $classes
+        try { & jar -cf $packed . } finally { Pop-Location }
+        if ($LASTEXITCODE -ne 0) { throw "jar failed for $name" }
         & java -cp (Join-Path $root "tools/d8.jar") com.android.tools.r8.D8 --min-api 23 `
-            --lib $android --release --output $dexDir `
-            @(Get-ChildItem -Recurse -File -Filter *.class $classes | ForEach-Object { $_.FullName })
+            --lib $android --release --output $dexDir $packed
         if ($LASTEXITCODE -ne 0) { throw "d8 failed for $name" }
         $dexes[$name] = Join-Path $dexDir "classes.dex"
     }
