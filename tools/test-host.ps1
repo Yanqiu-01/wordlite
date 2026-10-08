@@ -93,6 +93,8 @@ Add-Suite "AbstractLayerRegression" @("tests/corpus")
 Add-Suite "FontSubstitution"      @("tests/samples/input-liu.docx")
 # 结果页那句"手机有没有网"的判据：手机有网时不许说手机没网（真机被这句话坑过一次）。
 Add-Suite "NetworkStatusRegression" @()
+# 检索被挡的三档各说一句不同的话，并核住"可比正文 N 篇"那一轮报告一字不变。
+Add-Suite "RetrievalBlockageAudit" @("tests/samples/input-liu.docx")
 if (-not $SkipRealDoc) {
     $doc = if ($RealDocx) { $RealDocx } else { Join-Path $root "tests/samples/input-liu.docx" }
     if (Test-Path $doc) {

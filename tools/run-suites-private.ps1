@@ -58,6 +58,8 @@ $argMap = @{
     "ReviewRegression"            = @("tests/fixture.docx", "{out}/threaded-revisions.docx")
     "PdfRegression"               = @("{out}/metadata.pdf")
     "ZeroRateAudit"               = @("tests/samples/input-liu.docx", "tests/corpus/real-prose.txt", "tests/corpus/aigc-cartoon.txt")
+    # 三档检索被挡的用例：比的是结果页收尾那一行的字，要真样例文档切得出检索窗口。
+    "RetrievalBlockageAudit"      = @("tests/samples/input-liu.docx")
     "DetectionFloor"              = @("tests/corpus", "{out}/detection-floor-library")
     "AbstractLayerRegression"     = @("tests/corpus")
     "FontSubstitution"            = @("tests/samples/input-liu.docx")
