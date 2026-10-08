@@ -18,14 +18,14 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 量不出来按没过算。这一节是验收线，谁改排版引擎都拿它复核；复核由常驻的排版对账子代理执行，
 每轮改动重跑一遍，结果贴回本文与 `docs/edge-parity-baseline.md`。
 
-| # | 指标 | 量法（真值来源） | HEAD 复采（tag `revert-linear`，2026-10-09；engine head_sha `168fd1e`；与 tag `head898`、`autospace1` 逐项一字不差，见第 23.6 节） | 验收线 |
+| # | 指标 | 量法（真值来源） | HEAD 复采（tag `breakfix3`，2026-10-09；engine head_sha `e30c376` + 工作树 DocxTextLayout.java sha `BCEAA603`；第 1~4 条与 tag `revert-linear` 一字不差，第 5、6 条是本轮改动后的数，见第 24 节） | 验收线 |
 | --- | --- | --- | --- | --- |
 | 1 | 段落页归属 | `tools/word-parity.ps1`（Word 28 页真值 `artifacts/word/pages.tsv`） | 7 段错页 / 206（exact 96.6%，页差全是 -1，首个 para 121；28/28 页） | exact >= 99%，错页 <= 2 段 |
 | 2 | 逐行行高误差中位 | `artifacts/agent-typeset/line-height-rows.ps1`（Word 相邻基线距离，COM） | -0.767 px（n=91，Word 26.267 px） | 绝对值 <= 0.10 px |
 | 3 | 逐行行高误差 p90 | 同上（取 \|误差\| 的 p90） | 2.533 px（max 3.467） | <= 0.50 px |
 | 4 | 每页累计高度误差 | 同上 x 每页行数（Word 每页 27-35 行） | 0.79 行（最差队列 sz12 line300 snap=false 2.55 行） | <= 0.25 行 |
-| 5 | 逐行换行点一致率 | `tools/line-break-delta.ps1 -Stage report` | 114/165 = 69.1%（`autospace1`，改前 103/165 = 62.4%） | >= 90% |
-| 6 | 两端对齐右边界超出 1px 的行数 | `tools/edge-parity.ps1 -Impl new` | 0 / 32 | 0 / 32（守住，不许为了行高牺牲它） |
+| 5 | 逐行换行点一致率 | `tools/line-break-delta.ps1 -Stage report` | 115/165 = 69.7%（`breakfix3`；`autospace1` 114/165 = 69.1%，最早 103/165 = 62.4%） | >= 90% |
+| 6 | 两端对齐右边界超出 1px 的行数 | `tools/edge-parity.ps1 -Impl new` | **1 / 33（本轮退步：见第 24.4 节，退 1 行 = para 160 第 14 行 563.00 px 对 Word 564.53 px）** | 0 / 32（守住，不许为了行高牺牲它） |
 
 一条命令复采这六条：`pwsh tools/parity-six.ps1 -Tag <tag>`（真机采样 + 行高探针 + 三条对比，只调已有脚本、不重新定义量法；Word 真值走缓存，不重开 Word 会话；结果写 `<tag>/six.tsv`、`<tag>/six.txt`，带 head_sha 与 `lines-all.tsv` 的 sha）。第 0 节的六个数每一轮都以这条命令的输出为准，第 17 节记下本轮的复采与指纹。
 
@@ -1049,3 +1049,77 @@ Word 按这张脸的 hmtx 逐字相加收的就是 497.81 px。
   `OriginalDocx 19 / WordLineHeight 63 / Script 65 / TableGeometry 31 / Preservation 11 / TextCorpus 209`）。
 - 这一轮进版本库的只有量台三件（`tools/build-metrics-probe.ps1`、`tools/device-probe/MetricsActivity.java`、
   `tools/device-probe/MetricsManifest.xml`）加本节文档；排版引擎一字未动。
+
+
+## 24. `breakfix3`：中西文缝隙的 span 挪回汉字那一侧，字母串内部断行 10 行 -> 1 行（第 6 条退 1 行）
+
+用户在真机（2.3.1，build 46）第 8 页肉眼看到的两处：`Cu/SB/P-Cu/SB/C` | `u 夹层结构`（同一个词被劈开两次），
+以及 `120 μm ，图中` 里全角逗号前那道可见空隙。本轮先修第一处，并把两处的真值口径一起量死。
+
+### 24.1 Word 到底在哪些字符对之间断行（不是猜，两条独立真值）
+
+- Word COM 受控样张（`pwsh tools/word-break-truth.ps1`，14 个用例，版面与论文正文同宽 566.93 px）：
+  `w:wordWrap` 缺省或 `true` 时 `[A-Za-z0-9]` 整串不可断（token-true 首断点 20，26 个字母整串挪到下一行）；
+  `w:wordWrap val="0"` 才允许串内断（token-false 首断点 42）；`-` 之后可断（hyphen-edge 首断点 31）；
+  `/` 之后不可断（slash-edge 首断点 20；slash-then-space 首断点 31 断的是空格）；
+  整串比一列还宽时才在串内断（plain-60A：Word 先把整串挪到空行，再断成 49+11）。
+- Word 导出 PDF 全篇对回源文（`py tools/break-class-truth.py`）：238 个真断点里
+  cjk|cjk 205、cjk|lat 13、lat|cjk 7、cjk|num 7、num|cjk 3、other 1（`—|S`），**串内断 0**。
+
+### 24.2 我们为什么会在字母串中间断：是自己的 span 造出了可断位置
+
+`StaticLayout` 把 ReplacementSpan 的边界当成可断点。`autoSpaceDE/DN` 那 1/4 em 的缝此前挂在**拉丁字符**上，
+于是"CJK|拉丁"这道缝在单词内部多出一个可断位置，手机就从那里断：`构建Cu/SB/P-Cu/SB/C|u夹层结构`、
+`…局部SE|M形貌`、`…结合ED|S确认裂纹路径`、`PC/SAC30|5`、`Ag3S|n`。论文里 10 行如此
+（`py tools/midword-audit.py --lines artifacts/agent-layout-verify/revert-linear/new/lines-all.tsv`：token_cut=10）。
+
+改法（只改 span 落在哪个字上，不改缝的宽度）：一道缝只许骑在**汉字**上；汉字两侧都有拉丁时两条缝合并到一个 span
+（一个区间上放两个 ReplacementSpan，平台只会用其中一个去量），绘制时按缝在哪一侧把字形挪 `textSize/4`。
+两端对齐撑缝时同理：撑缝的目标字符若在单词内部，就顺延到该串之后的第一个汉字，撑开的像素仍然加在同一处宽度上。
+
+复采（`py tools/midword-audit.py --lines artifacts/agent-layout-verify/breakfix3/new/lines-all.tsv`）：
+**token_cut 10 -> 1**，只剩 page 19 para 160 line 3 `、孔洞率、Ag3` | `Sn分布`。
+这一行留着的原因已量清：源文里 `Ag` 与下标 `3` 与 `Sn` 是**三个 run**（`<w:vertAlign w:val="subscript"/>` 单占一段），
+下标用的是缩放 span，它的右边界正好落在 `3|Sn`；这不是 autoSpace 那族，下一轮单独处理（不许再用"整串不可断"糊过去）。
+受控用例那边：wrap-absent/true/false、token-absent/true/false 六个用例的首断点已与 Word 一字不差
+（`pwsh tools/break-rules-parity.ps1 -Device artifacts/agent-layout-verify/breakrules-A3/new`）。
+
+### 24.3 平台这条路堵死：Android 10 不接受我们递给它的断行规则
+
+`pwsh tools/breakiterator-probe.ps1`（真机 app_process，sdk=29）：
+`StaticLayout.Builder.setBreakIterator` 反射 `NoSuchMethodException`（API 24 起废弃、API 29 移除），
+`PrecomputedText$Params$Builder` 只剩 `setBreakStrategy`。也就是说"把 Word 的断行规则交给平台"在目标机上做不到，
+只能我们自己在 span 摆放上负责——本轮的改法就是这个结论的直接产物。
+同一文本三种 breakStrategy 的断点不同（plain-60A：default 47,87 / simple 6,57,95 / balanced 41,77），
+simple 那一列更像 Word（6,55,93），但换 strategy 会同时改掉中文与标点压缩的口径，不在本轮动。
+
+### 24.4 六条前后（`pwsh tools/parity-six.ps1 -Tag breakfix3 -Tree artifacts/privtree/breakfix3/app/src/main/java`）
+
+| # | 指标 | 改前（tag `revert-linear`） | 改后（tag `breakfix3`） | 判定 |
+| --- | --- | --- | --- | --- |
+| 1 | 段落页归属 | 7 段错页 / 206 | 7 段错页 / 206（pages.tsv sha `E23F59E8C409EF4C` 不变） | 不动 |
+| 2 | 逐行行高中位误差 | -0.767 px | -0.767 px | 不动 |
+| 3 | 逐行行高 p90 | 2.533 px | 2.533 px | 不动 |
+| 4 | 每页累计高度 | 0.79 行 | 0.79 行 | 不动 |
+| 5 | 断点一致率 | 114/165 = 69.1% | 115/165 = 69.7% | +1 行 |
+| 6 | 右边界超出 1px | 0 / 32 | **1 / 33** | **退 1 行** |
+
+第 6 条退的那一行：`（1）连接试验以浸渗时间、连接温度、连接时间和压力为自变量，以Sn填`，
+我们 563.00 px，Word 564.53 px（少 1.53 px）。原因：这条线以拉丁串 `Sn` + 汉字 `填` 收尾，
+缝挪到 `填` 上之后，撑缝那一轮量 `填` 的步长时要看它后面那个字符的水平位置，而那个字符已经在下一行，
+步长量成负数、这道缝就被踢出可撑集合，整行少撑 1~2 px。本轮已经补了"行末字符改用本行墨迹右边界量"
+（`DocxTextLayout.gapOffsets`，两处注释里都写着这个数），但这一行仍然差 1.53 px，
+说明撑缝还漏了别处，下一轮按 `tools/edge-parity.ps1` 的 gap 列继续查（同一轮不许再动阈值）。
+
+`lines-all.tsv` sha `5F714EE762A78345`、dex `932bc7c35f0f0a72…`、字体表指纹 `E751F0AFAC19`。
+
+### 24.5 缺陷 B（全角逗号前那道空隙）：先记下真值口径，本轮没动引擎
+
+源文里 `120 μm，图中` 逗号前**没有空格**（`py` 扫 `word/document.xml`：全篇 0 处"空白 + U+FF0C"），
+所以那道空隙是我们的，不是稿子里带的。Word 侧同一句的逐字符 x 已经采到
+（`artifacts/word-break/word-chars.tsv`，`comma-after-latin` 用例：`m`→`，` 的步长 9.5 pt，
+而汉字之间步长 12 pt、`示`→`C`（汉字|拉丁）步长 14.95 pt = 12 + 2.95 ≈ 1/4 em）。
+即：Word 在"拉丁|全角标点"处不加那 1/4 em，这与引擎里 `isCjkPunctuation` 的排除一致，
+所以嫌疑落在两端对齐撑缝把 slack 倒进这道缝上。手机侧逐字符 x 的量台已就位
+（`artifacts/device/probe/DeviceCapture.java` 现出 `chars-at-punct.tsv`：每行含"拉丁紧邻全角标点"的行逐字符 x/步长），
+下一轮两边逐字符相减，再决定改撑缝还是改标点压缩口径。

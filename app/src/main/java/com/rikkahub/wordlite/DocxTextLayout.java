@@ -332,7 +332,8 @@ public final class DocxTextLayout {
                 int[] share = spreadAcrossGaps(Math.min((int) Math.floor(slack + 0.001f), room), caps);
                 int widened = 0;
                 for (int i = 0; i < open.length; i++)
-                    if (share[i] > 0) widened += widenGap(copy, open[i][0], open[i][1], share[i]);
+                    if (share[i] > 0)
+                        widened += widenGap(copy, open[i][0], open[i][1], share[i], open[i][2] != 0);
                 return widened;
             }
         }
@@ -356,7 +357,9 @@ public final class DocxTextLayout {
             int slot = (int) (((long) (2 * j + 1) * gaps.length) / (2L * seams));
             int before = (int) ((long) j * total / seams);
             int after = (int) ((long) (j + 1) * total / seams);
-            if (after > before) widened += widenGap(copy, gaps[slot][0], gaps[slot][1], after - before);
+            if (after > before)
+                widened += widenGap(copy, gaps[slot][0], gaps[slot][1], after - before,
+                        gaps[slot][2] != 0);
         }
         return widened;
     }
@@ -366,9 +369,13 @@ public final class DocxTextLayout {
      * slack. The range is handed over in full -- two ReplacementSpans on one range leaves the
      * platform free to size it with the other one, and the widening would silently not happen.
      */
-    private static int widenGap(SpannableStringBuilder copy, int at, int basePx, int extraPx) {
-        for (AutoGap gap : copy.getSpans(at, at + 1, AutoGap.class)) copy.removeSpan(gap);
-        copy.setSpan(new WidenGap(basePx, extraPx), at, at + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    private static int widenGap(SpannableStringBuilder copy, int at, int basePx, int extraPx,
+                                boolean before) {
+        for (AutoGap gap : copy.getSpans(at, at + 1, AutoGap.class)) {
+            before |= gap.before;   // the seam side belongs to the character, not to this share
+            copy.removeSpan(gap);
+        }
+        copy.setSpan(new WidenGap(basePx, extraPx, before), at, at + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return 1;
     }
 
@@ -465,7 +472,7 @@ public final class DocxTextLayout {
             }
             if (widest == null) break;
             copy.removeSpan(widest);
-            if (extra > 1) copy.setSpan(new WidenGap(widest.basePx, extra - 1), at, at + 1,
+            if (extra > 1) copy.setSpan(new WidenGap(widest.basePx, extra - 1, widest.before), at, at + 1,
                     Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             given++;
         }
@@ -493,13 +500,48 @@ public final class DocxTextLayout {
             if (text.getSpans(i, i + 1, android.text.style.StrikethroughSpan.class).length > 0) continue;
             if (text.getSpans(i, i + 1, android.text.style.BackgroundColorSpan.class).length > 0) continue;
             if (laidOut.getLineForOffset(i + 1) != line) continue;
-            float from = laidOut.getPrimaryHorizontal(i), next = laidOut.getPrimaryHorizontal(i + 1);
+            // Who carries the opened seam: the character to its left, unless that character sits inside
+            // a Latin or digit token. A ReplacementSpan edge is a break opportunity for StaticLayout, so
+            // an edge inside "Ag3Sn" is a cut inside the word (see applyAutoSpace for the measurements).
+            // There the CJK character right of the seam carries the slack and the slack opens on its left.
+            // Where the opened seam rides. A ReplacementSpan edge is a break opportunity, so a seam
+            // inside "Ag3Sn" is a cut inside the word (measured: "、孔洞率、Ag3" | "Sn分布" on page 19).
+            // A seam whose left character is inside a token therefore moves to the first character
+            // after the token: the line still gains the same pixel at the same place in the sum, and
+            // the only edges the breaker sees are the ones Word itself may break at.
+            int at = i;
+            if (continuesToken(text, i)) {
+                at = i + 1;
+                while (at < end && isTokenChar(text.charAt(at)) && isTokenChar(text.charAt(at - 1))) at++;
+            }
+            if (at >= end || at + 1 > end || laidOut.getLineForOffset(at) != line) continue;
+            float from = laidOut.getPrimaryHorizontal(at);
+            // A line's last character has no next character on this line to measure against:
+            // getPrimaryHorizontal(end) reads the following line's left edge, so the step comes out
+            // negative and the gap silently leaves the spread. Take this line's own ink edge instead,
+            // which is where that character's advance -- and any autoSpace seam riding on it -- ends.
+            // Measured without this: the line "…以自变量，以Sn填" of paragraph 160 ends 563 px where Word
+            // ends 564.53 px, because the seam moved onto its last character.
+            float next = at + 1 == end
+                    ? laidOut.getLineRight(line)
+                    : laidOut.getPrimaryHorizontal(at + 1);
             float raw = next - from;
             float advance = (float) Math.round(raw);
             if (raw <= 0f || Math.abs(raw - advance) > 0.01f) continue;
-            gaps.add(new int[]{i, (int) advance});
+            gaps.add(new int[]{at, (int) advance, at == i ? 0 : 1});
         }
         return gaps.toArray(new int[gaps.size()][]);
+    }
+
+    /** True when c is not the first character of its Latin/digit token. */
+    private static boolean continuesToken(CharSequence text, int c) {
+        if (c <= 0 || c >= text.length()) return false;
+        return isTokenChar(text.charAt(c)) && isTokenChar(text.charAt(c - 1));
+    }
+
+    /** A character that Word keeps glued to its neighbours: Latin, digits, and their - / . , */
+    private static boolean isTokenChar(char c) {
+        return !Character.isWhitespace(c) && !isCjk(c);
     }
 
     /**
@@ -525,7 +567,8 @@ public final class DocxTextLayout {
             float raw = next - from;
             float advance = (float) Math.round(raw);
             if (raw <= 0f || Math.abs(raw - advance) > 0.01f) continue;
-            gaps.add(new int[]{i, (int) advance});
+            // A blank is a break opportunity already, so it may hold the slack itself: side flag 0.
+            gaps.add(new int[]{i, (int) advance, 0});
         }
         return gaps.toArray(new int[gaps.size()][]);
     }
@@ -1391,14 +1434,29 @@ public final class DocxTextLayout {
                 boolean punctEdge = (kind == 1 && isCjkPunctuation(text.charAt(next - 1)))
                         || (right == 1 && isCjkPunctuation(text.charAt(next)));
                 if (!punctEdge && ((latin && format.autoSpaceDe) || (digit && format.autoSpaceDn))) {
-                    // Put the extra width on the character to the left of the
-                    // boundary. ReplacementSpan draws its extra width after
-                    // the character, so placing it on the right-hand CJK
-                    // character would move the gap to the wrong side.
-                    int at = next - 1;
+                    // The quarter em rides the CJK side of the seam, and only that side. A
+                    // ReplacementSpan is a measurement-run edge for StaticLayout and every edge is a
+                    // break opportunity, so carrying the gap on the Latin character let the breaker cut
+                    // the word in half: "SEM形貌" came out "SE|M", "Ag3Sn分布" "Ag3S|n", "SAC305浸渗"
+                    // "SAC30|5", "构建Cu/SB/P-Cu/SB/Cu夹层结构" "...SB/C|u夹层结构". 15 lines of the
+                    // thesis split a Latin or digit token that way (counted in
+                    // artifacts/agent-layout-verify/revert-linear/new/lines-all.tsv: a line whose last
+                    // character and the next line's first character are both [A-Za-z0-9] with no blank
+                    // between them in tests/samples/input-liu.docx, where Word's own exported PDF cuts a
+                    // run on none of its 803 lines). Anchored on the CJK character, both edges around it
+                    // are edges Word itself may break at.
+                    int at = kind == 1 ? next - 1 : next;
                     int end = Math.min(text.length(), at + 1);
-                    if (text.getSpans(at, end, AutoGap.class).length == 0)
-                        text.setSpan(new AutoGap(), at, end, flags);
+                    boolean before = kind != 1;   // kind == 1: CJK on the left, so the gap is behind it
+                    boolean after = !before;
+                    for (AutoGap has : text.getSpans(at, end, AutoGap.class)) {
+                        // A CJK character with Latin on both sides carries both seams on one span: two
+                        // ReplacementSpans on one range and the platform sizes it with only one of them.
+                        before |= has.before;
+                        after |= has.after;
+                        text.removeSpan(has);
+                    }
+                    text.setSpan(new AutoGap(before, after), at, end, flags);
                 }
             }
             i = next;
@@ -1426,17 +1484,23 @@ public final class DocxTextLayout {
      */
     private static final int MAX_WORD_SPACE_STRETCH_PX = 24;
 
-    private static final class WidenGap extends ReplacementSpan {
+    static final class WidenGap extends ReplacementSpan {   // package-private: the device probe counts it
         private final int basePx;
         private final int extraPx;
-        WidenGap(int basePx, int extraPx) { this.basePx = basePx; this.extraPx = extraPx; }
+        private final boolean before;
+        WidenGap(int basePx, int extraPx, boolean before) {
+            this.basePx = basePx; this.extraPx = extraPx; this.before = before;
+        }
         @Override public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
             if (fm != null) paint.getFontMetricsInt(fm);
             return basePx + extraPx;
         }
         @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
                                    float x, int top, int y, int bottom, Paint paint) {
-            canvas.drawText(text, start, end, x, y, paint);
+            // basePx already carries whatever autoSpace seam this character was holding, and that seam
+            // stays where it was: the slack is added outside it, on the same side.
+            float shift = before ? paint.getTextSize() / 4f : 0f;
+            canvas.drawText(text, start, end, x + shift, y, paint);
         }
     }
 
@@ -1457,15 +1521,26 @@ public final class DocxTextLayout {
         }
     }
 
-    /** Adds one quarter of the current East Asian em after the spanned character. */
-    private static final class AutoGap extends ReplacementSpan {
+    /**
+     * One or two quarter-em autoSpace seams riding one CJK character: `before` is the share that
+     * belongs to the left of it, `after` the share on the right. The measured total is the same sum the
+     * single-sided span measured -- ceil(advance + seams * em/4) -- so no line gains or loses room from
+     * this, and only the place the breaker may cut at and the place the ink is drawn move.
+     */
+    static final class AutoGap extends ReplacementSpan {   // package-private: the device probe counts it
+        final boolean before;
+        final boolean after;
+        AutoGap(boolean before, boolean after) { this.before = before; this.after = after; }
+        private int seams() { return (before ? 1 : 0) + (after ? 1 : 0); }
+        /** How far the glyph steps right inside its own advance: the seams that sit on its left. */
+        float shift(Paint paint) { return before ? paint.getTextSize() / 4f : 0f; }
         @Override public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
             if (fm != null) paint.getFontMetricsInt(fm);
-            return (int) Math.ceil(paint.measureText(text, start, end) + paint.getTextSize() / 4f);
+            return (int) Math.ceil(paint.measureText(text, start, end) + seams() * paint.getTextSize() / 4f);
         }
         @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
                                    float x, int top, int y, int bottom, Paint paint) {
-            canvas.drawText(text, start, end, x, y, paint);
+            canvas.drawText(text, start, end, x + shift(paint), y, paint);
         }
     }
 
