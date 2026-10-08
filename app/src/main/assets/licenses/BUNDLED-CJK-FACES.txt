@@ -20,6 +20,26 @@ a width-by-width comparison so a build that changed any metric fails loudly.
 Coverage costs bytes: these faces are 183 MB unpacked, which is why the APK deflates
 them (tools/build.sh, tools/build-host.ps1) instead of storing them as they come.
 
+宋体 (song.ttc) is in the plan too, because every Chinese name we do not have lands on it:
+the shipped copy used to stop 43 codepoints short of this machine's simsun.ttc (CJK strokes
+U+31C0-U+31EF, ideographic description characters U+2FFC-U+2FFF), which are characters
+desktop Word draws and the phone could not. Rebuilt 2026-10-09: +43 codepoints, zero advance
+-width changes, zero line-metric changes, and 18 glyphs whose hinting bytecode differs because
+the shipped copy was built from an older simsun.ttc. SimSun's 6.2 MB of embedded bitmaps
+(EBDT/EBLC) stay out, as they were: Android does not use them at document sizes.
+
+Two things were checked rather than assumed. (1) The copies of these faces published on
+GitHub (github.com/chengda/popular-fonts) were downloaded and compared codepoint by
+codepoint with ours: 华文新魏 7,819 codepoints, 华文楷体 24,367 -- identical, so there is no
+fuller copy of these faces anywhere. Word on Windows cannot draw a character outside those
+7,819 in 华文新魏 either; it falls back per glyph, and so do we. (2) tests/FontSubstitution
+walks every run of the sample document, resolves the face its w:rFonts asks for, and asserts
+that face draws every character that run contains (13,205 positions, 4 faces, 0 missing).
+
+The one face still without an original is ＭＳ 明朝 (MS Mincho): mincho ships only with the
+Japanese language pack, so it is not on this machine and not in the APK. Names that ask for
+it land on 宋体 and the font dialog says so in the document's own font list.
+
 Those faces are Microsoft / Founder fontware, not free-licensed software. They are
 here so a document that declares 华文新魏 or 等线 renders in the face it asked for.
 msyh.ttf is Microsoft YaHei (微软雅黑), kept because documents declare it constantly and

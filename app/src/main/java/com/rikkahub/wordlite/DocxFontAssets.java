@@ -61,7 +61,7 @@ public final class DocxFontAssets {
         "宋体", "黑体", "楷体", "仿宋", "等线", "微软雅黑", "幼圆", "隶书",
         "方正小标宋", "华文新魏", "华文隶书", "华文行楷", "华文楷体", "华文仿宋", "华文细黑", "华文中宋",
         "Times New Roman", "Arial", "Calibri", "Cambria", "Courier New", "Consolas",
-        "MS Gothic", "MS Mincho"
+        "MS Gothic", "MS Mincho", "ＭＳ 明朝"
     };
 
     private DocxFontAssets() { }
@@ -84,6 +84,9 @@ public final class DocxFontAssets {
         if (key.contains("雅黑") || key.contains("yahei") || key.contains("msyh")) return MS_YAHEI;
         if (key.contains("中宋") || key.contains("zhongsong")) return ST_ZHONGSONG;
         if (key.contains("song") || key.contains("sun") || key.contains("明") || key.contains("书")) return SONG;
+        /* mincho 只会是日文明朝体。本机没有那张字库（mincho 只在装了日文语言的 Windows 上），
+           落到宋体——绝不能落到 Times 这类拉丁字库上，它一个假名汉字都画不出来。 */
+        if (key.contains("mincho")) return SONG;
         if (key.contains("kai") || key.contains("楷")) return KAI;
         if (key.contains("fang") || key.contains("仿")) return FANG;
         if (key.contains("hei") || key.contains("黑") || key.contains("gothic")) return HEI;
@@ -91,8 +94,7 @@ public final class DocxFontAssets {
         if (key.contains("cambria")) return CAMBRIA;
         if (key.contains("calibri") || key.contains("aptos")) return CALIBRI;
         if (key.contains("arial") || key.contains("tahoma") || key.contains("verdana") || key.contains("segoe") || key.contains("helvetica") || key.contains("opensans")) return ARIAL;
-        if (key.contains("times") || key.contains("serif") || key.contains("georgia")
-                || key.contains("mincho")) return TIMES;
+        if (key.contains("times") || key.contains("serif") || key.contains("georgia")) return TIMES;
         if (key.contains("mono") || key.contains("consol")) return CONSOLAS;
         if (key.contains("courier")) return COURIER_NEW;
         /* 认不出来的名字分两种：中文名落到宋体（Word 对认不出的中文字体也走这一路）；拉丁字母名照旧
