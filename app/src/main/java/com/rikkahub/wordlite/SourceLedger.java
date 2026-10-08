@@ -52,9 +52,7 @@ public final class SourceLedger {
          * 这里只是不让一个坏数出现在界面上。
          */
         public double share(int total) {
-            if (total <= 0 || duplicateChars <= 0) return 0d;
-            double value = duplicateChars * 100d / total;
-            return value > 100d ? 100d : value;
+            return rate(duplicateChars, total);
         }
     }
 
@@ -62,6 +60,12 @@ public final class SourceLedger {
     /** 全部行之和（含 others），恒等于 Report.duplicateChars。 */
     public int duplicateChars;
     public int comparedChars;
+    /**
+     * Σ 各行分子超出整篇分母的那部分字数。>0 就说明有字符既不在 comparedChars 里、又被记进了某一行——
+     * 那就是分子吃进了结构性文本（参考文献表、致谢、附录、目录）。2.3.1 之前那一版每次都溢出，
+     * 界面上于是能出现 114.49% 这种在算术上不成立的比率；现在把它量出来，不悄悄夹掉。
+     */
+    public int numeratorOverflowChars;
     /** 折叠之前的真实篇数：表里只画 MAX_ROWS + 1 行，标题上要说清一共几篇。 */
     public int paperCount;
 
@@ -132,6 +136,7 @@ public final class SourceLedger {
             }
         });
         ledger.duplicateChars = sum(ledger.rows);
+        ledger.numeratorOverflowChars = Math.max(0, ledger.duplicateChars - ledger.comparedChars);
         fold(ledger);
         return ledger;
     }
@@ -146,6 +151,26 @@ public final class SourceLedger {
                 if (row.engineKeys.get(e).equals(wanted)) total += row.engineChars.get(e).intValue();
         }
         return total;
+    }
+
+    /** 自建库名下的重复字符（没带引擎名的命中按 TextCorpus 的 "local" 计）。 */
+    public int localDuplicateChars() {
+        return duplicateCharsFor("local");
+    }
+
+    /** 联网检索名下的重复字符：全部减去自建库那一份，两档相加就是分子。 */
+    public int webDuplicateChars() {
+        return Math.max(0, duplicateChars - localDuplicateChars());
+    }
+
+    /**
+     * "占多少"只有这一个写法：字符 / 整篇可比字数，超过 100 一律按 100。
+     * 界面上任何一档比率都该从这里出，别再自己拿 hits 数一遍——那样会把参考文献表里的字算进分子。
+     */
+    public static double rate(int chars, int total) {
+        if (total <= 0 || chars <= 0) return 0d;
+        double value = chars * 100d / total;
+        return value > 100d ? 100d : value;
     }
 
     /**

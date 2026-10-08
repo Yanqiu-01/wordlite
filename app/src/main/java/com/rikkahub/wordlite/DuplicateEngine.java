@@ -85,6 +85,14 @@ public final class DuplicateEngine {
         public int excludedChars;
         /** 上面那些字数对应的区间。来源榜按篇数字必须扣同一批区间，否则两边分子分母不是一把尺。 */
         public int[] structureSpans = new int[0];
+        /**
+         * 按"自建库 / 联网"两档分的重复字符。要把这两档分开报，只能从这里取数：
+         * 自己按 hits 再数一遍就会把参考文献表那些字算进分子，114.49% 那种比率就是这么来的。
+         * 两档相加 == duplicateChars == 总相似度比的分子。
+         */
+        public int localDuplicateChars, webDuplicateChars;
+        /** 上面两档各自的比率：分母都是 comparedChars，与总相似度比同一把尺，上限 100%。 */
+        public double localRate, webRate;
         /** 本次真正拿来比对的语料（自建库加检索到的候选），改写效果要用同一份基线。 */
         public TextCorpus baseline;
         public long elapsedMillis;
@@ -397,6 +405,18 @@ public final class DuplicateEngine {
         report.overallRate = balance.overallRate;
         report.excludingCitationsRate = balance.excludingCitationsRate;
         report.selfWrittenRate = balance.selfWrittenRate;
+        /* 来源榜与整篇比率当场对一次账，并把两档归属算好交给界面。
+           分子多出来的字数不悄悄夹掉——注记里点名，结果页、报告、存档都会带上这一句。 */
+        SourceLedger byPaper = SourceLedger.aggregate(report.hits,
+                TextCorpus.normalize(report.sourceText), report.comparedChars, structureSpans);
+        report.localDuplicateChars = byPaper.localDuplicateChars();
+        report.webDuplicateChars = byPaper.webDuplicateChars();
+        report.localRate = SourceLedger.rate(report.localDuplicateChars, report.comparedChars);
+        report.webRate = SourceLedger.rate(report.webDuplicateChars, report.comparedChars);
+        if (byPaper.numeratorOverflowChars > 0)
+            note(report, "来源榜各行相加比整篇可比字数多 " + byPaper.numeratorOverflowChars
+                    + " 字：那些字落在参考文献表/致谢这类结构性文本里，不参与比率；"
+                    + "每一行的该篇重复率已按 100% 上限显示");
     }
 
     /** AIGC 五档的人话名字。指标区与结果面板共用这一份，两处各起一名就一定漂移。 */

@@ -576,6 +576,16 @@ public final class SourceLedgerRegression {
         check(Math.abs(rows - ledger.overallRate) < 1e-9 && after.rows.get(0).share(ledger.totalChars) == 50d,
                 "各行该篇重复率相加 == 总相似度比（50.00%），来源榜与账本同一把尺");
 
+        // 溢出要量得出来：悄悄夹掉的比率没人会去查，写进字据里的字数才会有人查。
+        check(before.numeratorOverflowChars == 340 && after.numeratorOverflowChars == 0,
+                "分子溢出按字数报：改前 Σ 460 - 分母 120 = 多出 340 字，改后多 0 字");
+        check(SourceLedger.rate(400, 120) == 100d && SourceLedger.rate(60, 120) == 50d
+                        && SourceLedger.rate(0, 120) == 0d && SourceLedger.rate(60, 0) == 0d,
+                "\"占多少\"只有一个写法 rate(字符, 分母)：400/120 夹到 100，60/120 == 50，空分子与空分母都回到 0");
+        check(after.localDuplicateChars() == 0 && after.webDuplicateChars() == 60
+                        && after.localDuplicateChars() + after.webDuplicateChars() == ledger.duplicateChars,
+                "两档归属相加就是账本分子：自建库 0 + 联网 60 == 60（界面上把两档分开报，只许用这两个数）");
+
         DuplicateEngine.Report report = new DuplicateEngine.Report();
         report.sourceText = text;
         report.comparedChars = ledger.totalChars;
