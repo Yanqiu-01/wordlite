@@ -1,7 +1,8 @@
 # Line-height parity target (baseline-to-baseline)
 
 Owned by the layout-parity sub-agent. Everything below is measured, with the command that produced it.
-Nothing in `app/src/main/java` was changed.
+本文只记账，不改引擎：每一节下面都是量出来的数与量它的命令。引擎侧的改动一律单独提交，
+并把真机对账的读数写回本文（第 7、13 节就是两次改完之后的实测），验收线在第 0 节。
 
 Scope: `tests/samples/input-liu.docx`, 96-DPI document units (1 pt = 4/3 px, `PageGeometry`),
 Word truth from desktop Word 16.0 COM line y-coordinates (`artifacts/agent-typeset/word-line-pitch.ps1`,
@@ -354,6 +355,45 @@ pwsh artifacts/agent-typeset/word-page-stack.ps1 -Pages 12,13,14,15 -OutDir arti
    所以 **HEAD 的 96.6% 是两处反向误差抵出来的假平账**：行高每行少算 0.767px，另一处每页多算约
    8.6px。开关保持关闭（出厂 false，Host 闸门钉着），等第 2 项那处多算被单独定出来并修掉再开；
    调小比值去凑页码是不许的（第 0 节第 3 条）。
+
+## 14. 段前后距这笔账：Word 的算法是"行距 + 声明段距"，不是网格取整
+
+口径：Word 侧 gap = 下一段首基线 - 上一段末基线；净段距 = gap - 上一段自己的行距（只在上一段 ≥2 行时可算）。
+我方侧 billed = PageBreaker 实际消费的 max(prev.after, next.before)，由探针反射调
+`A4Paginator.effectiveSpacingTwips` 得到（探针 `artifacts/agent-layout-verify/gaps/GapProbe.java`，
+engine-vs-mirror mismatch=0，228 块全等）。可配对边界 166 条。
+
+| 类别 | 边界数 | Word 净段距 中位/均值 | 我方 billed 中位/均值 | 我方合计 |
+| --- | --- | --- | --- | --- |
+| 目录（para 25..56） | 31 | 0（gap 恰好等于它自己的 24.47/25.33 行距档） | 0 / 0 | 0 |
+| 编号项 | 23 | 0.00 / 0.04 | 0 / 0.52 | 12.0 px |
+| 正文 | 71 | 0.00 / 2.68 | 0 / 4.00 | 284.0 px |
+| 图表题注 | 7 | 10.93 / 11.33 | 22.67 / 17.53 | 122.7 px |
+| 标题 | 34 | 推不出（前一段全是单行） | 12.0 / 12.54 | 426.4 px |
+| 合计 | 166 | — | 0 / 5.09 | 845.1 px |
+
+四条读数：
+
+1. **没有网格取整这回事。** 166 条边界里落在 24/48/72 ±0.6 px 的只有 26 条，48 与 72 附近一条都没有；
+   Word 的 gap 全堆在它自己的行距档位上（22.6 / 24.47 / 25.33 / 25.4 / 26.27），净段距 0~0.4 px。
+   所以 Word = 行距 + 声明段距，`A4Paginator` 里任何"段距向上取整到整格"的模仿都是无据的。
+2. **目录页两边一致**：Word 那 31 条目录边界的净段距是 0，我方也是 0。第 2 页那 27.5px 超支不在目录行上，
+   全在 `目 录` 标题段自身（我方 43.2 px 段距 + 32 px 行盒）。这条待第 15 节的页账定性，别急着改。
+3. **`beforeLines/afterLines` 的单位我们取错了，但这条先不改。** 稿件自查（tests/samples/input-liu.docx）：
+   39 段同时写了 lines 与 twips 两种写法，按 implied = twips x 100 / lines 反推 Word 自己的"一行"：
+   62 对给 390/391 twips（19.5 pt，style0/style2/style3），7 对给 361 twips（≈ 文档网格 360，style1）。
+   而 `effectiveSpacingTwips` 一律用 section grid pitch（360 twips = 24 px），对那 62 对少算约 8%
+   （`目 录` 标题：beforeLines=100 我们给 24.0 px，Word 自己写的 before=391twips=26.07 px）。
+   不改的理由与第 13 节同源：这条改完是**多算钱**，而我们已知的病就是多算钱（cand-lh1 多算 868.9px）。
+   等页账对平、那处反向多算定出来之后，再与它一起进，且必须带一次新的真机对账。
+4. **解析器有一个真缺口**：`w:beforeAutospacing/w:afterAutospacing` 在 document.xml 出现 170 次
+   （85 个 w:spacing 带它），我们的解析器完全不认这个属性。本稿全是 "false" 所以没吃进偏差，
+   换一份 autospacing=true 的稿子就会错。本轮不凭猜实现，记在 ROADMAP 等真值。
+
+另外更正第 13 节转过来的一句话：我方第 11 页那 339.8 px 差额**不是段前后距**（该页段距只有 42.7 px），
+而它多半也不是引擎真多算了 340 px——逐页"逐项高"是按块的起始页记账的，跨页大块会把钱记错页。
+下一轮要让探针按 PageBreaker 的实际消费顺序逐 fragment 打账（item id / before gap / height / after gap），
+再与 Word 的 page_stack 按内容对齐，而不是按页号硬拼。
 
 ## 13. 发版重跑记录（`parity-gate.ps1`，一条命令一行结果）
 
