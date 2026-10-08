@@ -32,6 +32,10 @@ PLAN = [
     # 防线缺一个字。仓库里那一份比本机 simsun.ttc 少 43 个码位（笔画 U+31C0-U+31EF、
     # 部件描述符 U+2FFC-U+2FFF），桌面 Word 画得出来，手机画不出来。
     ("simsun.ttc", 0, "song.ttc", set()),               # 宋体
+    # 华文彩云/华文琥珀：Word 字体列表里有这两张，以前随包没带，封面用了就静静落到宋体。
+    # 本机就有原件，走同一套不许动字宽的流程；又从 GitHub 上两个独立来源逐字宽核过（tools/fetch-fonts-github.py）。
+    ("STCAIYUN.TTF", 0, "stcaiyun.ttf", set()),      # 华文彩云
+    ("STHUPO.TTF", 0, "sthupo.ttf", set()),          # 华文琥珀
 ]
 # Faces Word uses as whole files (Latin/mono/symbol): byte-for-byte copies.
 COPY_ONLY = [("cour.ttf", "courier-new.ttf"), ("consola.ttf", "consolas.ttf")]
@@ -64,7 +68,10 @@ def metrics(font):
     os2 = font.get("OS/2")
     if os2 is not None:
         out += [os2.sTypoAscender, os2.sTypoDescender, os2.sTypoLineGap,
-                os2.usWinAscent, os2.usWinDescent, os2.sxHeight, os2.sCapHeight]
+                os2.usWinAscent, os2.usWinDescent,
+                # OS/2 v1 的脸（华文彩云/琥珀）没有这两项，不许因为它们缺就把整段校验跳过。
+                getattr(os2, "version", None), getattr(os2, "sxHeight", None),
+                getattr(os2, "sCapHeight", None)]
     return tuple(out)
 
 

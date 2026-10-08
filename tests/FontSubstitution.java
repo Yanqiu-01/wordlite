@@ -62,6 +62,12 @@ public final class FontSubstitution {
         check(DocxFontAssets.ST_KAITI.equals(DocxFontAssets.pathFor("华文楷体")), "华文楷体 → 本尊");
         check(DocxFontAssets.ST_FANGSONG.equals(DocxFontAssets.pathFor("华文仿宋")), "华文仿宋 → 本尊");
         check(DocxFontAssets.ST_XIHEI.equals(DocxFontAssets.pathFor("华文细黑")), "华文细黑 → 本尊");
+        check(DocxFontAssets.ST_CAIYUN.equals(DocxFontAssets.pathFor("华文彩云"))
+                        && DocxFontAssets.ST_HUPO.equals(DocxFontAssets.pathFor("华文琥珀")),
+                "华文彩云/华文琥珀 → 本尊：Word 的字体列表里有这两张，以前随包没带");
+        check(!DocxFontAssets.SONG.equals(DocxFontAssets.pathFor("华文彩云"))
+                        && !DocxFontAssets.SONG.equals(DocxFontAssets.pathFor("华文琥珀")),
+                "封面用了华文彩云/华文琥珀，不许再静悄悄地画成宋体");
         check(DocxFontAssets.ST_SONG.equals(DocxFontAssets.pathFor("华文宋体"))
                         && DocxFontAssets.ST_ZHONGSONG.equals(DocxFontAssets.pathFor("华文中宋")),
                 "华文宋体 / 华文中宋 → 本尊");
@@ -104,6 +110,10 @@ public final class FontSubstitution {
                         && DocxFontAssets.substitution("等线").isEmpty(),
                 "华文新魏/隶书/华文行楷/等线现在都有本尊，不许再报替代："
                         + DocxFontAssets.substitution("华文新魏") + DocxFontAssets.substitution("隶书"));
+        check(DocxFontAssets.substitution("华文彩云").isEmpty()
+                        && DocxFontAssets.substitution("华文琥珀").isEmpty(),
+                "华文彩云/华文琥珀有了自己的字库，不许再报替代："
+                        + DocxFontAssets.substitution("华文彩云") + DocxFontAssets.substitution("华文琥珀"));
         check(DocxFontAssets.substitution("MS Mincho").contains("宋体")
                         && DocxFontAssets.substitution("方正清刻本悦宋").contains("宋体"),
                 "真的没有本尊的必须点名：" + DocxFontAssets.substitution("MS Mincho"));
@@ -129,12 +139,12 @@ public final class FontSubstitution {
            地板按本机字库实测取，最低的那张（华文新魏 7819 字）本来就只有这么多。 */
         long[] floors = { 3_500_000L, 3_500_000L, 3_500_000L, 8_500_000L, 6_000_000L,
                 14_000_000L, 17_000_000L, 6_000_000L, 10_500_000L, 11_000_000L,
-                11_500_000L, 10_000_000L, 9_000_000L };
+                11_500_000L, 10_000_000L, 9_000_000L, 5_400_000L, 3_500_000L };
         String[] floored = { DocxFontAssets.ST_XINWEI, DocxFontAssets.ST_LITI, DocxFontAssets.ST_XINGKAI,
                 DocxFontAssets.LI_SU, DocxFontAssets.YOU_YUAN, DocxFontAssets.DENG_XIAN,
                 DocxFontAssets.MS_YAHEI, DocxFontAssets.MS_GOTHIC, DocxFontAssets.ST_SONG,
                 DocxFontAssets.ST_ZHONGSONG, DocxFontAssets.ST_KAITI, DocxFontAssets.ST_FANGSONG,
-                DocxFontAssets.ST_XIHEI };
+                DocxFontAssets.ST_XIHEI, DocxFontAssets.ST_CAIYUN, DocxFontAssets.ST_HUPO };
         for (int i = 0; i < floored.length; i++) {
             long bytes = new File("app/src/main/assets/" + floored[i]).length();
             check(bytes >= floors[i], floored[i] + " 的字形数不许缩水（" + bytes + " < " + floors[i] + "）");
@@ -151,6 +161,8 @@ public final class FontSubstitution {
         needGlyphs(DocxFontAssets.DENG_XIAN, COVER_TITLE, "等线");
         needGlyphs(DocxFontAssets.YOU_YUAN, COVER_TITLE, "幼圆");
         needGlyphs(DocxFontAssets.ST_ZHONGSONG, COVER_TITLE, "华文中宋");
+        needGlyphs(DocxFontAssets.ST_CAIYUN, COVER_TITLE, "华文彩云");
+        needGlyphs(DocxFontAssets.ST_HUPO, COVER_TITLE, "华文琥珀");
         /* 随包的假名/拉丁照测（见 tools/build-fonts.py：每张脸带的是本机字库的全部覆盖）。
            日文旧字体（漢 这类）ＭＳ ゴシック 本机字库就没有，落到系统字体。 */
         needGlyphs(DocxFontAssets.MS_GOTHIC, "テストゴシックあいう012", "ＭＳ ゴシック");
@@ -256,6 +268,7 @@ public final class FontSubstitution {
             { DocxFontAssets.ST_FANGSONG, "20900" }, { DocxFontAssets.ST_XIHEI, "20900" },
             { DocxFontAssets.ST_XINWEI, "6763" }, { DocxFontAssets.ST_LITI, "6763" },
             { DocxFontAssets.ST_XINGKAI, "6763" }, { DocxFontAssets.MS_GOTHIC, "12500" },
+            { DocxFontAssets.ST_CAIYUN, "6763" }, { DocxFontAssets.ST_HUPO, "6763" },
         };
         for (int i = 0; i < hanziFloors.length; i++) {
             long got = countHanzi(hanziFloors[i][0]);

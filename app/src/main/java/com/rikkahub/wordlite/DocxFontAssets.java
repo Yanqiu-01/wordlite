@@ -45,6 +45,8 @@ public final class DocxFontAssets {
     public static final String ST_KAITI = "fonts/stkaiti.ttf";          // 华文楷体
     public static final String ST_FANGSONG = "fonts/stfangsong.ttf";    // 华文仿宋
     public static final String ST_XIHEI = "fonts/stxihei.ttf";          // 华文细黑
+    public static final String ST_CAIYUN = "fonts/stcaiyun.ttf";         // 华文彩云
+    public static final String ST_HUPO = "fonts/sthupo.ttf";             // 华文琥珀
     public static final String MATH = "fonts/stix-two-math.ttf";
 
     /** Every file that ships. Anything this list does not contain must never come out of pathFor(). */
@@ -53,13 +55,15 @@ public final class DocxFontAssets {
         SONG, HEI, KAI, FANG, FZ_SMALL_SONG, MATH, COURIER_NEW, CONSOLAS,
         ARIAL, ARIAL_BOLD, CALIBRI, CAMBRIA,
         ST_XINWEI, ST_LITI, ST_XINGKAI, LI_SU, YOU_YUAN, DENG_XIAN, MS_GOTHIC,
-        ST_SONG, ST_ZHONGSONG, ST_KAITI, ST_FANGSONG, ST_XIHEI, MS_YAHEI
+        ST_SONG, ST_ZHONGSONG, ST_KAITI, ST_FANGSONG, ST_XIHEI, MS_YAHEI,
+        ST_CAIYUN, ST_HUPO
     };
 
     /** What the 字体 dialog lists. Word's names, not our file names: the user reads the docx names. */
     public static final String[] PICKER = {
         "宋体", "黑体", "楷体", "仿宋", "等线", "微软雅黑", "幼圆", "隶书",
         "方正小标宋", "华文新魏", "华文隶书", "华文行楷", "华文楷体", "华文仿宋", "华文细黑", "华文中宋",
+        "华文彩云", "华文琥珀",
         "Times New Roman", "Arial", "Calibri", "Cambria", "Courier New", "Consolas",
         "MS Gothic", "MS Mincho", "ＭＳ 明朝"
     };
@@ -78,6 +82,8 @@ public final class DocxFontAssets {
         if (key.isEmpty()) return null;
         if (key.contains("新魏") || key.contains("xinwei")) return ST_XINWEI;
         if (key.contains("行楷") || key.contains("xingkai")) return ST_XINGKAI;
+        if (key.contains("彩云") || key.contains("caiyun")) return ST_CAIYUN;
+        if (key.contains("琥珀") || key.contains("hupo")) return ST_HUPO;
         if (key.contains("隶") || key.contains("lishu")) return LI_SU;
         if (key.contains("幼圆") || key.contains("youyuan")) return YOU_YUAN;
         if (key.contains("等线") || key.contains("dengxian")) return DENG_XIAN;
@@ -134,6 +140,8 @@ public final class DocxFontAssets {
         if (ST_KAITI.equals(path)) return "华文楷体";
         if (ST_FANGSONG.equals(path)) return "华文仿宋";
         if (ST_XIHEI.equals(path)) return "华文细黑";
+        if (ST_CAIYUN.equals(path)) return "华文彩云";
+        if (ST_HUPO.equals(path)) return "华文琥珀";
         if (COURIER_NEW.equals(path)) return "Courier New";
         if (CONSOLAS.equals(path)) return "Consolas";
         if (CALIBRI.equals(path)) return "Calibri";
@@ -167,6 +175,8 @@ public final class DocxFontAssets {
         if (ST_KAITI.equals(path)) return oneOf(wanted, "华文楷体", "stkaiti");
         if (ST_FANGSONG.equals(path)) return oneOf(wanted, "华文仿宋", "stfangsong");
         if (ST_XIHEI.equals(path)) return oneOf(wanted, "华文细黑", "stxihei");
+        if (ST_CAIYUN.equals(path)) return oneOf(wanted, "华文彩云", "stcaiyun");
+        if (ST_HUPO.equals(path)) return oneOf(wanted, "华文琥珀", "sthupo");
         if (COURIER_NEW.equals(path)) return oneOf(wanted, "courier", "couriernew");
         if (CONSOLAS.equals(path)) return oneOf(wanted, "consolas");
         if (CALIBRI.equals(path)) return oneOf(wanted, "calibri");
@@ -242,6 +252,8 @@ public final class DocxFontAssets {
         if (key.equals("stfangsong") || key.equals("华文仿宋")) return ST_FANGSONG;
         if (key.equals("stsong") || key.equals("华文宋体")) return ST_SONG;
         if (key.equals("stzhongsong") || key.equals("华文中宋")) return ST_ZHONGSONG;
+        if (key.equals("stcaiyun") || key.equals("华文彩云")) return ST_CAIYUN;
+        if (key.equals("sthupo") || key.equals("华文琥珀")) return ST_HUPO;
         if (key.equals("msgothic") || key.equals("mspgothic") || key.equals("msゴシック")
                 || key.equals("msｐゴシック")) return MS_GOTHIC;
         /* ＭＳ 明朝本机就没有字库（mincho 只在装了日文语言的 Windows 上），落到宋体：
