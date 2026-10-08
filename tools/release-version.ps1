@@ -54,19 +54,24 @@ if ($Isolated) {
         if ($AllowNewKey) { $inner += "-AllowNewKey" }
         & pwsh @inner
         $innerExit = $LASTEXITCODE
+        # 副本下一秒就要拆掉：包与校验和先搬回主工作区。
+        # （2.6.0 那一次漏了这一步——搬运写在拆副本之后，条件永远不成立，
+        #   本地只留下 GitHub 上那一份，想装机得从 GitHub 往回下 202 MB。）
+        if ($innerExit -eq 0) {
+            $builtEarly = Join-Path $worktree ("releases/" + $Version)
+            if (Test-Path $builtEarly) {
+                $archiveEarly = Join-Path $primary ("releases/" + $Version)
+                New-Item -ItemType Directory -Force -Path $archiveEarly | Out-Null
+                Copy-Item -Force (Join-Path $builtEarly "*") $archiveEarly
+                Write-Host ("APK 已归档回主工作区：" + $archiveEarly) -ForegroundColor Green
+            }
+        }
     } finally {
         & cmd /c rmdir (Join-Path $worktree "artifacts/host-tools") 2>&1 | Out-Null
         & git worktree remove --force $worktree 2>&1 | Out-Null
         if (Test-Path $worktree) { Write-Warning ("副本没拆掉，手工确认后再删：" + $worktree) }
     }
     if ($innerExit -ne 0) { throw ("副本里的发版没走完（退出码 " + $innerExit + "）；上面是它自己的输出") }
-    $built = Join-Path $worktree ("releases/" + $Version)
-    if (Test-Path $built) {
-        $archive = Join-Path $primary ("releases/" + $Version)
-        New-Item -ItemType Directory -Force -Path $archive | Out-Null
-        Copy-Item -Force (Join-Path $built "*") $archive
-        Write-Host ("APK 已归档回主工作区：" + $archive) -ForegroundColor Green
-    }
     exit 0
 }
 

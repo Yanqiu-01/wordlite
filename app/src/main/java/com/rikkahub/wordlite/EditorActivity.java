@@ -161,6 +161,15 @@ public class EditorActivity extends Activity {
         editPanel.setBackgroundColor(surfaceColor);
         LinearLayout editHeader = new LinearLayout(this);
         editHeader.setGravity(Gravity.RIGHT);
+        // 编辑行上摆着撤销/重做：改字的时候键盘占着下半屏，ribbon 那一排得横滑才够得着，
+        // 而这两个动作恰恰是在改字的时候按得最多。行高与"完成"一致，不动这一行的高度。
+        Button undo = button("撤销", 13), redo = button("重做", 13);
+        undo.setTextColor(viewInk); redo.setTextColor(viewInk);
+        undo.setTag("edit-undo"); redo.setTag("edit-redo");
+        undo.setOnClickListener(v -> { undo(); updateRibbonState(); });
+        redo.setOnClickListener(v -> { redo(); updateRibbonState(); });
+        editHeader.addView(undo, new LinearLayout.LayoutParams(dp(72), dp(36)));
+        editHeader.addView(redo, new LinearLayout.LayoutParams(dp(72), dp(36)));
         Button done = button("完成", 13);
         done.setTextColor(viewInk);
         done.setOnClickListener(v -> finishParagraphEditing());
@@ -295,6 +304,7 @@ public class EditorActivity extends Activity {
             default: break;
         }
         updateStatus();
+        updateRibbonState();
     }
 
     private void setReading(boolean value) {
@@ -308,6 +318,29 @@ public class EditorActivity extends Activity {
         if (status == null || document == null) return;
         status.setText(String.format(Locale.CHINA, "  %d / %d 页  ·  %d 字  ·  中文  ·  %d%%",
                 pageScroll.currentPage() + 1, totalPages, wordCount, Math.round(pageScroll.scaleFactor() * 100)) + (document.trackRevisions ? "  · 修订" : ""));
+    }
+
+    /**
+     * 把当前段落（或选区）的格式状态报给 ribbon：已经开着的加粗/斜体/下划线和当前对齐方式
+     * 会在对应的按钮上亮起来。看不见的状态比要多滑一下的按钮更糟。
+     * 没在编辑段落时全部报"关"，对齐传 -1。
+     */
+    private void updateRibbonState() {
+        if (ribbon == null) return;
+        EditText editor = currentEditor();
+        DocxDocument.ParagraphBlock paragraph = editor == null || !(editor.getTag() instanceof Integer)
+                ? null : paragraphFor((Integer) editor.getTag());
+        if (editor == null || paragraph == null) {
+            ribbon.setParagraphState(false, false, false, -1);
+            return;
+        }
+        Spannable text = editor.getText();
+        int[] range = selectionOrParagraph(editor);
+        boolean bold = range[1] > range[0], italic = bold, underline = bold;
+        for (int at = range[0]; bold && at < range[1]; at++) bold &= styleAt(text, at).bold;
+        for (int at = range[0]; italic && at < range[1]; at++) italic &= styleAt(text, at).italic;
+        for (int at = range[0]; underline && at < range[1]; at++) underline &= styleAt(text, at).underline;
+        ribbon.setParagraphState(bold, italic, underline, paragraph.format.alignment);
     }
 
     private void updateWordCount() {
@@ -472,6 +505,7 @@ public class EditorActivity extends Activity {
         });
         updateWordCount(); bindReview();
         updateStatus();
+        updateRibbonState();
     }
 
     private void openParagraphEditor(int index, int offset) {
@@ -490,6 +524,7 @@ public class EditorActivity extends Activity {
             activeEditor.requestFocus();
             activeEditor.setSelection(Math.max(0, Math.min(offset, activeEditor.length())));
         } finally { building = false; }
+        updateRibbonState();
     }
 
     private void finishParagraphEditing() {
@@ -536,7 +571,12 @@ public class EditorActivity extends Activity {
         applyEditorParagraphFormat(editor, paragraph);
         editors.put(paragraph.index, editor);
         editor.setTag(paragraph.index);
-        editor.setOnFocusChangeListener((v, focus) -> { if (focus) activeEditor = (EditText) v; });
+        editor.setOnFocusChangeListener((v, focus) -> { if (focus) activeEditor = (EditText) v; updateRibbonState(); });
+        // 光标位置决定这一段的加粗/对齐该亮谁：轻点和拖动选字都在这条路上，选完补一次。
+        editor.setOnTouchListener((v, event) -> {
+            if (event.getAction() == android.view.MotionEvent.ACTION_UP) editor.post(this::updateRibbonState);
+            return false;
+        });
         editor.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {
                 if (!building) pushUndo(paragraph.index);

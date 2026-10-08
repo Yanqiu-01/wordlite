@@ -1,0 +1,364 @@
+{
+ "what": "真人中文学术正文的段落级留出集（120~656 字/段）。只当尺子用：不进训练、不进仓库、不印百分比。",
+ "built": "2026-10-09",
+ "builder": "tools/build-holdout-corpus.py",
+ "source": {
+  "db": "PubMed Central 开放获取子集（期刊论文全文 XML）",
+  "query": "chinese[lang] AND \"open access\"[filter] AND 2013:2022[pdat]",
+  "text_location": "..\\aigc-corpus\\holdout2\\segments.jsonl（仓库外，含原文）",
+  "why_no_repo": "原文不进仓库；这一份清单只有来源、许可与计数",
+  "human_side_rule": "全部取自已发表论文正文，没有一个字是模型生成的"
+ },
+ "license_policy": {
+  "accepted": [
+   "CC BY",
+   "CC BY-SA",
+   "CC BY-NC",
+   "CC BY-NC-SA"
+  ],
+  "redistributable_into_repo": [
+   "CC BY",
+   "CC BY-SA"
+  ],
+  "rejected": "XML 里没有明确开放许可，或写明未经授权不得转载的，整篇丢弃（计数见 counts）",
+  "why_nc_nd_ok": "这批原文只在本地测量时读取，不随包、不训练、不对外散布，NC 与 ND 两条限制没被碰到"
+ },
+ "counts": {
+  "xml 里读到的篇数": 3510,
+  "合用正文段（去重前）": 37244,
+  "许可过的篇数": 3508,
+  "许可不过，整篇丢弃": 2,
+  "每篇封顶后候选段": 6406,
+  "去重后剩余段": 6180,
+  "分层抽样后计分段": 4500,
+  "与训练语料共用长串而剔除": 45
+ },
+ "license_seen_per_paper": {
+  "CC BY": 1975,
+  "NONE": 2,
+  "CC BY-NC-SA": 1533
+ },
+ "paragraph_filter_dropped": {
+  "短于 120 字": 27359,
+  "汉字占比低于 45%": 4770,
+  "同一篇封顶后丢掉": 30838,
+  "汉字不足 60 个": 1575,
+  "数字占比过高": 21,
+  "含链接": 135,
+  "像条目堆叠": 7,
+  "题注/题录/声明开头": 7,
+  "版权或利益冲突声明": 19,
+  "长于 656 字（切不出合用的块）": 5,
+  "近重复（2 段共用 24 个 24 字长串）": 173,
+  "近重复（3 段共用 24 个 24 字长串）": 39,
+  "近重复（6 段共用 24 个 24 字长串）": 1,
+  "近重复（13 段共用 24 个 24 字长串）": 1,
+  "近重复（12 段共用 24 个 24 字长串）": 1,
+  "近重复（4 段共用 24 个 24 字长串）": 8,
+  "近重复（5 段共用 24 个 24 字长串）": 3
+ },
+ "journals": [
+  {
+   "journal": "Zhonghua xue ye xue za zhi = Zhonghua xueyexue zazhi",
+   "journal_cn": "中华血液学杂志",
+   "papers": 1860,
+   "segments": 2348,
+   "years": [
+    "2013",
+    "2022"
+   ],
+   "licenses": {
+    "CC BY-NC-SA": 1527,
+    "CC BY": 333
+   },
+   "redistributable": true,
+   "example_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7342070/"
+  },
+  {
+   "journal": "Zhongguo fei ai za zhi = Chinese journal of lung cancer",
+   "journal_cn": "中国肺癌杂志",
+   "papers": 1354,
+   "segments": 1593,
+   "years": [
+    "2013",
+    "2022"
+   ],
+   "licenses": {
+    "CC BY": 1354
+   },
+   "redistributable": true,
+   "example_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC5972975/"
+  },
+  {
+   "journal": "Se pu = Chinese journal of chromatography",
+   "journal_cn": "色谱（Chinese Journal of Chromatography）",
+   "papers": 281,
+   "segments": 507,
+   "years": [
+    "2021",
+    "2022"
+   ],
+   "licenses": {
+    "CC BY": 281
+   },
+   "redistributable": true,
+   "example_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC9274834/"
+  },
+  {
+   "journal": "Chinese Journal of Hematology",
+   "journal_cn": "",
+   "papers": 7,
+   "segments": 3,
+   "years": [
+    "2016",
+    "2021"
+   ],
+   "licenses": {
+    "CC BY-NC-SA": 6,
+    "CC BY": 1
+   },
+   "redistributable": true,
+   "example_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7342135/"
+  },
+  {
+   "journal": "Chinese Journal of Chromatography",
+   "journal_cn": "",
+   "papers": 5,
+   "segments": 3,
+   "years": [
+    "2021",
+    "2022"
+   ],
+   "licenses": {
+    "CC BY": 5
+   },
+   "redistributable": true,
+   "example_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC9404110/"
+  },
+  {
+   "journal": "Chinese Journal of Lung Cancer",
+   "journal_cn": "",
+   "papers": 1,
+   "segments": 1,
+   "years": [
+    "2018",
+    "2018"
+   ],
+   "licenses": {
+    "CC BY": 1
+   },
+   "redistributable": true,
+   "example_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC6136062/"
+  },
+  {
+   "journal": "Journal of traditional Chinese medicine = Chung i tsa chih ying wen pa",
+   "journal_cn": "中国中医研究院学报（英文版，英文稿，不进尺子）",
+   "papers": 2,
+   "segments": 0,
+   "years": [
+    "2016",
+    "2016"
+   ],
+   "licenses": {
+    "NONE": 2
+   },
+   "redistributable": false,
+   "example_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7147197/"
+  }
+ ],
+ "grid": {
+  "分析化学（色谱）·其他": {
+   "120-199": 1,
+   "200-319": 96,
+   "320-479": 80,
+   "480-656": 43
+  },
+  "分析化学（色谱）·方法与仪器": {
+   "120-199": 1,
+   "200-319": 70,
+   "320-479": 32,
+   "480-656": 19
+  },
+  "分析化学（色谱）·组学与生境样本": {
+   "120-199": 1,
+   "200-319": 18,
+   "320-479": 10,
+   "480-656": 2
+  },
+  "分析化学（色谱）·药物与天然产物": {
+   "120-199": 0,
+   "200-319": 28,
+   "320-479": 20,
+   "480-656": 6
+  },
+  "分析化学（色谱）·食品环境与安全": {
+   "120-199": 1,
+   "200-319": 46,
+   "320-479": 24,
+   "480-656": 12
+  },
+  "肿瘤学（肺）·其他": {
+   "120-199": 15,
+   "200-319": 136,
+   "320-479": 93,
+   "480-656": 92
+  },
+  "肿瘤学（肺）·基础与生物标志物": {
+   "120-199": 13,
+   "200-319": 220,
+   "320-479": 111,
+   "480-656": 109
+  },
+  "肿瘤学（肺）·外科与放疗": {
+   "120-199": 1,
+   "200-319": 120,
+   "320-479": 87,
+   "480-656": 72
+  },
+  "肿瘤学（肺）·影像筛查与病理": {
+   "120-199": 0,
+   "200-319": 78,
+   "320-479": 47,
+   "480-656": 46
+  },
+  "肿瘤学（肺）·流行病与生存": {
+   "120-199": 0,
+   "200-319": 28,
+   "320-479": 19,
+   "480-656": 9
+  },
+  "肿瘤学（肺）·药物治疗与靶向": {
+   "120-199": 2,
+   "200-319": 119,
+   "320-479": 87,
+   "480-656": 90
+  },
+  "血液病学·其他": {
+   "120-199": 63,
+   "200-319": 174,
+   "320-479": 78,
+   "480-656": 25
+  },
+  "血液病学·出凝血与血栓": {
+   "120-199": 45,
+   "200-319": 110,
+   "320-479": 60,
+   "480-656": 18
+  },
+  "血液病学·实验诊断与微观": {
+   "120-199": 5,
+   "200-319": 36,
+   "320-479": 11,
+   "480-656": 4
+  },
+  "血液病学·淋巴瘤": {
+   "120-199": 60,
+   "200-319": 145,
+   "320-479": 73,
+   "480-656": 26
+  },
+  "血液病学·白血病与骨髓肿瘤": {
+   "120-199": 90,
+   "200-319": 535,
+   "320-479": 124,
+   "480-656": 71
+  },
+  "血液病学·贫血与红细胞疾病": {
+   "120-199": 16,
+   "200-319": 90,
+   "320-479": 35,
+   "480-656": 14
+  },
+  "血液病学·造血干细胞移植与输血": {
+   "120-199": 74,
+   "200-319": 241,
+   "320-479": 91,
+   "480-656": 37
+  }
+ },
+ "bands": {
+  "120-199": 388,
+  "200-319": 2290,
+  "320-479": 1082,
+  "480-656": 695
+ },
+ "years": {
+  "2013": 143,
+  "2014": 176,
+  "2015": 482,
+  "2016": 471,
+  "2017": 461,
+  "2018": 518,
+  "2019": 454,
+  "2020": 477,
+  "2021": 684,
+  "2022": 589
+ },
+ "per_paper": {
+  "papers_with_segments": 3031,
+  "segments": 4455,
+  "max_segments_per_paper": 2,
+  "distinct_first_authors": 1681
+ },
+ "disciplines": {
+  "血液病学·白血病与骨髓肿瘤": 820,
+  "肿瘤学（肺）·基础与生物标志物": 453,
+  "血液病学·造血干细胞移植与输血": 443,
+  "血液病学·其他": 340,
+  "肿瘤学（肺）·其他": 336,
+  "血液病学·淋巴瘤": 304,
+  "肿瘤学（肺）·药物治疗与靶向": 298,
+  "肿瘤学（肺）·外科与放疗": 280,
+  "血液病学·出凝血与血栓": 233,
+  "分析化学（色谱）·其他": 220,
+  "肿瘤学（肺）·影像筛查与病理": 171,
+  "血液病学·贫血与红细胞疾病": 155,
+  "分析化学（色谱）·方法与仪器": 122,
+  "分析化学（色谱）·食品环境与安全": 83,
+  "肿瘤学（肺）·流行病与生存": 56,
+  "血液病学·实验诊断与微观": 56,
+  "分析化学（色谱）·药物与天然产物": 54,
+  "分析化学（色谱）·组学与生境样本": 31
+ },
+ "not_used": [
+  [
+   "汉斯出版社 hanspub.org（中文，全学科，31,471 篇 2019-2022 挂 DOI）",
+   "文章页只写 '开放获取'，页脚是 '版权所有：汉斯出版社 All rights reserved'，Crossref 那批记录的 license/link 字段是空的：许可核对不过，放弃"
+  ],
+  [
+   "OpenAlex（元数据 CC0，可拿 language:zh + 开放获取 + best_oa_location.license 跨学科筛）",
+   "本机出口取不到：api.openalex.org 首次请求即 HTTP 429 Too Many Requests，直连与代理 127.0.0.1:7897 两路都一样，重试 6 次无果；这条路等限流解除再接"
+  ],
+  [
+   "DOAJ 中文期刊（bibjson.language:zh 328 份，文章级题录 406,198 条，含 link 与学科）",
+   "题录与期刊级许可齐全（CC BY 31 份 / CC BY-NC 37 份 / CC BY-NC-ND 254 份），但全文在各刊自己的站上：抽 1,000 条链接落在 100 多个主机，最大一族 thesisDetails?columnId= 平台（护理研究/针刺研究/四川大学学报工程科学版/机械传动/水利学报/大数据期刊……）直连与代理都只回一张 6,006 字节的 JS 挑战页。要吃得下这一路得按平台写取页适配器，本轮没做，题录已缓存（见 audit 的 sources）"
+  ],
+  [
+   "PMC 里没进开放获取子集的中文刊（中华肝脏病杂志、川大学报医学版早期、华西口腔等 13 本）",
+   "正文 XML 的 permissions 里写的是 '未经授权，不得转载、摘编本刊文章'，逐篇核许可全部不过"
+  ],
+  [
+   "中国知网 / 万方 / 国家哲社文献中心的学位论文与期刊",
+   "要登录，匿名取不到；国家哲社文献中心即便可读也没有允许再散布的授权"
+  ]
+ ],
+ "never_in_training": {
+  "measured": "2026-10-09 07:24:18",
+  "command": "py tools/build-holdout-corpus.py proof --check-train",
+  "new_scored_segments": 4455,
+  "old_repo_holdout": {
+   "old_holdout_sentences": 556,
+   "exact_equal": 0,
+   "old_sentence_inside_new_paragraph": 0
+  },
+  "public_training": {
+   "scored_sentences": 4515370,
+   "exact_equal_sentences": 0,
+   "segments_sharing_long_string": 9,
+   "long_string_chars": 24,
+   "min_hits": 2
+  },
+  "verdict": "合格：留出段与全部公开训练计分句逐字相同 0 条，共用长串达 2 处以上的段 9 段（上一轮已用 prune 那一步剔过一轮，这一条复述当时的实测）",
+  "note": "这一档只量重合，不改语料；原文一律留在仓库外"
+ }
+}
