@@ -12,7 +12,14 @@ import java.util.regex.Pattern;
 
 /** 本机查重指纹库：归一化、句子切分、字符 n-gram 与 MinHash 指纹、倒排候选、Dice 判定与重复率统计。 */
 public final class TextCorpus {
-    /** 有效字符数少于该值的句子不参与匹配。 */
+    /**
+     * 有效字符数少于该值的句子不参与匹配。**这一档停在 12，是实测否掉了"放到 10"之后停的**：把门放到
+     * 11 / 10 / 9，`verbatim`、`split-commas`、新加的 `chopped`（把抄来的段落每十个字切一刀）、`pruned`、
+     * `sub-char-25` 五列逐位不动，噪声也都是 0（表在 docs/rewrite-robustness.md 的 1.1.5 一节）。原因写在
+     * 那一节：短的逐字碎片本来就由指纹带那一层接住（`Fingerprints.tokens()` 跳标点，插进去的逗号打不断），
+     * 句长门只管到"改写过的短句"，而那一批在十字上下没有可测的差别。这一档留成活值（minSentenceChars）
+     * 是给实测台扫的，产品路径读它但从不改它。
+     */
     public static final int MIN_SENTENCE_CHARS = 12;
     /**
      * 判定相似所需的字符三元组 Dice 下限。0.60 是当年凭三个手搓例句定的，标定台在真实语料上扫过
@@ -72,6 +79,16 @@ public final class TextCorpus {
     /** 单句匹配最多扫描的 posting 条数，保证最坏情形开销有界。 */
     private static final int POSTING_SCAN_CAP = 6000;
     private static final int MIN_SHARED_GRAMS = 3;
+    /** 抗改写实测台（-Drrd4）扫句长门用的活值，产品路径一次也不碰。 */
+    private static int minSentenceChars = MIN_SENTENCE_CHARS;
+
+    static void overrideMinSentenceChars(int minimumChars) {
+        minSentenceChars = minimumChars;
+    }
+
+    static void restoreMinSentenceChars() {
+        minSentenceChars = MIN_SENTENCE_CHARS;
+    }
     private static final int MAX_CORPUS_SENTENCES = 40000;
     /** 指纹索引的 token 上限，超了就只保留句级比对。 */
     private static final int MAX_FINGERPRINT_TOKENS = 1200000;
@@ -1128,7 +1145,7 @@ public final class TextCorpus {
             int e = Math.min(count, s + WINDOW_CHARS);
             int fromUnit = starts[s];
             int toUnit = starts[e];
-            if (e - s < MIN_SENTENCE_CHARS) {
+            if (e - s < minSentenceChars) {
                 if (e >= units) break;
                 continue;
             }
@@ -1172,7 +1189,7 @@ public final class TextCorpus {
             map[units++] = i;
             codePoints++;
         }
-        if (codePoints < MIN_SENTENCE_CHARS || units == 0) return null;
+        if (codePoints < minSentenceChars || units == 0) return null;
         Frag frag = new Frag();
         frag.key = key.toString();
         frag.map = Arrays.copyOf(map, units);

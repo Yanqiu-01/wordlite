@@ -54,6 +54,12 @@ public final class RewriteRobustnessRegression {
     };
     private static final float[] BAG_SWEEP_FLOORS = { 1.01f, 0.90f, 0.80f, 0.76f, 0.72f, 0.68f, 0.64f,
             0.60f, 0.56f };
+    /** -Drrd4=1 时扫句长门与短句桶共享三元组地板（TextCorpus 的 D4 两档）。 */
+    private static final boolean D4 = System.getProperty("rrd4") != null;
+    private static final String[] D4_CASES = {
+        "verbatim", "split-commas", "chopped", "pruned", "sub-char-25",
+    };
+    private static final int[] D4_MIN_CHARS = { 12, 11, 10, 9 };
     private static final String[] SWEEP_CASES = {
         "verbatim", "synonym", "sub-char-10", "sub-char-25", "pruned", "split-commas", "spliced",
     };
@@ -221,6 +227,7 @@ public final class RewriteRobustnessRegression {
             measure("stacked", copies, fillers, sources, corpus, mutator("stacked")),
             measure("pruned", copies, fillers, sources, corpus, mutator("pruned")),
             measure("split-commas", copies, fillers, sources, corpus, mutator("split-commas")),
+            measure("chopped", copies, fillers, sources, corpus, mutator("chopped")),
             measure("merge-pairs", copies, fillers, sources, corpus, mutator("merge-pairs")),
             measure("sub-char-10", copies, fillers, sources, corpus, mutator("sub-char-10")),
             measure("sub-char-25", copies, fillers, sources, corpus, mutator("sub-char-25")),
@@ -232,11 +239,12 @@ public final class RewriteRobustnessRegression {
         printTable(scores);
         // 诊断模式（-Drrs / -Drrroc / -Drrcont）不跑地板：这几台是拿来查明原因的，
         // 让一条地板断言半路把进程掐掉，就永远看不到后面的分布表了。
-        if (SWEEP || ROC || CONT || BAG) {
+        if (SWEEP || ROC || CONT || BAG || D4) {
             if (SWEEP) sweep(copies, fillers, sources, corpus);
             if (ROC) roc(copies, fillers, sources, corpus);
             if (CONT) containmentSweep(copies, fillers, sources, corpus);
             if (BAG) bagSweep(copies, fillers, sources, corpus);
+            if (D4) shortFragmentSweep(copies, fillers, sources, corpus);
             return;
         }
         embedding(copies, fillers, sources, corpus);
@@ -367,6 +375,10 @@ public final class RewriteRobustnessRegression {
         recall(scores, "pruned", 98d);         // 带子分块修复之后 97.8，包含率通道独立之后 99.0
         recall(scores, "split-commas", 99.4d); // 0.55->0.50 之后 98.1，带子分块修复之后 99.4，1.1.2 之后 99.5
         recall(scores, "merge-pairs", 99.5d);  // 1.1.1 的多候选守卫之后 99.4，1.1.2 之后 99.6
+        // chopped（1.1.5 新加的一档）：抄来的段落被重新断句成十字一段。这一档专门盯着句长门，
+        // 实测 99.5%——短的逐字碎片由指纹带那一层接住（tokens() 跳标点，补进去的逗号打不断字符流）。
+        // 它同时是"句长门 12 → 10 量不出差别"那件事的复现器：哪天有人再提放开门，先跑这一档。
+        recall(scores, "chopped", 99d);
         recall(scores, "sub-char-10", 99d);
         // 袋口径进产品之前是 26.4%，之后 53.8%。地板从 26 提到 50：这条通道哪天被改窄，这条先红。
         recall(scores, "sub-char-25", 50d);
@@ -698,6 +710,42 @@ public final class RewriteRobustnessRegression {
         }
     }
 
+    /**
+     * 句长门与短句桶地板逐档扫。口径要说清：夹具与文库怎么造句子用的是常量 MIN_SENTENCE_CHARS（现在 10），
+     * 引擎里那一档是活值——所以这张表里"12"那一行是同一份夹具上把门临时收回 12 量的，改前改后同一个底，
+     * 不能拿 1.1.4 那张表搬过来比。
+     */
+    private static void shortFragmentSweep(ArrayList<String> copies, ArrayList<String> fillers,
+                                          ArrayList<TextCorpus.Source> sources, TextCorpus corpus) {
+        int[] chars = intProperty("rrd4chars", D4_MIN_CHARS);
+        System.out.println();
+        System.out.println("| 句长门 | " + join(D4_CASES) + " | 嵌入带内 | 嵌入带外 | 噪声 |");
+        System.out.print("| --- |");
+        for (int i = 0; i < D4_CASES.length; i++) System.out.print(" --- |");
+        System.out.println(" --- | --- | --- |");
+        for (int c = 0; c < chars.length; c++) {
+            {
+                StringBuilder row = new StringBuilder();
+                row.append("| ").append(chars[c]).append(" |");
+                int noise = 0;
+                TextCorpus.overrideMinSentenceChars(chars[c]);
+                try {
+                    for (int i = 0; i < D4_CASES.length; i++) {
+                        Score score = measureOnce(D4_CASES[i], copies, fillers, sources, corpus);
+                        row.append(" ").append(percent(score.recall)).append(" |");
+                        noise += score.noiseChars;
+                    }
+                    int[] n = embeddingNumbers(copies, fillers, corpus);
+                    row.append(" ").append(n[1]).append('/').append(n[0]).append(" |")
+                            .append(" ").append(n[3]).append(" |")
+                            .append(" ").append(noise).append(" |");
+                } finally {
+                    TextCorpus.restoreMinSentenceChars();
+                }
+                System.out.println(row);
+            }
+        }
+    }
     /** 袋口径那一档逐档扫：第一行是关掉这条通道（1.01，袋 Dice 最高只能到 1），也就是改之前的产品行为。 */
     private static void bagSweep(ArrayList<String> copies, ArrayList<String> fillers,
                                 ArrayList<TextCorpus.Source> sources, TextCorpus corpus) {
@@ -761,6 +809,25 @@ public final class RewriteRobustnessRegression {
     }
 
     /** 一条口径一个确定性变换。主表和阈值扫描共用这一份，两边不可能测的是两件事。 */
+    /**
+     * 每十个字一刀，刀口补一个逗号：抄来的段落被重新断句成十字一段的碎片。这一档专门量句长门那一道——
+     * 门在 12 以上时这些碎片连候选都进不了，门放开到 10 才开始有得分的机会（D4）。
+     */
+    private static String chopped(String text) {
+        StringBuilder out = new StringBuilder();
+        int run = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            out.append(c);
+            if (!Character.isWhitespace(c)) run++;
+            if (run >= 10 && i + 1 < text.length()) {
+                out.append('，');
+                run = 0;
+            }
+        }
+        return out.toString();
+    }
+
     private static Mutator mutator(final String name) {
         if ("verbatim".equals(name)) return new Mutator() {
             public String run(String text) { return text; }
@@ -791,6 +858,9 @@ public final class RewriteRobustnessRegression {
         };
         if ("split-commas".equals(name)) return new Mutator() {
             public String run(String text) { return splitSentences(text); }
+        };
+        if ("chopped".equals(name)) return new Mutator() {
+            public String run(String text) { return chopped(text); }
         };
         if ("merge-pairs".equals(name)) return new Mutator() {
             public String run(String text) { return mergeSentences(text); }

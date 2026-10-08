@@ -36,6 +36,7 @@ public final class TextCorpusRegression {
         splitting();
         similarity();
         bagChannel();
+        shortFragments();
         matching();
         fingerprints();
         merging();
@@ -288,6 +289,52 @@ public final class TextCorpusRegression {
         negative.add(source("bag-2", "另一篇交通论文", "wanfang"), base);
         check(negative.match("城区路网的投资强度在过去十年里持续上升，公共交通的客运分担率却停滞不前，"
                 + "这两条曲线背后的政策逻辑完全不同。", null).hits.isEmpty(), "同领域另一件事不许被袋口径撞车");
+    }
+
+    /**
+     * 短碎片（D4 的实测结论钉在这里）：把抄来的段落每十个字补一个逗号，碎片全部短于句长门 12，
+     * 整段照旧认得出来——接住它的是指纹带那一层（Fingerprints.tokens() 跳标点，补进去的逗号打不断
+     * 字符流）。所以句长门停在 12：放开到 10 甚至 9，五列口径逐位不动，表与理由见
+     * docs/rewrite-robustness.md 的 1.1.5 一节。要改这一档，先拿出能看出差别的口径。
+     */
+    private static void shortFragments() {
+        String library = "深度学习模型的训练过程需要大量标注数据，否则模型很难收敛到稳定状态，"
+                + "另一种做法是把特征工程交给领域专家手工完成，两条路线的代价完全不同。";
+        TextCorpus corpus = new TextCorpus();
+        TextCorpus.Source paper = source("sf-1", "两条路线的代价", "local");
+        corpus.add(paper, library);
+        StringBuilder chopped = new StringBuilder("本节先交代实验设置与评价指标。");
+        int run = 0;
+        for (int i = 0; i < library.length(); i++) {
+            char c = library.charAt(i);
+            chopped.append(c);
+            if (!Character.isWhitespace(c)) run++;
+            if (run >= 10 && i + 1 < library.length()) {
+                chopped.append('，');
+                run = 0;
+            }
+        }
+        chopped.append("最后一节是结论与展望。");
+        String query = chopped.toString();
+        TextCorpus.Report report = corpus.match(query, null);
+        check(!report.hits.isEmpty(), "十字一段的碎片必须仍然被认出来：接住它的是指纹带，不是句长门");
+        int flagged = 0;
+        for (int i = 0; i < report.hits.size(); i++) {
+            TextCorpus.Hit hit = report.hits.get(i);
+            if (hit.source == paper) flagged += nonBlank(query.substring(hit.start, hit.end));
+        }
+        int planted = nonBlank(library);
+        System.out.println("SHORT FRAGMENTS 种入 " + planted + " 字，十字一刀之后认回 " + flagged + " 字");
+        check(flagged * 100 >= planted * 95, "十字一刀的抄写至少要认回 95%，实测 " + flagged + "/" + planted);
+        check(TextCorpus.MIN_SENTENCE_CHARS == 12,
+                "句长门停在 12：放开到 10 与 9 在实测台上逐位不动，改这一档要先拿出能看出差别的口径");
+    }
+
+    /** 非空白字符数：这一段自己数，不去碰引擎里的私有口径。 */
+    private static int nonBlank(String text) {
+        int n = 0;
+        for (int i = 0; i < text.length(); i++) if (!Character.isWhitespace(text.charAt(i))) n++;
+        return n;
     }
 
     /** 指纹带：与断句无关的连续重复，短于最短匹配长度的巧合不算重复。 */

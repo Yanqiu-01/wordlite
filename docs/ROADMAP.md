@@ -98,3 +98,103 @@
 1. 先写回归断言，再写实现。
 2. `pwsh tools/test-host.ps1` 全绿；动到界面或渲染的版本再跑 Robolectric。
 3. `pwsh tools/build-host.ps1` 出 APK，`pwsh tools/release-version.ps1 -Version x.y.z` 一次完成升版本、提交、打 tag、开 release 并附上可安装 APK。
+
+---
+
+## 第二轮：1.1.4 → 1.3.4（20 版）＋ 四个大版本（2.0.0 / 3.0.0 / 4.0.0 / 5.0.0）
+
+上一轮（0.4.5 → 1.1.3，22 版/4 个大版本）走完，判据与报告界面都有了实测基线。这一轮只干一件事：**每一条判据与每一个界面数字，都要能追溯到一次可重跑的实测**。所以每条验收都点名仓库里已经存在的回归套件或实测脚本，写"待实测"的地方就是这一版要产出的那张表，不预先承诺还没量出来的数字。
+
+延续的规矩：每个版本一个真改动，自己带回归断言，自己出 APK，自己开 release。**禁止只改版本号。** 版本号单增：已发到 `1.1.3`（`versionCode 35`）；本轮起点是 `1.1.4`，终点的四个大版本按 `2.0.0 / 3.0.0 / 4.0.0 / 5.0.0` 排。每条的通用底线与上一轮相同：`pwsh tools/test-host.ps1` 全绿；改动若动到判据或检索，`tools/detect-calibration.ps1` 与 `tools/rewrite-robustness.ps1` 的 `ENGINE CURRENT` 那一行的变化量与噪声必须在 CHANGELOG 里同时报出，噪声只许降不许升（当前 0）；动到界面或渲染的再跑 Robolectric（`sh tools/build.sh && sh tools/test.sh`）。
+
+### 1.1.x 收尾：判据遗留的三条整数账（4 版）
+
+| 版本 | 内容 | 验收 |
+| --- | --- | --- |
+| 1.1.4 | 已交付：D2 落地——字符袋 Dice 成为第三条 OR 判据，地板 0.72 是负例天花板 0.577 + 0.14 量出来的；虚词二元组那条按实测天花板 1.0 作废，实现留在实测台里当反证尺 | `sub-char-25` 26.4% → 53.8%，17 档噪声仍为 0；`TextCorpusRegression` 183 → 200、`RewriteRobustnessRegression` 69 → 81，全量 24 套件 2456 → 2496；天花板表在 `docs/rewrite-robustness.md` 的 1.1.4 一节 |
+| 1.1.5 | 短句碎片进比对（D4，即上一轮的 1.1.5）：`TextCorpus.MIN_SENTENCE_CHARS` 12 → 10，同时把短句桶的共享三元组地板 3 → 5。两档一起动，不许只放门槛 | **对账：本行内容实测否掉，判据一个字没改。** 新加 `chopped` 口径（抄来的段落每十字补一个逗号）专门量这一档，`-Drrd4=1` 把门扫到 12/11/10/9：`verbatim`、`split-commas`、`chopped`、`pruned`、`sub-char-25` 五列与嵌入档逐位不动，噪声四行全 0；短句桶地板 3 与 5 同样逐位相同，那条通道扫完就删了。原因：短的逐字碎片由指纹带接住（`Fingerprints.tokens()` 跳标点，补的逗号打不断 token 流），句长门只管逐句那一条路。表在 `docs/rewrite-robustness.md` 的 1.1.5 一节；`RewriteRobustnessRegression` 81 → 84（`chopped` + `-Drrd4`）、`TextCorpusRegression` 200 → 203 |
+| 1.1.6 | 裁后区间自己把分值说清楚（上一轮的 1.1.6）：`hit.score` 现在是一对片段的加权 Dice，一条窄命中报的是整个片段的相似度；改成按裁后区间重算，并把 `MIN_SHARED_BLOCK = 5` 与 `MAX_SHARED_BLOCKS = 16` 拿到真文档标定台上各扫一遍（这两档至今只在宿主用例上定过） | `DetectRegression` 的分值档全部重扫并给出改前改后两个数；`tools/detect-calibration.ps1` 换一档常数要说清召回与误报各动多少，表落 `docs/detection-calibration.md` |
+| 1.1.7 | 拼接片段不许只认半句（上一轮的 1.1.7）：1.1.1 的守卫是"多候选片段整段报"，代价是 `merge-pairs` −4 字；正确做法是对过线的前 N 个候选各裁一次再取并集 | `merge-pairs` / `spliced` 回到 99.7% / 99.5% 以上，而 `embedding` 的 0 字连带标红不许回去（`RewriteRobustnessRegression` 的多报天花板每句 ≤ 4 字仍绿） |
+
+### 1.2.x 报告能说的话：证据形状与导出（4 版）
+
+| 版本 | 内容 | 验收 |
+| --- | --- | --- |
+| 1.2.1 | 袋口径的天花板随句长分桶：0.577 这个天花板是整批句子一个数，而三元组那边的经验是长句桶天花板最高（0.358 出现在 50-80 字桶）。把袋天花板按短/中/长三桶分别量一遍，必要时把 `SIMILAR_BAG_DICE` 换成分档表 | `RewriteRobustnessRegression.bagStudy` 出三桶分表 + 反证（把地板压到各自天花板之下必须各撞出误标）；分档表与两张表（各桶召回、各桶误报）落 `docs/paraphrase-robustness.md`；召回不升就只做度量、产品值不动，并把"不落地"写进那条 |
+| 1.2.2 | 报告里那句"相似率是下限"给一个可算的下界：`TextCorpus.Report` 已经记着覆盖窗口数与入库篇数，把它和 `windowsAsked` 一起换算成"已读 / 应收"两栏并进指标卡（`ReportCenterUI.summaryHtml`），而不是只在说明里写一句话 | `ReportStoreRegression` 加断言：覆盖率随 `windowsAsked` 单调、缺数据时那一格显示"未量到"而不是 100%；HTML 那一格只出现一次（与 `flaggedChars` 同一类断言） |
+| 1.2.3 | 逐句可疑区间与 `flaggedChars` 进报告，不再只印一个字符加权句分：`AigcDetector.Sentence.flaggedChars` 在 `AigcRegression` 里有断言，但报告面板与 HTML 一个字都没读它（0.7.0 对账承认"只做到一半"，一直拖到现在）。五档置信与可疑字数一起进指标卡，重复/改写/AI/疑似 AI 四个数与 `CharLedger` 同口径 | `ReportStoreRegression` + `CharLedgerRegression` 加断言：四个数加和 ≤ 100%，档位边界与 `AigcDetector` 五档一致；Robolectric `ReportCenterTest` 断言那一格在深色/浅色两套配色下都渲染 |
+| 1.2.4 | **袋口径的候选生成脱离三元组倒排**（本轮精度遗留里最要紧的一条，1.1.4 的 CHANGELOG 已经把它单独列成"没修的那一半"）：`TextCorpus.bestMatch` 的候选仍来自三元组倒排并要过 `shared >= 3`，改写重到不剩三枚首尾相接三元组的句子根本进不了打分——这才是 `sub-char-50` 停在 7.6% 的原因（句级过线率本来是 14.5%）。换成字符袋倒排 + PPJoin 式前缀过滤：按字频取最稀的几枚字做种子，前缀按 df 升序排，长度不够的候选在比对之前按袋长度上界剪掉 | `RewriteRobustnessRegression` 加一列"进候选率"（目标句是否出现在打分候选里），`sub-char-50` 的段级召回从 7.6% 起报改前改后两个数（目标值待实测，不预设）；`tools/full-scan-probe.ps1` 的 RATES 段不许变差；每篇候选的前缀长度与倒排条目数打印出来，倒排体积上限进 `TextCorpusRegression` 的开销断言 |
+
+### 1.3.x 编辑与自建库的边角（4 版）
+
+| 版本 | 内容 | 验收 |
+| --- | --- | --- |
+| 1.3.1 | 英文档的查询整形接上生产：`CnkiSearch.FAMILY_LATIN` 至今没有生产调用方，"同一窗口对不同源给不同长度"对英文句没生效过（0.7.1 对账自认）。把英文窗口按 `FAMILY_LATIN` 分族给长度，Crossref / OpenAlex / CORE 三条路各自吃自己那一档 | `CnkiSearchRegression` 加断言：同一英文窗口给 Crossref 与 OpenAlex 的查询串长度不同、术语块与 DOI 整块保住；`tools/cnki-live-probe.ps1` 那台对题重合度实测重跑，变化量进 CHANGELOG（对题率不升就写"没救回来"，不许改口径凑数） |
+| 1.3.2 | 源列表去重加一列"刊名/会议名"：当前 `CnkiSearchRegression` 实测 40 条题录只有 19 个不同 (题名, 年)——同一首题名被不同栏目/页面重复返回，同一篇论文以不同页码出现 5 次，占掉配额又挤掉别的论文（`docs/retrieval-recall.md` 遗留表）。去重键在 (题名, 年) 之上引入规范化刊名/会议名与卷期页，重复条目合并而不新增 | `CnkiSearchRegression` + `ApiRegression` 加断言：那 40 条题录去重后的条数（当前基线 19）只许等于或低于现值、同一篇论文多页码只占一次配额；`LocalRewriteRegression` 的配额账本断言跟着更新，`MAX_REQUESTS` 消耗不变 |
+| 1.3.3 | 降重建议逐条采纳：命中证据表里每条建议可单独采纳或忽略，采纳后落回正文并可并排看改写前后（1.0.4 那条一直没做，降重太温和的账挂在这里：20 段只推 291 字改动，全文 6%） | `LocalRewriteRegression` 加断言：逐条采纳只改被采纳那段的偏移映射、忽略项不进二次检测；采纳前后各检一次的差值仍按 0.4.7 那条口径报（`rewriteDelta`）；Robolectric `EditorWorkflowTest` 断言并排视图与撤销 |
+| 1.3.4 | 自建库检索复用 2.0.0 的命中地图：库内检索复用 `Fingerprints` 锚点，结果按"库内第几篇第几句"给偏移，点击跳正文并高亮那一段，与查重报告共用同一套命中地图色带 | `CorpusImportRegression` 加断言：库内检索的偏移落回原文、被排除区间（参考文献/致谢）不进检索分母；Robolectric `ReportCenterTest` 断言两处高亮几何一致、500 条结果滚动不掉帧（复用视图断言与 1.0.2 同一条） |
+
+### 2.0.0 报告中心（大版本 + 3）
+
+| 版本 | 内容 | 验收 |
+| --- | --- | --- |
+| 2.0.0 | **命中地图**：报告详情页顶部一条按文档顺序展开的色带，重复 / 改写 / AI / 疑似 AI 四种颜色，宽度 = 字数占比，点击落点跳正文并高亮那一段（`ReportCenterUI` + `CheckReport` 的 evidence 序列；这是后面三个版本共用地基） | 新 `HitMapRegression`：色带分段宽度等于各桶字符数除以总有效字数、四种桶互不重叠、空报告渲染成"未检出"而不是零宽条；Robolectric `ReportCenterTest` 断言点击落点偏移与 `CheckReport.Evidence.start` 逐字相等 |
+| 2.0.1 | 筛选与排序落到色带与证据表：按来源 / 按相似度档 / 只看未引用，筛选后指标卡重算 | Robolectric 断言筛选结果条数等于 `CheckReport.Evidence` 手算值；`CharLedgerRegression` 加断言：筛选态的相似率与 `CharLedger` 那一套独立相加口径不打架（`independentSums` 与 `overlapChars` 不许同时涨） |
+| 2.0.2 | 深色模式、字号跟随系统、触控目标 ≥ 48dp、图标按钮全部带 contentDescription（1.0.5/1.0.6 的色带与详情页部分） | Robolectric 断言两套配色、两套字号下色带与证据表不重叠、可点区域 ≥ 48dp；`RibbonUI` 与 `AigcPanel` 的按钮缺 contentDescription 直接失败 |
+| 2.0.3 | 导出与分享：HTML / PDF / TXT 三份，导出内容含命中地图与"已读 / 应收"那一格；体积封顶、超长摘要截断 | `CheckReport` 断言导出文本与面板同一批数字；`PdfRegression` 加断言；`ReportStoreRegression` 断言导出失败（磁盘满 / 分享被拒）不动已入库的报告 |
+
+### 3.0.0 AIGC 内核（大版本 + 3）
+
+| 版本 | 内容 | 验收 |
+| --- | --- | --- |
+| 3.0.0 | **标注语料落地**：现在 `AigcScorer` 的系数版本是 `v1-order-only`，是从真人零误报预算反推的上限、不是标定值（`docs/aigc-calibration.md` 第一节就写着"本轮没有真人撰写 + 大模型改写混合语料"）。这一版只做语料：入库一批带来源说明的样本进 `tests/corpus/`，把真人段、逐字抄段、模板化 AI 段分开标注，并把 `AigcCalibrationSweep` 改成读这批真实标注而不是同源改写当 AI | 标定台输出的表带"样本来源"列；`AigcRegression` 加断言：语料缺失时标定直接失败（不许静默退回自指反证）；语料的授权与可分发性写在 `tests/corpus/` 那份说明里，不能分发的原始文本只保留派生统计量 |
+| 3.0.1 | 系数标定与 `version()` 换号：有了 3.0.0 的语料才允许把 `v1-order-only` 换成标定值，逐特征给 ROC 拐点（句内逗号密度、重复三 gram、句长方差等，见 `docs/oss-algorithms.md` 的 F1/F3 那两条"该标定而不是该加"） | `tools/aigc-calibration.ps1` 可重跑出拐点表；`AigcScorer.version()` 换号且 CHANGELOG 给出旧权重反证（p99/max/越线句数）与新权重同三列对比；语料不足时按原设计报"样本不足"不给比例（0.4.6 那条断言不许松） |
+| 3.0.2 | 滑窗困惑度通道（SLS 式，按 `docs/oss-algorithms.md` 的 F4：检测区间而非整篇）：手机侧不跑语言模型，用字级 n-gram 频率做困惑度代理，窗口内低于阈值才计入可疑字数 | 新 `PerplexityWindowRegression`：真人段整段不进窗口、模板段的窗口落点 ≥ 90%；`MAX_*` 开销上限进断言；与 3.0.1 系数表互不双计（`CharLedger` 断言 AIGC 与重复的交集只计一次） |
+| 3.0.3 | 档位与置信进报告，并把"疑似 AI"单独一档：3.0.1 的档位才有可引用的分数；疑似 AI 进证据表但不进比例分子（与 1.1.4 之后"分子只有一个数"的规矩同一口径） | `AigcRegression` 断言五档边界与 `SEGMENT_SCORE_FLOOR = 0.35` 的关系；`CharLedgerRegression` 断言疑似档不改总相似率；Robolectric 断言 `AigcPanel` 展开明细与详情页同源 |
+
+### 4.0.0 检索与自建库（大版本 + 3）
+
+| 版本 | 内容 | 验收 |
+| --- | --- | --- |
+| 4.0.0 | **覆盖预算**：`EngineSettings.MAX_SEARCH_MILLIS = 180_000L`、`MAX_REQUESTS = 120`、`windows = 6` 这组预算把长文压着——`docs/retrieval-recall.md` 里 T4 那一行写明 36 条入库里有 10 条是被 180 秒闸门掐掉的（"已跑 6/11 扇"）。这一版把预算改成按窗口分配 + 高分窗口优先（`CandidateRanker` 的 BM25 分决定哪几扇先花钱），并把 `windowsAsked` 变成预算表 | `RetrievalCoverageRegression` 加断言：同样 180 秒预算下覆盖扇数不低于现值、零分闸门一条不动（E 组那 11 条套话照旧进不去）；`tools/full-scan-probe.ps1` 的 INTRATE/RATES 改前改后两个数进 CHANGELOG（覆盖与检出同时报，不许只报好看的那个） |
+| 4.0.1 | 万方"取尽"判定重做：一轮只回 1 条题录就被判取尽（`docs/retrieval-recall.md` 瓶颈三）。翻页游标、页间去重、连续零新增阈值分开设，别家源用过的题录不许替万方下结论 | `RetrievalCoverageRegression` 加断言：mock 万方每轮 1 条时连续 N 轮才判取尽、同一条目按 URL 去重不按分数去重；`EngineProbe` 加 `--wanfang-only` 跑真接口出条数 |
+| 4.0.2 | 中文三库补全文渠道：摘要级比对是相似率只报得出下限的直接原因（三库返回的可比正文中位数 79 字 vs 查询窗口 448 字）。凡是有 OA PDF 的命中就拉全文进比对，`/doi.org` 走 Unpaywall 式解析 | `ApiRegression` 加断言：PDF 全文入库后同一句的证据从摘要裁到正文、拉不到全文的条目在报告里标明"仅摘要可比"；`PdfRegression` 断言扫描版报"无文字层"不静默；`FullScanProbe` 的重复字数下限（当前 201 字）只许升 |
+| 4.0.3 | 知网匿名口的实测天花板入账：逐句自召回 1/4（同一条句子问四回只回一回），`cnki-title` 那类检索页只到题录。报告里给一条"知网这一路量到的自召回 = x/y"的说明行，并把 `Route` 记忆（1.1.2 的 `Routes`）与这一路真实失败次数对上 | `RetrievalCoverageRegression` 加断言：自召回说明行的分母 = 真发出去的检索式条数、缓存与降级不许把它算成 100%；`docs/retrieval-recall.md` 那条天花板表刷新，并明写这是上限而非可以通过调参突破的指标 |
+
+### 5.0.0 离线库与多文档（大版本 + 3）
+
+| 版本 | 内容 | 验收 |
+| --- | --- | --- |
+| 5.0.0 | **离线库索引**：`LocalLibrary`（188 行）现在是线性扫文本，`TextCorpus` 的倒排只在一次比对里活着。这一版把倒排 + 袋索引（1.2.4 那套）持久化到库目录，按文件哈希增量更新，冷启动不重建全库 | 新 `OfflineIndexRegression`：索引往返一致、增量更新只重建改动文件、索引损坏时退回线性扫并在 `LogView` 留一行；索引体积与加载耗时给上限断言；`CorpusImportRegression` 现有 131 条不许退化 |
+| 5.0.1 | 多文档互查（互抄检测）：自选 2–20 份文档两两比对，偏移按"第几份文档第几句"落，报告里按文档对分桶 | `TextCorpusRegression` 加断言：N 份文档的两两偏移正确、同一段落在两个方向上重复字数对称、跨文档区间不许互相覆盖（`overlapChars` 断言） |
+| 5.0.2 | 跨报告趋势：同一篇稿子多次查重的相似率、AIGC 比例、覆盖扇数随版本变化画一条线；存疑的是跨报告可比性——窗口数、入库篇数或判据版本号不同的两份报告不许直接比 | `ReportStoreRegression` 加断言：判据 `version()` 不同的两份报告的趋势线段断开并标"不可比"、60 条上限与逐出语义不变、`RECORD_VERSION = 1` 的旧报告在新版能读 |
+| 5.0.3 | 离线库共享索引（`index_repository` 式持久化思路）：库目录导出一份压缩索引供团队导入，导入侧只允许从校验和一致的产物引导，不一致就整份重建 | 新回归断言：校验和不符时拒绝加载并走全量重建、导入后逐句指纹与本机重建逐位相同；导出体积与 5.0.0 的上限同档；Robolectric 断言 SAF 目录被回收后的恢复路径 |
+
+### 明确不做（第二轮同样不许重新发明）
+
+| 项 | 不许做的依据 |
+| --- | --- |
+| WCopyfind 式带内桥接（`RUN_BRIDGE_GAP` / `RUN_BRIDGE_PRECISION`） | D3 自定的前置条件是大模型改写形状的实测缺口，而 `local-edit-16` / `local-edit-25` 量出来是 99.5% / 99.8%——疤状局部改动打不动现行判据（`docs/paraphrase-robustness.md` 的"明确不做"表）。前置条件不成立就是没有工作量 |
+| 按句长加权的 Dice 下限 | 负例能摸到的最高 Dice 0.358 出现在 50-80 字长句桶，短句桶只有 0.158，方向与直觉相反（`docs/rewrite-robustness.md` 长度分桶表） |
+| 把 `SIMILAR_DICE` 一路降到 0.45/0.40 | 0.45 多认约 5 个点但头顶余量从 0.14 剩到 0.09，真实文库规模下的偶发撞车吃的正是这一档。等真实文库的负例天花板量出来再说 |
+| 虚词二元组那条判据重新落地 | 实测负例天花板 1.0，地板算到 1.14，谁也过不了线（`docs/paraphrase-robustness.md` 的 D2 下场）。要重提必须先重量那批真人负例，不许拿"业界都用停用词 n-gram"顶 |
+| 句长门 `MIN_SENTENCE_CHARS` 放开到 10/9（D4 原案） | `-Drrd4=1` 四档逐位不动：短的逐字碎片由指纹带接住（`tokens()` 跳标点），句长门只管逐句那一条路。要推翻先拿出"十字上下且每片都改写掉几个字"的真稿子口径（`docs/rewrite-robustness.md` 1.1.5） |
+| 袋口径替掉任一现有判据 | `pruned` / `split-commas` 两档袋口径反过来低于三元组（82.9% / 16.8% 对 96.3% / 32.6%），袋口径只能当 OR 增补；替掉任何一条当天就丢召回 |
+| `Fingerprints.GRAM` 7 → 6 换召回 | 锚点层扫格实测 n=6/w=16/min=3 同源误报 2.9%，n=7/w=12/min=3 才是 0.0%（`docs/detection-calibration.md`） |
+| 把 `MAX_SEARCH_MILLIS` 或 `MAX_REQUESTS` 直接放大换覆盖 | 180 秒那道闸的代价已经在 `docs/retrieval-recall.md` 与 1.1.3 的 CHANGELOG 里逐笔记账。动预算要走 4.0.0 的按窗口分配 + 高分优先，覆盖与检出必须同时报 |
+| 没有标注语料就换 `AigcScorer` 系数 | 现在这组系数是真人零误报预算反推的上限，不是标定值（`docs/aigc-calibration.md`）。换号必须排在 3.0.0 语料之后 |
+| 靠加模板正则或关键词表压 AIGC 误报 | 旧权重反证 p99 0.468 / max 0.540 / 2 句越线是靠特征表与双门槛压下来的（max 0.366 / margin +0.084 / 0 句越线），往特征里塞关键词等于把标定推倒重来 |
+| 降重建议靠加大改动量"看起来更狠" | 20 段只推 291 字改动（全文 6%）是质量问题，上一轮已挂在 1.0.4；本轮归 1.3.3 的逐条采纳，用改写前后差值（0.4.7 的 `rewriteDelta`）验收 |
+
+### 前提与瓶颈（先写清楚，否则验收数字会被读成两回事）
+
+- **AIGC 没有标注语料。** 3.0.0 之前所有 AIGC 数字都只能读作"真人句子摸到的上界 + 一条自指反证"：现在唯一可用的负例是真人句与它的同源改写，"改写后"与"AI 写的"在特征上同源，所以旧权重的 p99 0.468 既可能是安全余量也可能是没撞上真 AI 段的运气（`docs/aigc-calibration.md`）。3.0.1 的换系数验收完全依赖 3.0.0 的语料；语料不到位，3.0.1/3.0.3 就地停住，不许换成拍脑袋的系数交付。
+- **中文三库只有摘要可比。** 检索页给的是题名 + 摘要，文库正文与查询窗口不在同一尺度（入库正文中位数 79 字，查询窗口 448 字），所以相似率是下限而不是估计值。知网匿名检索逐句自召回 1/4 是这一路的天花板；万方一轮只回 1 条题录、连续零新增就被判取尽；维普 `mfetch` 的 sessionid 活不过一次 HTTP 往返（`EngineProbe` 的维普自召回是 0/4）。这些不是"再调一次阈值就能过"的瓶颈，突破要靠 4.0.2 的全文渠道与自建库。
+- **报告里的"重复率"与"改写率"是两个数加起来的，"改写率"单独不可引用**（`docs/rewrite-robustness.md` 已知不足第 4 条）。本轮任何把这两个数拆开口径的改动，都要先把 `CharLedger` 的独立相加与重叠记数一起改，否则来源榜与指标卡会各说一套。
+- **不预设实测目标值。** 本轮所有验收里没写数字的地方就是"待实测"；量出来比现值差，就按差写并回退或就地停住，不许改口径、不许换分母、不许拿"业界都这么做"顶。
+
+### 每版的固定动作（第二轮原文照抄）
+
+1. 先写回归断言，再写实现。
+2. `pwsh tools/test-host.ps1` 全绿；动到界面或渲染的版本再跑 Robolectric（`sh tools/build.sh && sh tools/test.sh`）。
+3. `pwsh tools/build-host.ps1` 出 APK，`pwsh tools/release-version.ps1 -Version x.y.z` 一次完成升版本、提交、打 tag、开 release 并附上可安装 APK。
