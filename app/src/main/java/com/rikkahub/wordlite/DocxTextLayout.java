@@ -693,6 +693,7 @@ public final class DocxTextLayout {
         for (DocxDocument.RangeStyle rs : paragraph.editedStyles)
             if (rs.end > rs.start && rs.start >= 0 && rs.end <= text.length()) apply(text, rs.start, rs.end, rs.style, pxPerPoint);
         applyTabLeaders(text, paragraph, pxPerPoint);
+        glueScriptTokens(text);
         return text;
     }
 
@@ -721,6 +722,7 @@ public final class DocxTextLayout {
             }
         }
         applyTabLeaders(text, paragraph, PageGeometry.points(1f));
+        glueScriptTokens(text);
         return text;
     }
 
@@ -878,6 +880,159 @@ public final class DocxTextLayout {
         }
     }
 
+    /**
+     * Widen every script span to the unbreakable token its characters sit in, so no ReplacementSpan edge
+     * is left inside a run Word keeps whole. Returns how many spans were re-hung.
+     *
+     * How far a span grows: to the start of the token its first character belongs to and the end of the
+     * token its last character belongs to, but never smaller than the run it was drawn for -- a
+     * superscript citation "[1]" keeps its brackets, because Word bills the whole run at the script size
+     * and a bracket is a legal break point anyway. Two script runs in one token ("Cu" + sub "6" + "Sn" +
+     * sub "5") become ONE span with two script pieces: a second span in the same token would put an edge
+     * back inside it, which is exactly what variant H of tools/breakiterator-probe.ps1 -Probe
+     * ScriptBreakProbe measured as still cutting.
+     */
+    static int glueScriptTokens(Spannable text) {
+        if (text == null || text.length() == 0) return 0;
+        final Spannable body = text;
+        WordScriptSpan[] found = text.getSpans(0, text.length(), WordScriptSpan.class);
+        if (found.length == 0) return 0;
+        java.util.Arrays.sort(found, new java.util.Comparator<WordScriptSpan>() {
+            @Override public int compare(WordScriptSpan a, WordScriptSpan b) {
+                int d = body.getSpanStart(a) - body.getSpanStart(b);
+                return d != 0 ? d : body.getSpanEnd(a) - body.getSpanEnd(b);
+            }
+        });
+        int[] starts = new int[found.length];
+        int[] ends = new int[found.length];
+        for (int k = 0; k < found.length; k++) {
+            starts[k] = body.getSpanStart(found[k]);
+            ends[k] = body.getSpanEnd(found[k]);
+        }
+        int[] plan = ScriptTokens.planGluedRanges(text, starts, ends);
+        int rehung = 0;
+        int cursor = 0;
+        for (int p = 0; p + 1 < plan.length; p += 2) {
+            int left = plan[p], right = plan[p + 1];
+            int first = cursor;
+            while (cursor < found.length && starts[cursor] < right) cursor++;
+            if (cursor == first) continue;
+            boolean fits = true;
+            for (int k = first; k < cursor; k++) if (ends[k] > right) fits = false;
+            if (!fits || (cursor - first == 1 && starts[first] == left && ends[first] == right)) continue;
+            if (!glueable(text, left, right)) continue;
+            java.util.ArrayList<WordScriptSpan.Segment> pieces =
+                    new java.util.ArrayList<WordScriptSpan.Segment>();
+            float pxPerPoint = found[first].pxPerPoint();
+            for (int k = first; k < cursor; k++) {
+                int b = starts[k];
+                for (WordScriptSpan.Segment s : found[k].pieces())
+                    pieces.add(new WordScriptSpan.Segment(b + s.from - left, b + s.to - left,
+                            s.superscript, s.unicode, s.baseHalfPoints, s.positionHalfPoints, s.family));
+                text.removeSpan(found[k]);
+            }
+            text.setSpan(new WordScriptSpan(
+                            pieces.toArray(new WordScriptSpan.Segment[pieces.size()]), pxPerPoint),
+                    left, right, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            mergeMetricSpans(text, left, right);
+            rehung++;
+        }
+        return rehung;
+    }
+
+
+    /**
+     * Whether a range can be measured and drawn as ONE run. Gluing needs that twice over: the
+     * ReplacementSpan paints every character of its range itself with the single paint it is handed, and
+     * the platform only keeps a token unbroken while no font run ends inside it. Measured on page 18 block
+     * 160 of tests/samples/input-liu.docx -- with the script span already over the whole token and each
+     * OOXML run still carrying its own FontSpan, the phone cut "Ag3Sn" at 154, which is exactly where the
+     * "Sn" run begins (artifacts/agent-layout-verify/ScriptGlueProbe.txt). A range whose characters
+     * disagree keeps today's span-per-run shape, and the device audit reports the edge that is left.
+     */
+    private static boolean glueable(Spanned text, int left, int right) {
+        if (left < 0 || right > text.length() || right - left < 2) return false;
+        String key = metricKey(text, left);
+        for (int i = left + 1; i < right; i++) if (!key.equals(metricKey(text, i))) return false;
+        return true;
+    }
+
+    /** Everything that decides one character's paint: faces, weight, size, decoration, colour. */
+    private static String metricKey(Spanned text, int at) {
+        StringBuilder key = new StringBuilder();
+        for (MeasuredFontSpan face : text.getSpans(at, at + 1, MeasuredFontSpan.class))
+            key.append('M').append(face.family()).append(face.cjk ? '1' : '0');
+        for (FontSpan font : text.getSpans(at, at + 1, FontSpan.class))
+            key.append('F').append(font.getFamily()).append(font.cjk ? '1' : '0')
+               .append(font.scriptSpecific ? 'S' : '-');
+        for (StyleSpan style : text.getSpans(at, at + 1, StyleSpan.class))
+            key.append('W').append(style.getStyle());
+        return key.append('|').append(runSizePx(text, at, 0f))
+                  .append('|').append(decorationFlags(text, at))
+                  .append('|').append(colourAt(text, at)).toString();
+    }
+
+    /**
+     * Take the run boundaries out of a glued token. Every metric-affecting span that sits wholly inside
+     * the range and agrees with its twins is re-hung over the whole range: that changes no measurement and
+     * no pixel -- glueable has just proved the values are equal -- and it removes the only edges the
+     * breaker can still reach inside the token.
+     */
+    private static void mergeMetricSpans(Spannable text, int left, int right) {
+        MeasuredFontSpan[] faces = text.getSpans(left, right, MeasuredFontSpan.class);
+        String[] faceValues = new String[faces.length];
+        for (int i = 0; i < faces.length; i++)
+            faceValues[i] = faces[i].family() + (faces[i].cjk ? '1' : '0');
+        mergeOver(text, faces, faceValues, left, right);
+
+        FontSpan[] fonts = text.getSpans(left, right, FontSpan.class);
+        String[] fontValues = new String[fonts.length];
+        for (int i = 0; i < fonts.length; i++)
+            fontValues[i] = fonts[i].getFamily() + (fonts[i].cjk ? '1' : '0')
+                    + (fonts[i].scriptSpecific ? 'S' : '-');
+        mergeOver(text, fonts, fontValues, left, right);
+
+        PointSizeSpan[] sizes = text.getSpans(left, right, PointSizeSpan.class);
+        String[] sizeValues = new String[sizes.length];
+        for (int i = 0; i < sizes.length; i++) sizeValues[i] = String.valueOf(sizes[i].pixels());
+        mergeOver(text, sizes, sizeValues, left, right);
+
+        StyleSpan[] styles = text.getSpans(left, right, StyleSpan.class);
+        String[] styleValues = new String[styles.length];
+        for (int i = 0; i < styles.length; i++) styleValues[i] = String.valueOf(styles[i].getStyle());
+        mergeOver(text, styles, styleValues, left, right);
+    }
+
+    /** Re-hang spans[0] over [left,right) when every span of the class inside the range agrees. */
+    private static void mergeOver(Spannable text, Object[] spans, String[] values, int left, int right) {
+        if (spans.length < 2) return;
+        for (int i = 0; i < spans.length; i++) {
+            if (text.getSpanStart(spans[i]) < left || text.getSpanEnd(spans[i]) > right) return;
+            if (!values[i].equals(values[0])) return;
+        }
+        for (int i = 1; i < spans.length; i++) text.removeSpan(spans[i]);
+        text.setSpan(spans[0], left, right, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    }
+
+    /** Bold / italic / underline / strike: the states StaticLayout would otherwise repaint per run. */
+    private static int decorationFlags(Spanned text, int at) {
+        int flags = 0;
+        for (StyleSpan s : text.getSpans(at, at + 1, StyleSpan.class)) {
+            if ((s.getStyle() & Typeface.BOLD) != 0) flags |= 1;
+            if ((s.getStyle() & Typeface.ITALIC) != 0) flags |= 2;
+        }
+        if (text.getSpans(at, at + 1, UnderlineSpan.class).length > 0) flags |= 4;
+        if (text.getSpans(at, at + 1, StrikethroughSpan.class).length > 0) flags |= 8;
+        return flags;
+    }
+
+    private static int colourAt(Spanned text, int at) {
+        ForegroundColorSpan[] inks = text.getSpans(at, at + 1, ForegroundColorSpan.class);
+        BackgroundColorSpan[] backs = text.getSpans(at, at + 1, BackgroundColorSpan.class);
+        return (inks.length == 0 ? 0 : inks[inks.length - 1].getForegroundColor()) * 31
+                + (backs.length == 0 ? 0 : backs[backs.length - 1].getBackgroundColor());
+    }
+
     private static final class RunStyleMarker {
         final DocxDocument.RunStyle style;
         RunStyleMarker(DocxDocument.RunStyle style) { this.style = style.copy(); }
@@ -906,13 +1061,17 @@ public final class DocxTextLayout {
                         : Math.max(1, Math.round(span.getSize() / pxPerPoint * 2));
         }
         for (WordScriptSpan span : text.getSpans(offset, end, WordScriptSpan.class)) {
-            if (!span.isUnicode()) {
-                s.superscript = span.isSuperscript(); s.subscript = span.isSubscript();
+            // Ask about the piece under the cursor, not about the span: a widened span also covers the
+            // plain characters of the token it had to be glued onto.
+            int kind = span.scriptKindInside(text, offset, end);
+            if (kind != 0) {
+                s.superscript = kind == 1; s.subscript = kind == 2;
                 s.superscriptSet = s.subscriptSet = true;
                 if (sizes.length == 0) s.fontSizeHalfPoints = span.baseHalfPoints();
             }
-            if (span.positionHalfPoints != 0) {
-                s.positionSet = true; s.positionHalfPoints = span.positionHalfPoints;
+            int position = span.positionInside(text, offset, end);
+            if (position != 0) {
+                s.positionSet = true; s.positionHalfPoints = position;
             }
         }
         for (PositionSpan span : text.getSpans(offset, end, PositionSpan.class)) {
@@ -966,6 +1125,7 @@ public final class DocxTextLayout {
         }
         for (int i = 0; i < styles.size(); i++)
             apply(text, starts.get(i), ends.get(i), styles.get(i), pxPerPoint);
+        glueScriptTokens(text);
     }
 
     private static boolean isComplexScript(char c) {
@@ -977,7 +1137,8 @@ public final class DocxTextLayout {
         return null;
     }
 
-    private static boolean isCjk(char c) {
+    /** Package-private: ScriptTokens.glued needs the same Chinese test the layout uses. */
+    static boolean isCjk(char c) {
         Character.UnicodeBlock b = Character.UnicodeBlock.of(c);
         return b == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
                 || b == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A
@@ -1022,69 +1183,214 @@ public final class DocxTextLayout {
         }
     }
 
-    /** Script width, size and baseline use the selected font's OS/2 metrics. */
+    /**
+     * Script width, size and baseline use the selected font's OS/2 metrics, and the span owns the whole
+     * unbreakable token its script sits in -- not just the script's own characters.
+     *
+     * Why the whole token: on the target phone a ReplacementSpan edge is a break opportunity for
+     * StaticLayout, and Word never breaks inside a Latin/digit run. Both halves measured:
+     *   tools/breakiterator-probe.ps1 -Probe ScriptBreakProbe (phone, sdk=29, width 567, token "Ag3Sn",
+     *   swept over how much Chinese sits in front so the line runs out at a known place)
+     *     A no span                breaks before the token (ok0 at pad 32/33) = what Word does
+     *     B scaled span on the "3" CUT@3 at pad 32, CUT@2 at pad 33   (page 19 of the thesis: "Ag3"|"Sn")
+     *     C unscaled span on "3"   CUT@3 / CUT@2  -- so it is the edge, not the scaled box
+     *     D one span over "Ag3Sn"  ok0 / ok0      (this class)
+     *     E colour / F size / G typeface span on the "3"   ok0 / ok0 -- those families do not cut
+     *     H token-wide span on top of the run's own span   CUT@3 / CUT@2 -- an inner edge still cuts
+     *   Word side: tools/word-break-truth.ps1 (token-true moves a whole 26-letter token down a line) and
+     *   tools/break-class-truth.py (0 of the 238 real breaks in Word's exported PDF cut a token).
+     *
+     * So the container trick is out (H) and this span has to draw the plain characters of the token too.
+     * That costs the platform's per-run repaint, which is why glueScriptTokens only ever widens a span
+     * over a range whose typeface, size, weight, decoration and colour are all the same.
+     */
     public static final class WordScriptSpan extends ReplacementSpan {
-        private final boolean superscript;
-        private final int baseHalfPoints;
+        /** One drawn piece of the token. [from,to) is relative to the span start. */
+        private static final class Segment {
+            final int from, to;
+            final boolean superscript, unicode;
+            final int baseHalfPoints, positionHalfPoints;
+            final String family;
+            Segment(int from, int to, boolean superscript, boolean unicode, int baseHalfPoints,
+                    int positionHalfPoints, String family) {
+                this.from = from;
+                this.to = to;
+                this.superscript = superscript;
+                this.unicode = unicode;
+                this.baseHalfPoints = baseHalfPoints;
+                this.positionHalfPoints = positionHalfPoints;
+                this.family = family;
+            }
+            /** A Unicode super/subscript code point already is a small glyph: Word draws it full size. */
+            boolean scaled() { return !unicode; }
+        }
+
+        private final Segment[] segments;
         private final float pxPerPoint;
-        private final String family;
-        private final boolean unicode;
-        public final int positionHalfPoints;
+
         public WordScriptSpan(boolean superscript, int baseHalfPoints, float pxPerPoint) {
             this(superscript, baseHalfPoints, pxPerPoint, "Times New Roman", false, 0);
         }
+
         WordScriptSpan(boolean superscript, int baseHalfPoints, float pxPerPoint,
                        String family, boolean unicode, int position) {
-            this.superscript = superscript;
-            this.baseHalfPoints = baseHalfPoints;
-            this.pxPerPoint = pxPerPoint;
-            this.family = family;
-            this.unicode = unicode;
-            positionHalfPoints = position;
+            this(new Segment[] { new Segment(0, 1, superscript, unicode, baseHalfPoints, position,
+                    family) }, pxPerPoint);
         }
-        public boolean isSuperscript() { return superscript; }
-        public boolean isSubscript() { return !superscript; }
-        public boolean isUnicode() { return unicode; }
-        public int baseHalfPoints() { return baseHalfPoints; }
-        public String family() { return family; }
+
+        WordScriptSpan(Segment[] segments, float pxPerPoint) {
+            this.segments = segments;
+            this.pxPerPoint = pxPerPoint;
+        }
+
+        /** Absolute offset of this span inside {@code text}, or -1 when it is not attached to it. */
+        private int base(CharSequence text) {
+            return text instanceof Spanned ? ((Spanned) text).getSpanStart(this) : -1;
+        }
+
+        /** The script piece drawn at absolute offset {@code at}, or null when that character is plain. */
+        private Segment pieceAt(int b, int at) {
+            if (b < 0) return null;
+            for (Segment s : segments) if (at >= b + s.from && at < b + s.to) return s;
+            return null;
+        }
+
+        /** Where the current piece (or the plain stretch) stops, capped at {@code end}. */
+        private int pieceEnd(int b, int at, int end) {
+            Segment s = pieceAt(b, at);
+            int limit = s != null ? b + s.to : end;
+            for (Segment other : segments)
+                if (b + other.from > at && b + other.from < limit) limit = b + other.from;
+            return Math.min(limit, end);
+        }
+
+        /** The first scaled piece overlapping [start,end), or null: the queries styleAt/scriptSpace need. */
+        private Segment firstScaledOverlapping(int start, int end) {
+            for (Segment s : segments)
+                if (s.scaled() && start < s.to && end > s.from) return s;
+            return null;
+        }
+
+        private int positionOverlapping(int relStart, int relEnd) {
+            for (Segment s : segments)
+                if (relStart < s.to && relEnd > s.from && s.positionHalfPoints != 0)
+                    return s.positionHalfPoints;
+            return 0;
+        }
+
+        /** 1 = superscript, 2 = subscript, 0 = no scaled piece there. Offsets relative to span start. */
+        private int scriptKindOverlapping(int relStart, int relEnd) {
+            Segment s = firstScaledOverlapping(relStart, relEnd);
+            return s == null ? 0 : s.superscript ? 1 : 2;
+        }
+
+        // --- the queries the rest of the layout makes, in absolute document offsets ---
+        // A widened span also covers characters that are not a script at all, so every caller has to ask
+        // about the piece it is standing on instead of trusting the span's own range.
+
+        /** 1 = superscript, 2 = subscript, 0 = no scaled script inside [start,end) of {@code text}. */
+        int scriptKindInside(CharSequence text, int start, int end) {
+            int b = base(text);
+            return b < 0 ? 0 : scriptKindOverlapping(start - b, end - b);
+        }
+
+        /** The w:position shift of the piece inside [start,end) of {@code text}, in half points. */
+        int positionInside(CharSequence text, int start, int end) {
+            int b = base(text);
+            return b < 0 ? 0 : positionOverlapping(start - b, end - b);
+        }
+
+        /** The scaled piece inside [start,end) of {@code text}, or null when only plain text is there. */
+        Segment scaledPieceInside(CharSequence text, int start, int end) {
+            int b = base(text);
+            return b < 0 ? null : firstScaledOverlapping(start - b, end - b);
+        }
+
+        /** Base run size in document pixels for one piece. */
+        float pieceBaseSizePx(Segment piece) { return piece.baseHalfPoints / 2f * pxPerPoint; }
+
+        public boolean isSuperscript() { return segments.length > 0 && segments[0].superscript; }
+        public boolean isSubscript() { return segments.length > 0 && !segments[0].superscript; }
+        /** True when every piece here is a Unicode script glyph, so nothing gets scaled. */
+        public boolean isUnicode() { return firstScaledOverlapping(0, Integer.MAX_VALUE) == null; }
+        public int baseHalfPoints() { return segments.length > 0 ? segments[0].baseHalfPoints : 0; }
+        public String family() { return segments.length > 0 ? segments[0].family : "Times New Roman"; }
+        /** How many pieces this span draws: the device probe reports it. */
+        public int scriptPieces() { return segments.length; }
+        /** The pieces, offsets relative to the span start: glueScriptTokens rebuilds from them. */
+        Segment[] pieces() { return segments; }
+        float pxPerPoint() { return pxPerPoint; }
         /** Base run size in document pixels; the script box is measured from it. */
-        public float baseSizePx() { return baseHalfPoints / 2f * pxPerPoint; }
+        public float baseSizePx() { return baseHalfPoints() / 2f * pxPerPoint; }
         public float renderedSize(Paint paint) {
-            return paint.getTextSize() * metricsFor(family).scale(superscript);
+            return paint.getTextSize() * metricsFor(family()).scale(isSuperscript());
         }
         public float baselineOffset(Paint paint) {
-            return paint.getTextSize() * metricsFor(family).offset(superscript)
-                    - positionHalfPoints / 2f * pxPerPoint;
+            return paint.getTextSize() * metricsFor(family()).offset(isSuperscript())
+                    - (segments.length > 0 ? segments[0].positionHalfPoints : 0) / 2f * pxPerPoint;
         }
-        private String value(CharSequence text, int start, int end) {
-            return unicode ? text.subSequence(start, end).toString()
-                    : FontScriptMetrics.plainDigits(text, start, end);
+
+        private static String value(CharSequence text, int start, int end) {
+            return FontScriptMetrics.plainDigits(text, start, end);
         }
-        @Override public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
-            if (fm != null) paint.getFontMetricsInt(fm);
-            if (unicode) {
-                // Word draws U+2080-2089 / ²³¹ superscript-subscript glyphs at
-                // full size from the hAnsi font; the glyph itself is already
-                // small, so no OS/2 scaling and no plain-digit substitution.
-                return (int) Math.ceil(paint.measureText(text, start, end));
-            }
+
+        private float scaledAdvance(Paint paint, CharSequence text, int start, int end, Segment s) {
             Paint copy = new Paint(paint);
-            // Word scales the run to the OS/2 script size and breaks the line on
-            // the scaled advance, so a superscript citation costs only its small
-            // glyph width. Charging the base size here wrapped lines one
-            // character early and moved whole paragraphs to the next page.
-            copy.setTextSize(renderedSize(paint));
-            return Math.max(1, (int) Math.ceil(copy.measureText(value(text, start, end))));
+            // Word scales the run to the OS/2 script size and breaks the line on the scaled advance, so
+            // a superscript citation costs only its small glyph width. Charging the base size here
+            // wrapped lines one character early and moved whole paragraphs to the next page.
+            copy.setTextSize(paint.getTextSize() * metricsFor(s.family).scale(s.superscript));
+            return copy.measureText(value(text, start, end));
         }
+
+        @Override public int getSize(Paint paint, CharSequence text, int start, int end,
+                                     Paint.FontMetricsInt fm) {
+            if (fm != null) paint.getFontMetricsInt(fm);
+            int b = base(text);
+            if (b < 0) return Math.max(1, (int) Math.ceil(paint.measureText(text, start, end)));
+            // The same arithmetic the layout used when every script run had its own span: a script piece
+            // is billed as its ceiled advance, a plain character as a float, so gluing does not by
+            // itself move a line's width by more than the final rounding.
+            float width = 0f;
+            int pieces = 0;
+            for (int at = start; at < end; ) {
+                int to = pieceEnd(b, at, end);
+                Segment s = pieceAt(b, at);
+                width += s == null || !s.scaled() ? paint.measureText(text, at, to)
+                        : Math.ceil(scaledAdvance(paint, text, at, to, s));
+                pieces++;
+                at = to;
+            }
+            // One piece is the shape every script span that needs no gluing keeps, and it has to answer
+            // with the same ceil the layout has always been given; only a widened span, which now also
+            // carries plain characters, sums them the way one-span-per-run used to.
+            return Math.max(1, pieces == 1 ? (int) Math.ceil(width) : Math.round(width));
+        }
+
         @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
                                    float x, int top, int y, int bottom, Paint paint) {
-            if (unicode) {
+            int b = base(text);
+            if (b < 0) {
                 canvas.drawText(text, start, end, x, y, paint);
                 return;
             }
-            Paint copy = new Paint(paint);
-            copy.setTextSize(renderedSize(paint));
-            canvas.drawText(value(text, start, end), x, y + baselineOffset(paint), copy);
+            float at = x;
+            for (int i = start; i < end; ) {
+                int to = pieceEnd(b, i, end);
+                Segment s = pieceAt(b, i);
+                if (s == null || !s.scaled()) {
+                    canvas.drawText(text, i, to, at, y, paint);
+                    at += paint.measureText(text, i, to);
+                } else {
+                    Paint copy = new Paint(paint);
+                    copy.setTextSize(paint.getTextSize() * metricsFor(s.family).scale(s.superscript));
+                    float shift = paint.getTextSize() * metricsFor(s.family).offset(s.superscript)
+                            - s.positionHalfPoints / 2f * pxPerPoint;
+                    canvas.drawText(value(text, i, to), at, y + shift, copy);
+                    at += copy.measureText(value(text, i, to));
+                }
+                i = to;
+            }
         }
     }
 
@@ -1375,11 +1681,12 @@ public final class DocxTextLayout {
         if (!(text instanceof Spanned) || end <= start) return new int[]{0, 0};
         Spanned spanned = (Spanned) text;
         for (WordScriptSpan span : spanned.getSpans(start, end, WordScriptSpan.class)) {
-            // Unicode super/subscript glyphs carry their own height and are drawn
-            // full size, so the ordinary line box already contains them.
-            if (span.isUnicode()) continue;
-            float base = span.baseSizePx();
-            ScriptGeometry g = ScriptGeometry.declared(metricsFor(span.family()));
+            // A widened span also covers plain characters and Unicode script glyphs, and those carry
+            // their own height: only a scaled piece standing on THIS line asks for a taller box.
+            WordScriptSpan.Segment piece = span.scaledPieceInside(spanned, start, end);
+            if (piece == null) continue;
+            float base = span.pieceBaseSizePx(piece);
+            ScriptGeometry g = ScriptGeometry.declared(metricsFor(piece.family));
             ascent = Math.max(ascent, Math.round(g.ascentPx(base)));
             descent = Math.max(descent, Math.round(g.descentPx(base)));
         }

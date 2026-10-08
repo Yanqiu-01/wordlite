@@ -50,6 +50,8 @@ $suites = New-Object System.Collections.ArrayList
 function Add-Suite([string]$name, $argv) { [void]$suites.Add([pscustomobject]@{ Name = $name; Args = $argv }) }
 Add-Suite "Regression"             @("tests/fixture.docx", "$out/roundtrip")
 Add-Suite "ScriptRegression"       @()
+# 一个 Word 不许断的字母数字串里,不许有我们自己挂上去的可断边界(第 25 节)。
+Add-Suite "ScriptTokenRegression"  @()
 Add-Suite "WordLineHeightRegression" @()
 Add-Suite "TextCorpusRegression"   @()
 Add-Suite "SourceLedgerRegression" @()
