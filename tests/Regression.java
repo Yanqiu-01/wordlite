@@ -68,6 +68,10 @@ public final class Regression {
         // The sectionStart flag that used to sit on top of these two assertions is gone: a section break
         // opens a fresh pagination run, so the paragraph after it is already covered here, and the real
         // reading that motivated the flag turned out to be about a page top rather than a section break
+        // The measured beforeLines unit is implemented but switched off (A4Paginator.MEASURED_LINE_UNIT_APPLIED):
+        // it fixes the table of contents and costs two paragraphs elsewhere until the heading line height is
+        // priced right, so flipping it has to arrive with a fresh device capture rather than with this file.
+        check(!A4Paginator.MEASURED_LINE_UNIT_APPLIED, "measured beforeLines unit stays off until the heading line height lands");
         pre = item(0, 1, 70);
         a = item(1, 1, 10); b = item(2, 1, 10); p = item(3, 3, 10);
         a.keepNext = b.keepNext = true;

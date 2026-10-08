@@ -141,22 +141,38 @@ public final class A4Paginator {
         return Math.max(0, twips);
     }
 
-    private static int sectionGrid(DocxDocument document, int sectionIndex) {
-            return sectionOf(document, sectionIndex).lineGridPitchTwips;
-        }
     /**
-     * The "one line" that w:beforeLines and w:afterLines are priced in. Word uses the section
-     * document-grid pitch only while that grid is actually switched on. With w:docGrid carrying no
-     * w:type - which is all three sectPr elements of tests/samples/input-liu.docx do - the grid is
-     * off and Word prices a line at 240 twips whatever the paragraph's own font size or line rule
-     * says. Measured by tools/word-spacing-truth.ps1: 50/100 of a line costs 8.1px at 12pt, 8.1px
-     * at 18pt, 7.7px with a 16pt default run size, and 12.2px as soon as a lines grid with pitch
-     * 360 exists (cases bl_only, bl_18, bl_grid and the -DefaultSz 32 rerun). That is what made the
-     * chapter titles of that manuscript cost 24.0px here against Word's measured 16.73px.
+     * The measured beforeLines rule is switched off in the shipped tree, and that is a recorded
+     * regression rather than an unfinished one. Turning it on does fix the table of contents -
+     * paragraph 58 comes back to page 3, where Word puts it - but it costs two paragraphs somewhere
+     * else on tests/samples/input-liu.docx: page attribution goes from 7 wrong paragraphs to 9
+     * (artifacts/agent-layout-verify/spacing2, docs/layout-parity-target.md section 16.1). This
+     * manuscript walks its page budgets on a compensating over-bill of roughly 150px in the
+     * 黑体 headings (section 15 item 1), so proving the rule and shipping it are two steps. Flip it
+     * together with a fresh device capture once the heading line height is priced correctly.
+     */
+    static final boolean MEASURED_LINE_UNIT_APPLIED = false;
+
+    private static int sectionGrid(DocxDocument document, int sectionIndex) {
+        return sectionOf(document, sectionIndex).lineGridPitchTwips;
+    }
+
+    /**
+     * The "one line" that w:beforeLines and w:afterLines are priced in. Word prices it at 240
+     * twips whatever the paragraph says about its own font size or line rule, and only switches to
+     * the document-grid pitch when that grid is actually switched on. Measured by
+     * tools/word-spacing-truth.ps1: 50/100 of a line costs 8.1px at 12pt, 8.1px at 18pt, 7.7px with
+     * a 16pt default run size, and 12.2px as soon as a lines grid with pitch 360 exists (cases
+     * bl_only, bl_18, bl_grid and the -DefaultSz 32 rerun). All three sectPr elements of
+     * tests/samples/input-liu.docx write w:docGrid without w:type, so that grid is off and the
+     * chapter titles should cost 16.0px rather than the 24.0px the pitch-based unit produces -
+     * Word measures 16.73px. Also measured: when a paragraph writes both w:beforeLines and
+     * w:before, the lines spelling wins outright (case bl_and_twips is identical to bl_only).
      */
     private static int spacingLineUnitTwips(DocxDocument document, int sectionIndex) {
         DocxDocument.SectionSettings section = sectionOf(document, sectionIndex);
-        return section.lineGridActive ? section.lineGridPitchTwips : -1;
+        boolean measured = MEASURED_LINE_UNIT_APPLIED;
+        return measured && !section.lineGridActive ? -1 : section.lineGridPitchTwips;
     }
 
 
