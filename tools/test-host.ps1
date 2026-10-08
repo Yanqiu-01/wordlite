@@ -76,6 +76,7 @@ Add-Suite "ReviewRegression"       @("tests/fixture.docx", "$out/threaded-revisi
 Add-Suite "PdfRegression"          @("$out/metadata.pdf")
 Add-Suite "ApiRegression"          @()
 Add-Suite "ReportStoreRegression"  @()
+Add-Suite "ZeroRateAudit"          @("tests/samples/input-liu.docx", "tests/corpus/real-prose.txt", "tests/corpus/aigc-cartoon.txt")
 if (-not $SkipRealDoc) {
     $doc = if ($RealDocx) { $RealDocx } else { Join-Path $root "tests/samples/input-liu.docx" }
     if (Test-Path $doc) {
