@@ -1,6 +1,9 @@
 package com.rikkahub.wordlite;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
 import java.nio.file.Files;
 
 /**
@@ -10,9 +13,13 @@ import java.nio.file.Files;
 public final class PdfExtractProbe {
     public static void main(String[] args) throws Exception {
         java.util.ArrayList<String> files = new java.util.ArrayList<String>();
+        String dumpTo = null;
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("-cmap")) {
                 CidUnicodeTables.install(new java.io.FileInputStream(args[++i]));
+            } else if (args[i].equals("-dump")) {
+                dumpTo = args[++i];
+                new File(dumpTo).mkdirs();
             } else if (!args[i].equals("-no-cmap")) {
                 files.add(args[i]);
             }
@@ -27,6 +34,12 @@ public final class PdfExtractProbe {
             long began = System.nanoTime();
             PdfFile.Extracted out = PdfFile.extractText(data);
             long cost = (System.nanoTime() - began) / 1000000L;
+            if (dumpTo != null) {
+                /* 字倒出来才谈得上逐字比：和 PyMuPDF 的输出对着行看，谁多谁少一目了然。 */
+                Writer writer = new OutputStreamWriter(new FileOutputStream(new File(dumpTo,
+                        file.getName() + ".txt")), java.nio.charset.StandardCharsets.UTF_8);
+                try { writer.write(out.text); } finally { writer.close(); }
+            }
             long readable = count(out.text);
             long han = countHan(out.text);
             bytes += data.length; chars += readable; cjk += han; ms += cost; ops += out.textOps;
