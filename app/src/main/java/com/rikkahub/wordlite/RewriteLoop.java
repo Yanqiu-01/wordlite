@@ -83,6 +83,8 @@ public final class RewriteLoop {
         public int regions, regionsImproved, segments, segmentsChanged, segmentsCleared;
         /** 整篇级验证用了多少次，以及是不是用完了预算。 */
         public int verified;
+        /** true = 调用方在 Listener.cancelled() 里说要停，这一轮提前收尾（已采纳的改动保留）。 */
+        public boolean cancelled;
         /** 被文本健全性断言挡下的候选数（改完是残句/空段/缩水过多）。 */
         public int rejected;
         public boolean budgetHit;
@@ -96,12 +98,59 @@ public final class RewriteLoop {
     private RewriteLoop() { }
 
     public static Result run(String text, TextCorpus corpus, List<String> terms) {
-        return run(text, corpus, terms, new Limits());
+        return run(text, corpus, terms, new Limits(), null);
+    }
+
+    public static Result run(String text, TextCorpus corpus, List<String> terms, Limits limits) {
+        return run(text, corpus, terms, limits, null);
     }
 
     /** 判据本身：与 DuplicateEngine.compareRewrite 里对 before/after 的调用逐字相同。 */
     private static TextCorpus.Report judge(TextCorpus corpus, String text) {
         return corpus.match(text, null, TextCorpus.structure(text).spanArray());
+    }
+
+    /**
+     * 界面接入用的进度与取消回调。整个 run() 是阻塞的，必须在后台线程调，回调也就在同一个后台线程
+     * 上发生——实现方要刷界面自己 post 回主线程，这里不碰任何 Android 东西。
+     * 两个方法都会被反复调用，所以都不许阻塞、不许抛（抛了会把整轮改写打断）。
+     */
+    public interface Listener {
+        /** stage = 现在在干什么；done/total 是整篇级验证的次数进度，total 未知时给 -1。 */
+        void onProgress(String stage, int done, int total);
+
+        /** 每出一批候选、每做一次整篇验证之前各问一次。返回 true 就收尾返回已经采纳的结果。 */
+        boolean cancelled();
+    }
+
+    /** 进度与取消的转发器：允许传 null，回调抛异常一律咽掉。 */
+    private static final class Pump {
+        private final Listener listener;
+        int verified, budget;
+
+        Pump(Listener listener, int budget) {
+            this.listener = listener;
+            this.budget = budget;
+        }
+
+        void stage(String what, int done) { stage(what, done, budget); }
+
+        void stage(String what, int done, int total) {
+            if (listener == null) return;
+            try {
+                listener.onProgress(what, done, total);
+            } catch (RuntimeException ignored) {
+            }
+        }
+
+        boolean cancelled() {
+            if (listener == null) return false;
+            try {
+                return listener.cancelled();
+            } catch (RuntimeException ignored) {
+                return false;
+            }
+        }
     }
 
     private static float bestScore(TextCorpus.Report report) {
@@ -110,7 +159,8 @@ public final class RewriteLoop {
         return best;
     }
 
-    public static Result run(String text, TextCorpus corpus, List<String> terms, Limits limits) {
+    public static Result run(String text, TextCorpus corpus, List<String> terms, Limits limits,
+                             Listener listener) {
         Result out = new Result();
         out.text = text == null ? "" : text;
         if (limits == null) limits = new Limits();
@@ -119,6 +169,8 @@ public final class RewriteLoop {
             out.verdict = "先做一次查重或先导入自建库，才知道改写有没有用";
             return out;
         }
+        Pump pump = new Pump(listener, Math.max(1, limits.verifications));
+        pump.stage("对着语料比对原文", 0);
         TextCorpus.Report before = judge(corpus, text);
         out.comparedChars = before.comparedChars;
         out.rateBefore = before.overallRate;
@@ -136,13 +188,16 @@ public final class RewriteLoop {
             return out;
         }
 
+        pump.stage("判出 " + before.hits.size() + " 处命中", 0);
         ArrayList<int[]> blocks = paragraphs(text);
         ArrayList<int[]> ranges = regions(blocks, before.hits, limits.regions, out);
         String working = text;
         int current = before.duplicateChars;
         int budget = Math.max(1, limits.verifications);
-        for (int[] range : ranges) {
+        for (int index = 0; index < ranges.size(); index++) {
             if (out.verified >= budget) { out.budgetHit = true; break; }
+            if (pump.cancelled()) { out.cancelled = true; break; }
+            int[] range = ranges.get(index);
             int from = range[0], to = range[1];
             String region = working.substring(from, to);
             Region account = new Region();
@@ -152,9 +207,12 @@ public final class RewriteLoop {
             account.dupBefore = current;
             out.regionList.add(account);
             out.regions++;
+            pump.stage("改写第 " + (index + 1) + "/" + ranges.size() + " 个命中区", out.verified);
             Search search = search(corpus, working, from, to, region, terms, limits, account,
-                    budget - out.verified, current);
+                    budget - out.verified, current, pump);
             out.verified += search.verified;
+            pump.verified = out.verified;
+            if (search.cancelled) out.cancelled = true;
             current = search.duplicateChars;
             if (!search.text.equals(region)) {
                 working = working.substring(0, from) + search.text + working.substring(to);
@@ -183,6 +241,7 @@ public final class RewriteLoop {
             out.rateAfter = out.rateBefore;
             out.dupAfter = out.dupBefore;
         }
+        pump.stage("复核改写结果", out.verified);
         out.hitsAfter = judge(corpus, working).hits.size();
         diagnose(out, corpus, blocks, text, working);
         out.verdict = verdict(out);
@@ -192,6 +251,7 @@ public final class RewriteLoop {
     private static final class Search {
         String text;
         int verified, rounds, tried, rejected, duplicateChars;
+        boolean cancelled;
         String defect = "";
     }
 
@@ -202,14 +262,18 @@ public final class RewriteLoop {
      * 一段都压不下去就原样返回，reason 里照实写为什么。
      */
     private static Search search(TextCorpus corpus, String whole, int from, int to, String region,
-                                 List<String> terms, Limits limits, Region account, int budget, int baseline) {
+                                 List<String> terms, Limits limits, Region account, int budget, int baseline,
+                                 Pump pump) {
         Search out = new Search();
         out.text = region;
         out.duplicateChars = baseline;
+        final int global = pump.verified;
         int slots = paragraphs(region).size();
         int[] adopted = new int[slots];
         String skip = "";
         while (out.verified < budget) {
+            if (pump.cancelled()) { out.cancelled = true; skip = "调用方取消，提前收尾"; break; }
+            pump.stage("在命中区里出候选并逐篇验证", global + out.verified, global);
             if (paragraphs(out.text).size() != slots) { skip = "段落数变了，停止深化"; break; }
             ArrayList<int[]> order = weighted(corpus, out.text);
             boolean moved = false;
@@ -265,6 +329,7 @@ public final class RewriteLoop {
         account.verified = out.verified;
         account.rejected = out.rejected;
         account.tried = out.tried;
+        if (out.cancelled) account.reason = "调用方取消，这段之后的命中区没再验证";
         String spoiled = out.rejected > 0
                 ? "；" + out.rejected + " 个候选被文本健全性断言挡下（" + out.defect + "）" : "";
         if (account.reason.isEmpty()) {
@@ -454,6 +519,7 @@ public final class RewriteLoop {
 
     private static String verdict(Result out) {
         if (!out.measured) return out.verdict;
+
         StringBuilder line = new StringBuilder();
         line.append("重复率 ").append(DuplicateEngine.percent(out.rateBefore)).append(" -> ")
                 .append(DuplicateEngine.percent(out.rateAfter))
@@ -468,6 +534,7 @@ public final class RewriteLoop {
                 .append(" 个候选被文本健全性断言挡下，没进采纳判定");
         if (out.budgetHit) line.append("（整篇验证预算 ").append(out.verified).append(" 次用完，剩下的命中区没验证）");
         if (out.regionsImproved == 0) line.append("。这一轮一个字都没换，重复率没降");
+        if (out.cancelled) line.append("（调用方取消，提前收尾；留下的每一处改动都是让整篇命中字数变小才被采纳的）");
         return line.toString();
     }
 

@@ -16,6 +16,9 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 /**
+ * 这个类里的 plant/text/judge/lines 等是给 RewriteLoadProbe 共用的：负载曲线那三个点
+ * 必须和这里的断言走同一套插句、取正文、打分代码，不然前后数字不可比。
+ *
  * 一条能量化的回归断言：仓库里的 11 句真开放获取论文正文（tests/corpus/oa-planted-cjmenet.txt）当固定语料，
  * 插进 tests/samples/input-liu.docx 得到靶子，跑 RewriteLoop（改写-评分-回退），断言
  * "改写前 X% -> 改写后 Y%"、命中处数、改写覆盖了几个命中段、字数变化百分比，并且数字、单位、
@@ -31,7 +34,7 @@ import java.util.zip.ZipOutputStream;
 public final class RewriteRateRegression {
 
     /** 登记术语：掩码后一个字都不许动，断言里前后各数一遍出现次数。 */
-    private static final List<String> TERMS =
+    static final List<String> TERMS =
             Arrays.asList("锯齿形切屑", "切削变形区", "绝热剪切带");
     /** 单位与符号：改写前后逐个计数。 */
     private static final String[] UNITS = {
@@ -49,18 +52,18 @@ public final class RewriteRateRegression {
         System.out.println("PASS " + message);
     }
 
-    private static String pct(double rate) {
+    static String pct(double rate) {
         return String.format(Locale.ROOT, "%.2f%%", rate);
     }
 
-    private static List<String> hitsOf(Pattern pattern, String text) {
+    static List<String> hitsOf(Pattern pattern, String text) {
         List<String> out = new ArrayList<String>();
         Matcher m = pattern.matcher(text);
         while (m.find()) out.add(m.group());
         return out;
     }
 
-    private static List<String> lines(String path) throws Exception {
+    static List<String> lines(String path) throws Exception {
         List<String> out = new ArrayList<String>();
         for (String line : new String(Files.readAllBytes(Paths.get(path)), StandardCharsets.UTF_8).split("\n")) {
             String t = line.trim();
@@ -69,12 +72,12 @@ public final class RewriteRateRegression {
         return out;
     }
 
-    private static String esc(String s) {
+    static String esc(String s) {
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     /** 把句子作为新的首段插进 docx 的 body 开头；只写出副本，原稿不动。 */
-    private static void plant(String docx, List<String> sentences, String out) throws Exception {
+    static void plant(String docx, List<String> sentences, String out) throws Exception {
         java.util.LinkedHashMap<String, byte[]> entries = DocxZipReader.read(new FileInputStream(docx));
         StringBuilder paras = new StringBuilder();
         for (String s : sentences)
@@ -92,21 +95,25 @@ public final class RewriteRateRegression {
         zip.close();
     }
 
-    private static String text(String docx) throws Exception {
+    static DocxDocument document(String docx) throws Exception {
         InputStream in = new FileInputStream(docx);
         try {
-            return TextSelection.all(DocxParser.parse(in, docx)).text;
+            return DocxParser.parse(in, docx);
         } finally {
             in.close();
         }
     }
 
+    static String text(String docx) throws Exception {
+        return TextSelection.all(document(docx)).text;
+    }
+
     /** 判据本身：与 DuplicateEngine.compareRewrite 里的两句调用逐字相同。 */
-    private static TextCorpus.Report judge(TextCorpus corpus, String text) {
+    static TextCorpus.Report judge(TextCorpus corpus, String text) {
         return corpus.match(text, null, TextCorpus.structure(text).spanArray());
     }
 
-    private static float bestScore(TextCorpus.Report report) {
+    static float bestScore(TextCorpus.Report report) {
         float best = 0f;
         for (TextCorpus.Hit hit : report.hits) if (hit.score > best) best = hit.score;
         return best;
@@ -257,6 +264,44 @@ public final class RewriteRateRegression {
         check(r.verdict.contains(pct(rateBefore)) && r.verdict.contains(pct(rateAfter)),
                 "判定句里带着前后两个百分数，不给只写了成功的判定");
 
+        // 界面入口的形状：进度、取消、回写用的替换条目，都拿真靶子走一遍。
+        final ArrayList<String> stages = new ArrayList<String>();
+        final ArrayList<Integer> dones = new ArrayList<Integer>();
+        final int[] asked = new int[1];
+        RewriteLoop.Result cut = RewriteLoop.run(before, corpus, TERMS, limits, new RewriteLoop.Listener() {
+            @Override public void onProgress(String stage, int done, int total) {
+                if (stages.isEmpty() || !stages.get(stages.size() - 1).equals(stage)) stages.add(stage);
+                if (!dones.isEmpty() && done < dones.get(dones.size() - 1))
+                    throw new AssertionError("进度倒退：" + dones.get(dones.size() - 1) + " -> " + done);
+                dones.add(done);
+            }
+            @Override public boolean cancelled() { return ++asked[0] > 8; }
+        });
+        System.out.println("NOTE 取消那一轮 " + pct(cut.rateBefore) + " -> " + pct(cut.rateAfter)
+                + "，命中字数 " + cut.dupBefore + " -> " + cut.dupAfter + "，整篇验证 " + cut.verified
+                + " 次（跑完要 " + r.verified + " 次），进度阶段：" + String.join(" → ", stages));
+        check(cut.cancelled, "取消被认下来（Result.cancelled=true）");
+        check(cut.verified * 3 <= r.verified, "取消确实提前收尾（" + cut.verified + " 次 vs 跑完 " + r.verified + " 次）");
+        check(cut.rateAfter <= cut.rateBefore,
+                "取消那一轮没让重复率变高（" + pct(cut.rateAfter) + " <= " + pct(cut.rateBefore) + "）");
+        check(cut.text.equals(before) || cut.dupAfter < cut.dupBefore,
+                "取消那一轮留下的改动都只在整篇命中字数变小时才被采纳");
+        check(cut.verdict.contains("取消"), "取消那一轮的判定句照实说提前收尾");
+        check(stages.contains("对着语料比对原文") && stages.contains("复核改写结果"),
+                "进度回调覆盖首尾（" + stages.size() + " 个阶段）");
+
+        ArrayList<RewriteLoop.Edit> edits = RewriteLoop.edits(TextSelection.all(document(targetFile)), r, before);
+        int lastParagraph = -1;
+        boolean ordered = true;
+        for (RewriteLoop.Edit edit : edits) {
+            if (edit.paragraphIndex <= lastParagraph) ordered = false;
+            lastParagraph = edit.paragraphIndex;
+        }
+        System.out.println("NOTE 回写给界面的替换条目 " + edits.size() + " 条，段落号从 "
+                + (edits.isEmpty() ? "-" : String.valueOf(edits.get(0).paragraphIndex)) + " 起");
+        check(edits.size() == changed, "回写条数与被改的段落数对上（" + edits.size() + " = " + changed + "）");
+        check(ordered, "回写按段落号递增，界面可以从后往前替换而不串位");
+
         // 反向一条：没有任何规则能让数字变小的时候，必须照实说没降，并且一个字都不回写。
         String stuck = "本文研究了工艺参数对接头质量的影响。";
         TextCorpus stuckCorpus = new TextCorpus();
@@ -290,7 +335,7 @@ public final class RewriteRateRegression {
         return true;
     }
 
-    private static int occurrences(String text, String needle) {
+    static int occurrences(String text, String needle) {
         int found = 0;
         for (int at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length())) found++;
         return found;
