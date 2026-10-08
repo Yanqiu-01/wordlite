@@ -136,6 +136,22 @@ foreach ($name in $Impls) {
     Move-Item -Force (Join-Path $local "out-$name\*") $local
     cmd /c "rmdir `"$local\out-$name`"" | Out-Null
     if (-not $SkipBuild) { Copy-Item -Force $dexes[$name] (Join-Path $local "device-capture.dex") }
+    if (-not $SkipBuild) {
+        # 这份 capture 属于哪一个引擎，必须自己带上。capture 是构建产物：拿它去拼后来的 Word 真值、
+        # 或者去拼后来的 HEAD，都会算出一个理直气壮的假数——2026-10-08 就是这么被坑过一次：
+        # 10-07 留下的 old 产物读出"错位段 50"，用今天的 HEAD 重建同一个引擎再跑一遍是 7。
+        # tools/word-parity.ps1 会核对这里写下的 head_sha，对不上就拒绝出报告。
+        $headSha = ((& git -C $root rev-parse HEAD) | Select-Object -First 1)
+        $layoutDirty = @(& git -C $root status --porcelain -- app/src/main/java).Count -gt 0
+        Set-Content -Encoding utf8NoBOM -Path (Join-Path $local "engine.tsv") -Value @(
+            ("impl`t{0}" -f $name),
+            ("head_sha`t{0}" -f $headSha),
+            ("source`t{0}" -f $(if ($name -eq "old") { "git-archive HEAD" } else { "working tree" })),
+            ("layout_dirty`t{0}" -f $layoutDirty),
+            ("built_at`t{0}" -f ([DateTime]::Now.ToString("yyyy-MM-dd HH:mm:ss"))),
+            ("dex_sha256`t{0}" -f ((Get-FileHash -Algorithm SHA256 -LiteralPath $dexes[$name]).Hash.ToLower())),
+            ("docx`t{0}" -f ([System.IO.Path]::GetFileName($Docx))))
+    }
 }
 # Roll the "old" run up to the artifact root: that is the pre-fix baseline.
 $baseline = Join-Path $OutDir "old"

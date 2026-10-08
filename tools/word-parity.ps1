@@ -19,7 +19,10 @@ param(
     # Ceiling on paragraphs landing on a different page than Word. The reference document currently
     # drifts on 7 of 206 aligned paragraphs (all one page early, around the chapter-2 figure block);
     # tighten as that last cluster is chased down.
-    [int]$MaxShifted = 10
+    [int]$MaxShifted = 10,
+    # Let a capture that predates the Word truth (or an "old" baseline built from another HEAD)
+    # through with a warning instead of refusing. Only for reading history, never for a gate.
+    [switch]$AllowStale
 )
 $Tag = $Impl
 if (-not $Device)  { $Device = "artifacts/device/$Impl/paragraphs-wordformat.tsv" }
@@ -46,6 +49,50 @@ function Norm([string]$s) { if ($null -eq $s) { return "" }; return ($s -replace
 
 $wordRows = @(Read-Tsv $Word)
 $devRows = @(Read-Tsv $Device)
+# Word's own page count comes out of the truth file itself: the report used to hard-code 28, which
+# would keep printing a confident page count for a document nobody re-measured.
+$wordPageMax = ($wordRows | ForEach-Object { [int]$_.word_start_page } | Measure-Object -Maximum).Maximum
+# ---- provenance first ----
+# A device capture is a build artifact of a specific engine at a specific moment, and the Word
+# truth is a measurement of a specific document. Glue an old capture to a fresh truth (or an
+# "old" baseline captured from a different HEAD) and the delta still prints like a fact.
+# 2026-10-08: a 10-07 capture under artifacts/device/old/ read as "29 pages / 50 shifted";
+# rebuilt from HEAD the same engine measures 28 pages / 7 shifted / 96.6%. Every report now names
+# both files, both fingerprints and the engine build, and refuses when either is stale.
+function Get-Fingerprint([string]$path) {
+    if (-not (Test-Path $path)) { return "MISSING" }
+    $item = Get-Item -LiteralPath $path
+    $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash
+    return ("{0:yyyy-MM-dd HH:mm:ss} sha256={1} bytes={2}" -f $item.LastWriteTime, $sha.Substring(0, 16), $item.Length)
+}
+$headSha = ((& git -C $root rev-parse HEAD) 2>&1 | Select-Object -First 1)
+$engineFile = Join-Path (Split-Path -Parent $Device) "engine.tsv"
+$engineBuilt = ""
+if (Test-Path $engineFile) {
+    foreach ($line in (Get-Content $engineFile -Encoding UTF8)) {
+        $kv = $line -split "`t"
+        if ($kv.Count -ge 2 -and $kv[0] -eq "head_sha") { $engineBuilt = $kv[1] }
+    }
+}
+$staleReasons = @()
+if ($engineBuilt -and $headSha -and $engineBuilt -ne $headSha) {
+    $staleReasons += ("baseline captured from " + $engineBuilt.Substring(0, [Math]::Min(12, $engineBuilt.Length)) +
+        " but HEAD is " + $headSha.Substring(0, [Math]::Min(12, $headSha.Length)) + "; rebuild with tools/capture-device.ps1 -Impls " + $Tag)
+}
+if ((Test-Path $Device) -and (Test-Path $Word) -and
+        ((Get-Item -LiteralPath $Device).LastWriteTime -lt (Get-Item -LiteralPath $Word).LastWriteTime)) {
+    $staleReasons += ($Device + " was written before " + $Word + "; the Word truth was re-measured after this capture")
+}
+$staleNote = if (-not (Test-Path $engineFile)) { "engine build UNKNOWN (no engine.tsv -- captured before this stamp existed)" }
+             elseif ($staleReasons.Count -gt 0) { "STALE: " + ($staleReasons -join " | ") }
+             else { "fresh" }
+"capture_engine=$engineBuilt"
+"truth_file=$Word $(Get-Fingerprint $Word)"
+"capture_file=$Device $(Get-Fingerprint $Device)"
+"capture_check=$staleNote"
+if ($staleReasons.Count -gt 0 -and -not $AllowStale) {
+    throw ("stale comparison refused: " + ($staleReasons -join " | ") + " (or pass -AllowStale to read it as history)")
+}
 $devicePages = 0
 if (Test-Path $Summary) {
     $pageLine = @(Get-Content $Summary -Encoding UTF8 | Where-Object { $_ -like "pages=*" })
@@ -98,14 +145,13 @@ foreach ($line in $cells) {
 $supShifted = @($supList | Where-Object { ([int](($_ -split "`t")[6])) -ne 0 })
 "impl=$Tag"
 "word_paragraphs=$($wordRows.Count) device_paragraphs=$($devRows.Count) aligned=$aligned word_only=$wordOnly device_only=$devOnly"
-"word_total_pages=28 device_total_pages=$devicePages delta_pages=$($devicePages - 28)"
+"word_total_pages=$wordPageMax device_total_pages=$devicePages delta_pages=$($devicePages - $wordPageMax)"
 "shifted_paragraphs=$($shiftedList.Count)"
 "page_delta_histogram: " + (($hist.Keys | Sort-Object | ForEach-Object { "$_=>$($hist[$_])" }) -join "  ")
 "first_shifted: " + $(if ($shiftedList.Count -gt 0) { $shiftedList[0] } else { "none" })
 "script_paragraphs_aligned=$($supList.Count) script_paragraphs_shifted=$($supShifted.Count)"
 
 $devicePageMax = if ($devicePages) { $devicePages } else { 0 }
-$wordPageMax = ($wordRows | ForEach-Object { [int]$_.word_start_page } | Measure-Object -Maximum).Maximum
 $exact = if ($hist.ContainsKey(0)) { $hist[0] } else { 0 }
 $report = @(
     "impl=$Tag",
