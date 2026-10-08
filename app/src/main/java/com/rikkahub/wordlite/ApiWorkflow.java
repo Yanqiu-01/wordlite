@@ -64,6 +64,8 @@ public final class ApiWorkflow {
     private static final int MAX_LIBRARY_FILE = 16 * 1024 * 1024;
     private static final int AIGC_INK = 0x664FC3F7;
     private LocalLibrary library;
+    /** 报告中心的数据层：跑完一次检查落一条记录，回看走磁盘，不重跑比对。 */
+    private ReportStore reports;
     private EngineSettings engine = new EngineSettings();
     private DuplicateEngine.Report lastScan;
     private String preRewriteText = "";
@@ -77,6 +79,7 @@ public final class ApiWorkflow {
                 == android.content.res.Configuration.UI_MODE_NIGHT_YES;
         ink = dark ? 0xFFF2F2F2 : 0xFF202020; surface = dark ? 0xFF252525 : 0xFFF7F7F7;
         library = new LocalLibrary(new File(activity.getFilesDir(), "wordlite-library"));
+        reports = new ReportStore(new File(activity.getFilesDir(), "wordlite-reports"));
         try { engine = settings.loadEngine(); } catch (Exception ignored) { engine = new EngineSettings(); }
     }
     public void settings(ApiConfig.Service service) {
@@ -100,6 +103,7 @@ public final class ApiWorkflow {
         titles.add("检索设置"); ids.add("engines");
         titles.add("检索自检（文献库通不通）"); ids.add("probe");
         titles.add("自定义接口查重"); ids.add("api");
+        titles.add("报告中心（历史报告）"); ids.add("center");
         if (lastScan != null) {
             titles.add("查重结果"); ids.add("result");
             titles.add("导出报告"); ids.add("export");
@@ -115,6 +119,7 @@ public final class ApiWorkflow {
             else if ("engines".equals(id)) engineSettings();
             else if ("probe".equals(id)) engineProbe();
             else if ("api".equals(id)) customCheckMenu();
+            else if ("center".equals(id)) reportCenter();
             else if ("result".equals(id)) showScan();
             else if ("export".equals(id)) scanReport();
             else { host.document().displayHighlights.clear(); host.changed(); }
@@ -257,9 +262,14 @@ public final class ApiWorkflow {
                                 progress(total > 0 ? label + " " + done + "/" + total : label);
                             }
                         });
+                /* 报告中心（1.0.0）：先落一条记录再回界面。写盘留在 worker 线程里做——
+                   几十万字节的 JSON 压在 UI 线程上，取消按钮会先卡住。 */
+                final ReportStore.Record saved = reports.save(ReportStore.recordFor(result, host.fileName()));
                 complete(task, () -> {
                     lastScan = result; lastScanned = selection; scanShowsDuplicates = !aigcOnly;
                     if (document == host.document()) applyScan(result, selection);
+                    // 存不下必须当场说：结果页此刻就在屏幕上，静默丢记录等于让用户以为回看得到，点开列表却是空的。
+                    if (saved == null) toast("结果已出，但这次没能存进报告中心：" + reports.lastError());
                     showScan();
                 });
             } catch (Exception error) { fail(task, error); }
@@ -377,11 +387,46 @@ public final class ApiWorkflow {
     }
     private void scanReport() {
         if (lastScan == null) return;
-        pendingReport = CheckReport.html(host.fileName(), lastScan);
+        chooseTarget(CheckReport.html(host.fileName(), lastScan), host.fileName());
+    }
+    /** 详情页的导出用的就是记录里存着的那份 HTML，不重跑比对再拼一张。 */
+    private void exportRecord(ReportStore.Record record) {
+        if (record == null || record.html.length() == 0) { toast("这条报告没有可导出的 HTML"); return; }
+        chooseTarget(record.html, record.fileName);
+    }
+    /** 选存报告的目标只此一处：两个入口将来改格式，不会走成两条路。 */
+    private void chooseTarget(String html, String fileName) {
+        pendingReport = html;
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT); intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("text/html"); intent.putExtra(Intent.EXTRA_TITLE,
-                host.fileName().replaceAll("(?i)\\.docx$", "") + "-查重报告.html");
+                fileName.replaceAll("(?i)\\.docx$", "") + "-查重报告.html");
         activity.startActivityForResult(intent, REQUEST_REPORT);
+    }
+    /** 报告中心：历史列表 + 详情页。列表只读索引摘要，进详情才读那一个文件。 */
+    public void reportCenter() {
+        ReportCenterUI center = new ReportCenterUI(activity);
+        center.bind(reports, new ReportCenterUI.Listener() {
+            public void jumpTo(ReportStore.Record record, ReportStore.Evidence hit) { jumpToHit(record, hit); }
+            public void export(ReportStore.Record record) { exportRecord(record); }
+        });
+        new AlertDialog.Builder(activity).setView(center).setNegativeButton("关闭", null).show();
+    }
+    /**
+     * 从详情页跳回正文。记录里的区间是当时那篇正文上的字符偏移，所以只有「现在这篇就是当时
+     * 检的那篇」时才敢跳——拿存下来的长度与指纹验一遍，验不过就直说，不猜位置。
+     */
+    private void jumpToHit(ReportStore.Record record, ReportStore.Evidence hit) {
+        if (record == null || hit == null || host.document() == null) return;
+        TextSelection selection = TextSelection.all(host.document());
+        if (selection.text.length() != record.sourceChars
+                || ReportStore.digest(selection.text) != record.textDigest) {
+            toast("正文与检测时已不同，无法定位那段文字");
+            return;
+        }
+        ArrayList<TextSelection.Range> ranges = selection.ranges(hit.start, hit.end);
+        if (ranges.isEmpty()) { toast("这段命中的位置在正文里找不到了"); return; }
+        TextSelection.Range range = ranges.get(0);
+        host.navigate(range.paragraphIndex, range.start, range.end);
     }
     private void libraryMenu() {
         new AlertDialog.Builder(activity).setTitle("自建库")

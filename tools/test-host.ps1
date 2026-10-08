@@ -56,6 +56,7 @@ Add-Suite "CharLedgerRegression"   @()
 Add-Suite "CandidateRankerRegression" @()
 Add-Suite "RoutesRegression"      @()
 Add-Suite "CorpusImportRegression" @()
+Add-Suite "RewriteRobustnessRegression" @("tests/corpus/real-prose.txt")
 Add-Suite "AigcRegression"         @()
 Add-Suite "LocalRewriteRegression" @()
 Add-Suite "DetectRegression"       @()
@@ -66,6 +67,7 @@ Add-Suite "PreservationRegression" @("tests/samples/complex-preservation.docx")
 Add-Suite "ReviewRegression"       @("tests/fixture.docx", "$out/threaded-revisions.docx")
 Add-Suite "PdfRegression"          @("$out/metadata.pdf")
 Add-Suite "ApiRegression"          @()
+Add-Suite "ReportStoreRegression"  @()
 if (-not $SkipRealDoc) {
     $doc = if ($RealDocx) { $RealDocx } else { Join-Path $root "tests/samples/input-liu.docx" }
     if (Test-Path $doc) {

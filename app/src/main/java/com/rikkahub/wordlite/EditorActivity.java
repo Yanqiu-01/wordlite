@@ -283,6 +283,7 @@ public class EditorActivity extends Activity {
             case "symbol": insertSymbol(); break;
             case "fields": showFields(); break;
             case "check": showCheck(); break;
+            case "report-center": api.reportCenter(); break;
             case "outline":
                 navigation.setVisibility(navigation.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
                 if (navigation.getVisibility() == View.VISIBLE) reviewPanel.setVisibility(View.GONE); break;

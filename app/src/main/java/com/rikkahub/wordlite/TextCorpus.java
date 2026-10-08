@@ -18,10 +18,18 @@ public final class TextCorpus {
      * 判定相似所需的字符三元组 Dice 下限。0.60 是当年凭三个手搓例句定的，标定台在真实语料上扫过
      * 之后发现它偏紧：同篇论文内部的负例（术语全撞车那种最难判的）和从 CNKI 检索页上摘下来的
      * 别领域论文摘要片段，误报率从 0.50 到 0.85 整段都是 0.0%，而 0.60 要在句级少认回 5/120 条改写句、
-     * 引擎级召回少 1.2 个点。取 0.55 而不是 0.50：这两档在实测里逐位相同，多留一档余量给真实文库——
-     * 文库涨到几千篇之后偶发撞车的压力远不是这两个样本能代表的。全部表格见 docs/detection-calibration.md。
+     * 引擎级召回少 1.2 个点。全部表格见 docs/detection-calibration.md。
+     *
+     * 0.55 降到 0.50 是抗改写实测台逼出来的（docs/rewrite-robustness.md）。当初留 0.55 的理由是
+     * "0.50 与 0.55 实测逐位相同，多留一档余量给真实文库"，那句话只在原文与常规改写的样本上成立：
+     * 口径换成逐字替换之后两档不再相同——同样 20 段种入、同样 85 句同领域负例，替换掉两成汉字时召回
+     * 19.2% 对 26.4%，分句抽稀 96.2% 对 97.8%，而两边的误报都还是零。同一批负例实测能摸到的最高
+     * Dice 是 0.358，且出现在 50-80 字的长句桶里而不是短句桶里，所以 0.50 头顶仍有 0.14 的空档。
+     *
+     * 停在 0.50 而不去 0.45：0.45 还能再多认回约 5 个点，但头顶空档只剩 0.09，而文库上了规模之后
+     * 偶发撞车要吃的正是这一档。等真实文库够大、负例天花板仍压在 0.36 以下，再往 0.45 走。
      */
-    public static final float SIMILAR_DICE = 0.55f;
+    public static final float SIMILAR_DICE = 0.50f;
     /** 长短悬殊时改用的三元组包含率下限：整句原文嵌进改写过的长句。标定台上这一列不构成约束——
      * 0.80 到 1.00 逐位相同，因为能配上的句子长短本来就接近；留着它是因为整句原文嵌进长句那种写法只有它抓得住。
      */
@@ -62,7 +70,12 @@ public final class TextCorpus {
     /** 一篇文献至少要共享两枚指纹才值得去验证，一枚多半是巧合。 */
     private static final int MIN_SHARED_FINGERPRINTS = 3;
     private static final int MAX_ANCHORS_PER_DOC = 4000;
-    /** 精算 Dice 前使用的 Dice 上界下限，包含式判定也要求 Dice >= 0.5，故该裁剪无漏报。 */
+    /**
+     * 精算 Dice 前使用的 Dice 上界下限。包含式判定自己就要求 Dice >= 0.5，所以按这一档裁剪不会漏报；
+     * 但句级 Dice 下限是活的（diceFloor，标定台会临时压低它），裁剪必须跟着那个活值取小：
+     * 下限一旦降到 0.5 以下，还按 0.5 裁就把 0.4~0.5 之间该复核的候选悄悄扔掉了，而那种漏查处处都是
+     * 又查不出来。产品值 0.50 与这一档相等，所以这条 min 今天不改变任何一次判定。
+     */
     private static final float LENGTH_BOUND_FLOOR = 0.5f;
 
     public static final class Source {
@@ -658,7 +671,7 @@ public final class TextCorpus {
             Entry candidate = entries.get(entryId);
             int candidateLength = candidate.grams.length;
             float bound = 2f * Math.min(queryLength, candidateLength) / (queryLength + candidateLength);
-            if (bound < LENGTH_BOUND_FLOOR) continue;
+            if (bound < Math.min(LENGTH_BOUND_FLOOR, diceFloor)) continue;
             evaluated++;
             int total = queryLength + candidateLength;
             int smaller = Math.min(queryLength, candidateLength);

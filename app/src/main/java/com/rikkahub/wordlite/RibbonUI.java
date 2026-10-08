@@ -108,6 +108,9 @@ public final class RibbonUI extends LinearLayout {
                 break;
             case "引用":
                 cmd("outline", "导航"); cmd("fields", "域"); cmd("check", "格式检查");
+                /* 报告中心放在引用页：查重结果本来就是引用侧要核对的东西，
+                   而且这一页已有导航与格式检查，跳正文的动线在这里是连着的。 */
+                cmd("report-center", "报告中心");
                 break;
             case "审阅":
                 cmd("track", "修订"); cmd("review", "审阅窗格");

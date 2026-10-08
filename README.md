@@ -4,7 +4,7 @@ Android 上的 `.docx` 论文工作台：本地解析与回写 OOXML，按 Word 
 
 - 原生 Java + Android SDK，运行时零第三方依赖；构建链路是 aapt2 → javac → D8 → zipalign → apksigner。
 - 文档默认全程留在本机。网络只在用户点击某条命令时发生，没有默认服务器、内置密钥或后台上报。
-- 当前版本 `0.4.0` / `versionCode 13`，完整变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+- 当前版本 `1.0.0` / `versionCode 31`，完整变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 功能
 
@@ -49,13 +49,14 @@ Android 上的 `.docx` 论文工作台：本地解析与回写 OOXML，按 Word 
 - **查重**：`本地查重`（离线，只用自建库）与`全网查重`（自建库 + 内置检索源）两种模式，输出总相似度比、去除引用重复比、自编率、按来源分布与可点击定位的相似片段。
 - **AIGC 检测**：逐句给出机器生成倾向分与整篇 AI 生成比例，附判定依据，独立于查重结果高亮。
 - **降重**：选区 / 当前段落 / 全文逐段改写，原文与改写并排 diff，逐条接受、拒绝、重新生成、多建议切换；支持离线规则改写与自定义大模型接口两种后端。
+- **报告中心**：每次比对存成一条记录（指标、来源分布、证据表、注记），历史按时间倒序，详情页从盘上重画不重跑比对，点证据跳回正文并高亮那一段；正文被改过时只提示重查，不把高亮打到错位的地方。
 - **自建库**：把参考文献、学院论文合集、往届论文导入本机索引，作为离线查重与 AIGC 语料基线。一次可选多个文件（TXT / MD / DOCX / PDF），逐文件回执：成功、正文重复、类型不支持、没有文字层、读取失败。PDF 自己解（对象表线性扫、`ToUnicode` / `/Encoding`、FlateDecode 含 PNG 滤波），扫描版如实报"无文字层"，不冒充一次成功的空导入。
 
 ## 查重与 AIGC 检测怎么工作
 
 ### 匹配
 
-正文先做归一化（全半角、繁简、标点、空白、序号与前缀剥离），按句子切分后生成字符级 n-gram 指纹与 MinHash 签名；倒排索引按 n-gram 命中候选句，再用片段的 Dice 系数与跨句连续段合并成相似区间。句子级之外还有一条字符指纹带：Schleimer/Wilkerson/Aiken 的 winnowing（8 元组取样、窗口 12），任何连续 19 个字符以上的相同片段必定留下一枚共同指纹，所以两边断句不同、把两句并成一句、或者只在中间加个逗号，整段照抄照样被追出来并成一段报告。这一层里汉字数目字与阿拉伯数字同形（"四十分钟"与"40 分钟"、"七成"与"70%"算同一枚 token），那正是降重写法和录入差异最常动的两处。全部计算在本机完成，比对期间没有正文离开设备。
+正文先做归一化（全半角、繁简、标点、空白、序号与前缀剥离），按句子切分后生成字符级 n-gram 指纹与 MinHash 签名；倒排索引按 n-gram 命中候选句，再用片段的 Dice 系数与跨句连续段合并成相似区间。句子级之外还有一条字符指纹带：Schleimer/Wilkerson/Aiken 的 winnowing（7 元组取样、窗口 12），任何连续 18 个字符以上的相同片段必定留下一枚共同指纹，所以两边断句不同、把两句并成一句、或者只在中间加个逗号，整段照抄照样被追出来并成一段报告。这一层里汉字数目字与阿拉伯数字同形（"四十分钟"与"40 分钟"、"七成"与"70%"算同一枚 token），那正是降重写法和录入差异最常动的两处。全部计算在本机完成，比对期间没有正文离开设备。判定线上每一个数的来路分三处可查：[检测阈值标定](docs/detection-calibration.md)（n、w、最短共通指纹数、句级两条下限的网格扫描）、[抗改写召回实测台](docs/rewrite-robustness.md)（17 种改写口径下的召回/归属/噪声，随闸门跑）、[匹配改造方案](docs/paraphrase-robustness.md)（开源实现的参数对照与排序）。
 
 三个指标彼此独立：
 
@@ -187,7 +188,7 @@ Robolectric 排版与 UI 回归在 `tests/ui`：
 cd tests/ui && gradle --no-daemon test --console=plain
 ```
 
-`tools/test-host.ps1` 一次跑完 20 个 JVM 套件，2046 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 168、`AigcRegression` 逐句倾向 70、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 167、`ApiRegression` 接口配置与加密 30、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
+`tools/test-host.ps1` 一次跑完 22 个 JVM 套件，2277 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 183、`SourceLedgerRegression` 来源榜 146、`CharLedgerRegression` 字符账本 100、`CandidateRankerRegression` 候选去重 92、`RoutesRegression` 国内外选路 60、`CorpusImportRegression` 自建库批量导入 131、`AigcRegression` 逐句倾向 157、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 182、`RetrievalCoverageRegression` 检索覆盖率 111、`CnkiSearchRegression` 知网检索式 226、`CnkiTouchRegression` 知网公开页 20、`RewriteRobustnessRegression` 抗改写召回 56、`ReportStoreRegression` 报告中心存储 175、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`ApiRegression` 接口配置与加密 40、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
 
 联网检索源的解析全部走本地回环服务，避免测试依赖外网；要确认这九个内置源此刻真的能返回题录，跑：
 
@@ -205,7 +206,7 @@ pwsh tools/recall-probe.ps1 -Probe CqvipAlignProbe   # 维普的文献号与摘�
 pwsh tools/recall-probe.ps1 -Proxy 127.0.0.1:7897    # 挂代理再量一遍，与直连做 A/B
 ```
 
-Robolectric 排版与 UI 回归在 `tests/ui`，覆盖行距、断行、目录分页边界、表格列宽与行高、ribbon 与 PDF 导出、页面缩放与 section 页眉页脚坐标，共 62 例（60 例执行，2 例待真机参考取样），Windows 下全绿。
+Robolectric 排版与 UI 回归在 `tests/ui`，覆盖行距、断行、目录分页边界、表格列宽与行高、ribbon 与 PDF 导出、页面缩放与 section 页眉页脚坐标、报告中心（历史倒序、详情页从盘重画、点证据跳转与命中区间、证据行回收），共 18 个测试类 69 例（67 例执行，2 例待真机参考取样），Windows 下全绿。
 跑这套需要 `build.gradle` 里的 `options.encoding = UTF-8`（已加）：javac 默认按代码页读取，中文断言字符串会全部变成乱码。
 渲染类用例统一 `sdk = 28` + `GraphicsMode.NATIVE`：`robolectric.enabledSdks` 只放行 28，请求别的 sdk 的测试类会被静默略过且不报错；`LEGACY` 图形模式的画布不真正落笔，`getPixel()` 恒为 `00000000`，像素断言在它上面只会假通过。
 
@@ -232,13 +233,13 @@ pwsh tools/word-parity.ps1 -Impl new             # 与 Word 页码表逐段对�
 
 ## 版本
 
-`0.5.0` / `versionCode 21`
+`1.0.0` / `versionCode 31`
 
-- 内置检索源加到九个，中文这一侧补齐万方：它的检索只说 gRPC-web，请求与返回都是 protobuf，`ProtoWire` 与 `WanfangProtocol` 自带一份够用的编解码，不引 protobuf 运行时；一次检索连完整摘要一起进本机比对。维普、国家哲社文献中心照旧。
-- 匹配多了一条字符指纹带（winnowing，8 元组取样、窗口 12）：连续 19 个字符以上的照抄，不管两边怎么断句都能整段追出来；汉字数目字与阿拉伯数字在这一层同形，"四十分钟"改成"40 分钟"不再把一段复制砍成两截。
-- 代理没人应答时退回直连重试一次；`检索设置 → HTTP 代理`配合 `adb reverse` 就能借电脑出网，海外源不再被手机链路掐断。
-- 知网的公开检索入口仍关在滑块验证之后，能匿名取回的是按文献号或链接取条目与刊期目录；知网题录走`自建库`。
-
+- 报告中心：一次比对存成一条可回看的记录，历史列表、详情页、点证据跳正文并高亮那段；上限写死（60 条、单条 512KiB、索引 256KiB），存盘失败必须提示而不是静默少一条。
+- 抗改写判据第一次有实测：17 种确定性改写口径 + 召回/归属/噪声三列，全部进闸门。删句子、调语序、并句、跨句拼接打不动判据（97.8%~100%）；换掉一成汉字仍是 99.8%，换掉两成掉到 26.4%，悬崖位置与算式 `1 - ∛0.50 = 20.6%` 对得上。方法与表格见 [抗改写召回实测台](docs/rewrite-robustness.md)。
+- 句级 Dice 下限 0.55 → 0.50。标定台在现行代码上重跑，`ENGINE CURRENT` 与 `dice=0.50` 那一行逐位相同（召回 99.5%、误报 471 字、相似字符 3634、命中 60 条），所以相似率的分子一个字符没动，多认回的字全在真被改写过的那批种入段里；停在 0.50 而不去 0.45 的边界写在同一篇文档里。
+- 检索与自建库：每扇检索窗口自己决定问几次、中文检索式学会去标点保住术语与数字、自建库支持一次多个文件与 PDF 正文抽取（逐文件回执，扫描版如实报"无文字层"）。
+- 知网公开检索入口仍关在滑块验证之后，能匿名取回的是题录加摘要，且实测是部分索引：报告里的相似率是下限，与"检索覆盖率"同段出现。
 ## 隐私与安全
 
 - 没有默认服务器、硬编码密钥、遥测或后台上传；只有点击查重/降重/测试连接时才使用 `INTERNET`。
