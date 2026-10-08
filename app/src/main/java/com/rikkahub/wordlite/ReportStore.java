@@ -652,7 +652,8 @@ public final class ReportStore {
         record.selfWrittenRate = report.selfWrittenRate;
         record.citedDuplicateRate = balance == null ? 0d : balance.citedDuplicateRate;
         // 机器生成倾向那一格不是比例：档位与均分各自存一份，界面上不许出现百分号。
-        record.aigcScore = report.aigcRate;
+        // 未量到（判据未标定 / 样本不足 / 没跑）时连均分都不落盘：存了数的记录会被后面的界面与导出当成真数。
+        record.aigcScore = DuplicateEngine.aigcUnmeasured(report) ? 0d : report.aigcRate;
         record.aigcVerdict = DuplicateEngine.aigcTrend(report);
         record.aigcUnmeasured = DuplicateEngine.aigcUnmeasured(report);
         record.state = report.retrievalIncomplete ? STATE_UNFINISHED

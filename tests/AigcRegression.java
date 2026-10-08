@@ -143,16 +143,24 @@ public final class AigcRegression {
         check(AigcDetector.MIN_DOCUMENT_CHARS == 400, "样本门槛定在 400 个有效字符");
         AigcDetector.Result shortRun = AigcDetector.detect(HUMAN);
         check(shortRun.insufficientSample, "几百字的人写段落被判为样本不足");
-        check(shortRun.verdict.indexOf("样本不足") == 0, "样本不足时第一句就说清");
+        // 0.7.2 改口：判据方向没验正（docs/aigc-corpus.md 4.2 节 AUC(机器>真人)=0.305，反的），出口先认错。
+        // 样本不足这条纪律没删，它搬进 AigcDetector.measurement()，报告那一格也还在读它。
+        check(shortRun.verdict.indexOf("判据未标定") == 0
+                        && AigcDetector.measurement(shortRun).indexOf("样本不足") == 0,
+                "未标定期间第一句是认错，样本不足那句留在 measurement() 里（" + shortRun.verdict + "）");
         check(shortRun.sentences.size() > 0, "样本不足照样列出特征句供人看");
         String longish = AI + AI + AI;
         AigcDetector.Result longRun = AigcDetector.detect(longish);
         check(!longRun.insufficientSample, "过了门槛才给比例");
         // 0.7.0 改写：原断言 `longRun.rate > 20f`。组内取最强之后 AI×3 实测 27.64，仍然过 20，原门槛原样留住。
-        check(longRun.verdict.length() > 0 && longRun.rate > 20f,
-                "模板腔够重时结论是建议复核（实测 " + longRun.rate + " > 20）");
+        check(longRun.rate > 20f && longRun.verdict.indexOf("不给生成比例") > 0
+                        && longRun.verdict.indexOf("复核") < 0,
+                "内部句分照旧算得出（实测 " + longRun.rate + " > 20），但结论句既不给档位也不给比例");
         AigcDetector.Result plain = AigcDetector.detect(HUMAN_EN + HUMAN_EN + HUMAN_EN);
-        check("未见明显机器腔".equals(plain.verdict), "人写英文给的是一般结论");
+        check(plain.tier == AigcDetector.Tier.NONE
+                        && "未见明显机器腔".equals(AigcDetector.measurement(plain))
+                        && plain.verdict.indexOf("判据未标定") == 0,
+                "人写英文在内部仍是一般档，那句一般结论要等方向验正才轮到说：未标定时出口只认错");
         check(Math.abs(AigcDetector.detect(AI).rate - AigcDetector.detect(AI, null).rate) < 0.0001f,
                 "不传排除区间与传 null 结果一致");
         String mixed = AI + MILD + MILD + MILD;
@@ -383,7 +391,9 @@ public final class AigcRegression {
         // 本版有意改掉的一条：0 个计分句过去留着 insufficientSample=false，报告那一格印 0.00%。
         AigcDetector.Result empty = AigcDetector.detect("");
         check(empty.tier == AigcDetector.Tier.INSUFFICIENT_SAMPLE && empty.insufficientSample
-                && empty.verdict.indexOf("样本不足") == 0, "空正文归样本不足，报告那一格不再出现 0.00%");
+                && AigcDetector.measurement(empty).indexOf("样本不足") == 0
+                && empty.verdict.indexOf("判据未标定") == 0,
+                "空正文归样本不足（量到了才轮到说这句），未标定期间出口先认错，报告那一格不再出现 0.00%");
         check(nullResult.tier == AigcDetector.Tier.INSUFFICIENT_SAMPLE
                 && AigcDetector.detect("   \t\n  ").tier == AigcDetector.Tier.INSUFFICIENT_SAMPLE,
                 "null 与纯空白同样只给样本不足，不给比例");
@@ -643,8 +653,8 @@ public final class AigcRegression {
     /** 五档边界 + 双门槛：比例与字数缺一样就降档。 */
     private static void tiers() {
         check(AigcDetector.detect("").tier == AigcDetector.Tier.INSUFFICIENT_SAMPLE
-                        && AigcDetector.detect("").verdict.indexOf("样本不足") == 0,
-                "空正文归样本不足，比例那一格闭嘴");
+                        && AigcDetector.measurement(AigcDetector.detect("")).indexOf("样本不足") == 0,
+                "空正文归样本不足，比例那一格闭嘴（未标定时闭得更早，连档位也不说）");
         check(AigcDetector.detect("！！！？？？……——、，，，").tier
                         == AigcDetector.Tier.INSUFFICIENT_SAMPLE,
                 "只有标点也只给样本不足，不给比例");
@@ -676,10 +686,16 @@ public final class AigcRegression {
                         && AigcDetector.Tier.WATCH.ordinal() > AigcDetector.Tier.NONE.ordinal(),
                 "五档强弱顺序固定，报告与 UI 按 ordinal 比高低");
         check(strong.verdict.indexOf("%") < 0 && watch.verdict.indexOf("%") < 0
-                        && none.verdict.indexOf("%") < 0,
-                "档位文案里不塞百分比，一个口径一个数");
-        check(strong.verdict.indexOf("成段机器腔") == 0 && strong.verdict.indexOf("段") > 0,
-                "成段档那句人话说清了几段几字（" + strong.verdict + "）");
+                        && none.verdict.indexOf("%") < 0
+                        && AigcDetector.measurement(strong).indexOf("%") < 0
+                        && AigcDetector.measurement(watch).indexOf("%") < 0
+                        && AigcDetector.measurement(none).indexOf("%") < 0,
+                "档位文案与未标定那一句里都不塞百分比，一个口径一个数");
+        // 档位那句话现在用户读不到（被 measurement() 外面那一层挡着），但它必须原样活着：
+        // 方向验正之后回到眼前的就是这一句，届时不许悄悄换成另一套说法，所以这里继续逐字钉住。
+        check(AigcDetector.measurement(strong).indexOf("成段机器腔") == 0
+                        && AigcDetector.measurement(strong).indexOf("段") > 0,
+                "成段档那句人话说清了几段几字（" + AigcDetector.measurement(strong) + "）");
     }
 
     /** 真实论文里最像机写的真人句子：钉子户清单，一句都不许进可疑档。 */

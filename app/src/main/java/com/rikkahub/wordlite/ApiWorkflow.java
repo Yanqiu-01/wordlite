@@ -343,13 +343,16 @@ public final class ApiWorkflow {
             box.addView(snippet);
         }
         if (result.aigc != null) {
-            box.addView(label("AIGC 倾向较高的句子", 13));
+            boolean scored = AigcScorer.calibrated();
+            box.addView(label(scored ? "AIGC 倾向较高的句子"
+                    : "触发过判据的句子（判据未标定，这里按原文顺序列，不是可疑度排序）", 13));
             int shown = 0;
             for (final AigcDetector.Sentence sentence : result.aigc.sentences) {
                 if (shown >= 20 || sentence.score < 0.4f) continue;
                 shown++;
                 String quote = lastScanned == null ? "" : safeSlice(lastScanned.text, sentence.start, sentence.end);
-                TextView row = label(String.format(Locale.CHINA, "%.0f%%  ", sentence.score * 100f)
+                // 未标定时行首那个 "35%" 一并撤掉：它是句分冒充百分比，方向还是反的。
+                TextView row = label((scored ? String.format(Locale.CHINA, "%.0f%%  ", sentence.score * 100f) : "")
                         + quote + "\n" + join(sentence.features), 13);
                 row.setPadding(0, dp(8), 0, dp(8)); row.setTextIsSelectable(true);
                 row.setOnClickListener(view -> navigateTo(sentence.start, sentence.end));

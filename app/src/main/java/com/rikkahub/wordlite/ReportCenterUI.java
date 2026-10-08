@@ -325,7 +325,9 @@ public final class ReportCenterUI extends LinearLayout {
         foot.append("参与比对 ").append(record.comparedChars).append(" 个有效字符，命中 ")
                 .append(record.duplicateChars).append(" 个，其中引用区间内 ").append(record.citedDuplicateChars)
                 .append(" 个；自编 ").append(record.selfWrittenChars).append(" 个");
-        if (record.machineChars > 0) foot.append("；机器腔可疑 ").append(record.machineChars).append(" 个");
+        // 未量到的那一轮不印可疑字数：这个数来自同一条没验正过的门槛，留着它等于换个名字继续报数。
+        if (record.machineChars > 0 && !record.aigcUnmeasured)
+            foot.append("；机器腔可疑 ").append(record.machineChars).append(" 个");
         if (record.excludedChars > 0) foot.append("；另有结构性文本 ").append(record.excludedChars).append(" 个未参与比对");
         footLine.setText(foot.toString());
         coverage.setText(record.coverageNote);

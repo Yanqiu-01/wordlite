@@ -29,6 +29,31 @@ public final class AigcScorer {
     public static final String VERSION = "v1-order-only";
     /** 拉丁族没有真人英文正文可标定，只能按特征名从中文族平移，版本号上明写出来。 */
     static final String LATIN_SUFFIX = "+latin-derived";
+    /** 只有带这个前缀的版本号才够格把句分印到报告与界面上，判据只此一处，见 {@link #calibrated()}。 */
+    static final String CALIBRATED_PREFIX = "cal-";
+
+    /**
+     * 这套判据够不够格对外给一个数。只认 {@link #VERSION} 的前缀，别处不许另立一套判断。
+     *
+     * 为什么非要这一位挡着：docs/aigc-corpus.md 4.2 节在带标注语料上量到 AUC(机器>真人)=0.305，**方向是反的**
+     * （真人句分比机器句分更高）；4.1 节同时量到真人侧最高句分 0.506 已经越过 SEGMENT_FLAG_GATE(0.450)，
+     * 机器侧最高只有 0.217，一枪没打。这个刻度现在排的不是"像不像机器"，把它打成 17.5 或 45.3 就是在冒充
+     * 一个可比的量。所以未标定期间报告与界面一律降级成"量不到"，先例是同仓库那两条纪律：未完成查重不印
+     * 0.00%（DuplicateEngine.aigcTrend）、有效字符不足不给比例（AigcDetector.MIN_DOCUMENT_CHARS）。
+     *
+     * 把它翻回来的唯一路子：拿新的带标注语料把方向验正，再把 VERSION 换成 cal-*，并同步改掉
+     * tests/AigcFeatureAuditRegression.java 里钉住的方向结论——那个套件钉死了 VERSION 的字面值，
+     * 只改这里不改那里会直接炸。
+     */
+    public static boolean calibrated() {
+        return VERSION.startsWith(CALIBRATED_PREFIX);
+    }
+
+    /** 未标定期间对外只此一句：先说方向，再给两侧实测数字，读的人要能看出错在哪一侧。 */
+    public static final String UNCALIBRATED_NOTE =
+            "判据未标定，方向已实测为反：标注语料（真人池 440 句 / 机器池 227 句）上真人句分比机器句分更高，"
+                    + "AUC(机器>真人)=0.305；真人稿已有句子被误判（最高句分 0.506，门槛 0.450），"
+                    + "机器稿一句没打中（最高 0.217）";
 
     /** 一张系数表：语言族 × 特征系数 + 折扣 + 版本号。 */
     public static final class Coefficients {

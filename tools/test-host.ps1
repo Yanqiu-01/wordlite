@@ -61,6 +61,8 @@ Add-Suite "RoutesRegression"      @()
 Add-Suite "CorpusImportRegression" @()
 Add-Suite "RewriteRobustnessRegression" @("tests/corpus/real-prose.txt")
 Add-Suite "AigcRegression"         @()
+# 逐特征方向审计（带标注语料）。缺语料一律判失败，不许静默跳过；它同时是"未标定就不许给数"的闸门。
+Add-Suite "AigcFeatureAuditRegression" @()
 Add-Suite "LocalRewriteRegression" @()
 Add-Suite "DetectRegression"       @()
 Add-Suite "RetrievalCoverageRegression" @()

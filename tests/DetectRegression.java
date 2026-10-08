@@ -1049,12 +1049,19 @@ public final class DetectRegression {
         check(!html.contains("AIGC 生成比例") && occurrences(html, "比例") == 0,
                 "the finished report never calls anything a 比例 any more: the AIGC cell lost that name");
         String trendRow = metricRow(html, "机器生成倾向");
-        check(trendRow != null && trendRow.contains("观察（可疑 8 字 / 全文 21 字）") && !trendRow.contains("%"),
-                "the AIGC cell states tier plus two absolute character counts, no percent sign at all");
-        String scoreRow = metricRow(html, DuplicateEngine.AIGC_SCORE_LABEL);
-        check(scoreRow != null && scoreRow.contains("17.5（字符加权句分，非占比）") && !scoreRow.contains("%"),
-                "the character-weighted sentence score survives under a name that does not fake a share");
-        check(!html.contains("17.50%"), "the weighted sentence score is no longer printed as a percentage");
+        // The scorer's direction is inverted on the labelled corpus (docs/aigc-corpus.md 4.2: AUC(machine>human)
+        // = 0.305), so this cell refuses. The arithmetic it used to print stays pinned as three pieces: 8 flagged
+        // characters out of a 21-character document, and WATCH still spells itself 观察.
+        check(DuplicateEngine.trendMachineChars(report) == 8 && DuplicateEngine.trendTotalChars(report) == 21
+                        && DuplicateEngine.aigcTierName(AigcDetector.Tier.WATCH).equals("观察"),
+                "the numbers behind that cell are still 8 flagged of 21, and the WATCH tier name is still 观察");
+        check(trendRow != null
+                        && trendRow.equals("<td>机器生成倾向</td><td>" + DuplicateEngine.AIGC_UNCALIBRATED + "</td>")
+                        && !trendRow.contains("%"),
+                "the AIGC cell is exactly the refusal, nothing else: " + trendRow);
+        check(metricRow(html, DuplicateEngine.AIGC_SCORE_LABEL) == null && !html.contains("17.5")
+                        && !html.contains("17.50%"),
+                "the weighted sentence score row is gone entirely while uncalibrated, not relabelled");
         check(html.contains("PMID:12345678") && html.contains("2020") && html.contains("重复率偏高"),
                 "snippet row shows source title, year and locator");
         check(html.contains("模板句式命中") && html.contains("OpenAlex") && html.contains("已跳过 CORE"),
@@ -1116,16 +1123,23 @@ public final class DetectRegression {
                         && !html.contains("<td>去除引用重复比</td>") && !html.contains("<td>自编率</td>"),
                 "no duplication rate survives an unfinished run");
         String trendRow = metricRow(html, "机器生成倾向");
-        // 手算：可疑 6 个字 / 全文 20 个有效字符；句分 10.71 打成"10.7"，一位小数。
-        check(trendRow != null && trendRow.contains("观察（可疑 6 字 / 全文 20 字）") && !trendRow.contains("%"),
-                "the AIGC figure keeps its place in an unfinished report as tier plus two character counts");
-        String scoreRow = metricRow(html, DuplicateEngine.AIGC_SCORE_LABEL);
-        check(scoreRow != null && scoreRow.contains("10.7（字符加权句分，非占比）") && !scoreRow.contains("%"),
-                "the weighted sentence score is labelled 均分 and carries no percent sign here either");
+        // 手算：可疑 6 个字 / 全文 20 个有效字符。0.7.2 起这一格只给拒绝句，那两个绝对量单独钉住：
+        // 撤掉一格数字，不许顺手把账本口径也弄丢（判据方向没验正是撤它的理由，不是重算账的理由）。
+        check(DuplicateEngine.trendMachineChars(report) == 6 && DuplicateEngine.trendTotalChars(report) == 20
+                        && DuplicateEngine.aigcTierName(report.aigc.tier).equals("观察"),
+                "the two character counts behind that cell are still 6 of 20, tier WATCH spells 观察");
+        check(trendRow != null
+                        && trendRow.equals("<td>机器生成倾向</td><td>" + DuplicateEngine.AIGC_UNCALIBRATED + "</td>")
+                        && !trendRow.contains("%"),
+                "an unfinished report refuses the AIGC figure too: " + trendRow);
+        check(metricRow(html, DuplicateEngine.AIGC_SCORE_LABEL) == null && !html.contains("10.7"),
+                "the 10.7 weighted score row is not printed while the scorer is uncalibrated");
         check(!html.contains("AIGC 生成比例") && occurrences(html, "比例") == 0,
                 "an unfinished report has no rate at all, so the word 比例 must not survive anywhere in it");
-        check(html.contains("AIGC 倾向句") && html.contains("书面连接词密集") && html.contains("72.00%"),
-                "the per-sentence AIGC list renders as it does today");
+        check(html.contains("AIGC 倾向句") && html.contains("书面连接词密集") && !html.contains("72.00%"),
+                "the per-sentence list keeps its evidence words and loses the 72.00% score column");
+        check(html.contains("不是可疑度排序"),
+                "the sentence table now says its order is document order, not a suspicion ranking");
         check(html.contains("联网检索没有取回可比对的候选文献"), "the notes still explain the unfinished run");
     }
 

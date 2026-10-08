@@ -45,6 +45,11 @@ public final class DuplicateEngine {
     public static final String AIGC_SCORE_LABEL = "机器腔均分";
     private static final String AIGC_TIER_INSUFFICIENT = "样本不足";
     private static final String AIGC_NOT_RUN = "本机 AIGC 分析未执行";
+    /**
+     * 判据未标定那一格的说法。它必须自带方向，因为这一版错的方向是"冤枉真人"，
+     * 只写"未标定"三个字会被读成"大概没问题，只是没测"。实测数字在 AigcScorer.UNCALIBRATED_NOTE 里。
+     */
+    static final String AIGC_UNCALIBRATED = "判据未标定（方向实测为反：真人句分比机器句分更高）";
     public interface Progress { void step(String label, int done, int total); }
     public static final class Report {
         /* 0.7.1 起这三个比率全部出自 ledger 那一次划分：分子分母同一把尺，自编率已减掉已判重复的字符，
@@ -245,7 +250,17 @@ public final class DuplicateEngine {
     /** 样本不足、或者这一轮压根没跑 AIGC：都不许印出任何看起来像结论的数。 */
     public static boolean aigcUnmeasured(Report report) {
         if (report == null || report.aigc == null) return true;
-        return report.aigcInsufficient || report.aigc.insufficientSample;
+        // 判据方向没验正过，和"没跑这一项"是同一档：量出来的数不可比，就不许印出去。
+        return !AigcScorer.calibrated() || report.aigcInsufficient || report.aigc.insufficientSample;
+    }
+
+    /** 未量到的三种说法之一：没跑 / 样本不足 / 判据未标定。面板、HTML、存档都读这一个出处。 */
+    public static String aigcUnmeasuredReason(Report report) {
+        if (report == null || report.aigc == null) return AIGC_NOT_RUN;
+        if (report.aigcInsufficient || report.aigc.insufficientSample)
+            return AIGC_TIER_INSUFFICIENT + "（有效字符 " + report.aigc.comparedChars + " 字，门槛 "
+                    + AigcDetector.MIN_DOCUMENT_CHARS + " 字）";
+        return AIGC_UNCALIBRATED;
     }
 
     /**
@@ -254,10 +269,7 @@ public final class DuplicateEngine {
      * 一份报告里不能有两个都叫比例的数，用户挑不出哪个是错的。
      */
     public static String aigcTrend(Report report) {
-        if (report == null || report.aigc == null) return AIGC_NOT_RUN;
-        if (aigcUnmeasured(report))
-            return AIGC_TIER_INSUFFICIENT + "（有效字符 " + report.aigc.comparedChars + " 字，门槛 "
-                    + AigcDetector.MIN_DOCUMENT_CHARS + " 字）";
+        if (aigcUnmeasured(report)) return aigcUnmeasuredReason(report);
         return aigcTierName(report.aigc.tier) + "（可疑 " + trendMachineChars(report) + " 字 / 全文 "
                 + trendTotalChars(report) + " 字）";
     }
@@ -267,6 +279,8 @@ public final class DuplicateEngine {
      * 同一格里写死"非占比"。样本不足时给空串，这一格宁可不画。
      */
     public static String aigcScoreLine(Report report) {
+        // 未标定与样本不足都走这一条：整格不画。这一位是 AigcScorer.calibrated() 的唯一对外出口之一，
+        // 想在报告里看到一个句分，先把 VERSION 与方向一起改对（见 AigcScorer#calibrated）。
         if (report == null || aigcUnmeasured(report)) return "";
         return String.format(java.util.Locale.US, "%.1f", Double.valueOf(clamp(report.aigcRate)))
                 + "（字符加权句分，非占比）";

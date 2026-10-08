@@ -237,6 +237,18 @@ public final class AigcDetector {
 
     /** 样本不足时禁止给比例，其余只说倾向与档位，不做判决（MOSS"分数只用于相对比较"）。 */
     static String verdict(Result result) {
+        // 方向没验正过就谈不上"这次量得准不准"：这一句排在样本量之前，先认错再谈字数。
+        if (!AigcScorer.calibrated())
+            return AigcScorer.UNCALIBRATED_NOTE + "，所以本次只列触发过的判据证据，不给生成比例";
+        return measurement(result);
+    }
+
+    /**
+     * 判据方向被带标注语料验正之后才轮到用户看的那几句话（样本不足那条 + 五个档位那条）。
+     * 未标定期间只有回归读得到它：档位口径一条没改，tests/AigcRegression.tiers() 继续逐档盯着这段文案，
+     * 挡在用户前面的只是"现在还不该说出口"这一层（{@link AigcScorer#calibrated()}）。
+     */
+    static String measurement(Result result) {
         if (result.insufficientSample)
             return "样本不足（有效字符 " + result.comparedChars + "，门槛 " + MIN_DOCUMENT_CHARS
                     + "），只列特征，不给生成比例";

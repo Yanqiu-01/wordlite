@@ -260,17 +260,26 @@ public final class CheckReport {
             out.append("<p>").append(escape(report.aigc.verdict)).append("</p>");
         AigcDetector.Result aigc = report.aigc;
         if (aigc == null || aigc.sentences.isEmpty()) { out.append("<p>未标记出高倾向句子。</p>"); return; }
-        out.append("<table><thead><tr><th>句子</th><th>倾向分</th><th>判定依据</th></tr></thead><tbody>");
+        // 判据未标定：句分那一列整列撤掉，只留"这句触发过哪几条判据"。留一个 0.00%~50.00% 的数在这里，
+        // 就是拿一个方向反了的刻度冒充百分比（降级做法同"未完成查重不印比率"）。
+        boolean scored = AigcScorer.calibrated();
+        out.append("<table><thead><tr><th>句子</th>");
+        if (scored) out.append("<th>倾向分</th>");
+        out.append("<th>判定依据</th></tr></thead><tbody>");
         for (AigcDetector.Sentence sentence : aigc.sentences) {
             StringBuilder features = new StringBuilder();
             for (String feature : sentence.features) {
                 if (features.length() > 0) features.append("&#32178;");
                 features.append(escape(feature));
             }
-            out.append("<tr><td>").append(escape(snippet(report.sourceText, sentence.start, sentence.end))).append("</td><td>")
-                    .append(percent(sentence.score * 100)).append("</td><td>").append(features).append("</td></tr>");
+            out.append("<tr><td>").append(escape(snippet(report.sourceText, sentence.start, sentence.end))).append("</td>");
+            if (scored) out.append("<td>").append(percent(sentence.score * 100)).append("</td>");
+            out.append("<td>").append(features).append("</td></tr>");
         }
         out.append("</tbody></table>");
+        if (!scored)
+            out.append("<p>上表按原文顺序列，<strong>不是可疑度排序</strong>：现判据在标注语料上把真人句分排在机器句分之上，"
+                    + "任何排序都会把真人句子排到前面。要按可疑度排序，先等判据方向被带标注语料验正。</p>");
     }
     /**
      * 这一格只说档位与字数，不说比例（0.7.1）：0.7.0 它叫"AIGC 生成比例"、打的却是字符加权句分，

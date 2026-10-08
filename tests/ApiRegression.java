@@ -121,8 +121,9 @@ public final class ApiRegression {
 
     /**
      * 结果面板那一格（0.7.1）。ApiWorkflow 要 Android 才跑得起来，host JVM 上钉的是它准备打印的那句话本身：
-     * 面板与 HTML 报告都取 DuplicateEngine.aigcTrend / aigcScoreLine，一处改文案两处一起动，
-     * 而这一格从今往后只有档位与两个字数，没有第二个"比例"，也没有百分号。
+     * 面板与 HTML 报告都取 DuplicateEngine.aigcTrend / aigcScoreLine，一处改文案两处一起动。
+     * 0.7.1 时这一格是档位加两个字数；0.7.2 起判据未标定，它连档位也不给，只说方向错在哪一侧。
+     * 两种说法都没有百分号，也都不叫比例。
      *
      * 夹具手算：全文 21 个有效字符，重复 [0,10) 10 个字，其中引用区间 [0,4) 占 4 个，机器腔 [10,21) 11 个字。
      * 于是 总相似度比 10/21、去除引用重复比 6/21、引用内重复比 4/21、自编率 11/21，三者闭合。
@@ -144,16 +145,22 @@ public final class ApiRegression {
         panel.aigc = new AigcDetector.Result();
         panel.aigc.comparedChars = 630;
         panel.aigc.tier = AigcDetector.Tier.NEEDS_REVIEW;
-        check(DuplicateEngine.aigcTrend(panel).equals("复核（可疑 11 字 / 全文 21 字）"),
-                "面板那一格手算：档位 复核 + 可疑 11 字 / 全文 21 字");
-        check(DuplicateEngine.aigcScoreLine(panel).equals("45.3（字符加权句分，非占比）"),
-                "句分 45.26 打成一位小数并写明非占比");
+        // 0.7.2 改口：判据方向没验正（AigcScorer.VERSION=v1-order-only；标注语料 AUC(机器>真人)=0.305，方向是反的，
+        // 真人侧最高句分 0.506 已越过门槛 0.450，机器侧最高 0.217 一枪没打），这一格从 档位+字数 降级成拒绝句。
+        // 原来钉在这里的手算账（复核 + 可疑 11 字 / 全文 21 字）拆成三件量留住：撤一格不等于把口径一起丢掉。
+        check(DuplicateEngine.trendMachineChars(panel) == 11 && DuplicateEngine.trendTotalChars(panel) == 21
+                        && DuplicateEngine.aigcTierName(AigcDetector.Tier.NEEDS_REVIEW).equals("复核"),
+                "那一格背后的两个绝对量还是手算的 11 与 21，复核档的名字也仍由这一处供给");
+        check(DuplicateEngine.aigcTrend(panel).equals(DuplicateEngine.AIGC_UNCALIBRATED),
+                "面板那一格现在只说方向：" + DuplicateEngine.aigcTrend(panel));
+        check(DuplicateEngine.aigcScoreLine(panel).isEmpty(),
+                "句分 45.26 不再被打成一位小数印出去：整格空串，宁可不画");
         check(!DuplicateEngine.aigcTrend(panel).contains("%") && !DuplicateEngine.aigcTrend(panel).contains("比例"),
                 "这一格既没有百分号也不叫比例");
         String html = CheckReport.html("panel.docx", panel);
-        check(html.contains("<td>机器生成倾向</td><td>复核（可疑 11 字 / 全文 21 字）</td>")
-                        && html.contains("<td>机器腔均分</td><td>45.3（字符加权句分，非占比）</td>"),
-                "HTML 报告与面板同一份文案，两处不会各说各话");
+        check(html.contains("<td>机器生成倾向</td><td>" + DuplicateEngine.AIGC_UNCALIBRATED + "</td>")
+                        && !html.contains("机器腔均分") && !html.contains("45.3"),
+                "HTML 报告与面板同一份拒绝文案，那个 45.3 在整份报告里一个字符都不存在");
         check(!html.contains("AIGC 生成比例"), "报告里再也没有 AIGC 生成比例这一格");
         panel.aigc.insufficientSample = true;
         panel.aigcInsufficient = true;

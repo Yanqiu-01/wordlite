@@ -261,6 +261,10 @@ GRADE TEMPLATE  ORDER-ONLY overlap=true human-rate=20.8/1000 machine-minus-human
   （见 `docs/oss-algorithms.md`），所以产品口径永远是"风格倾向 + 建议复核"，档位不叫"AI 比例"。
 - **短文量不到档位。** 400/200 字的绝对门槛意味着一整节不足 400 字的稿子只能停在"样本不足"，
   `LONG3` 行就是这个现象的直白读数。
+- **未标定期间对外一个数都不给。** 带标注语料把方向量反了（`docs/aigc-corpus.md` 4.2 节，逐特征拆到
+  11 条是第九节），所以 `AigcScorer.calibrated()` 返回 false：报告与界面那一格只说方向，句分、档位、
+  每句百分比、可疑字数一律不印（落点清单见 `docs/aigc-corpus.md` 第十节）。本文档上面那些 FPB /
+  GRID / TIER 数字仍然照旧出，它们是标定台的内部读数，不是对用户的承诺。
 - **`h-flag = 0` 在 GRID 的 72 行里恒为 0**，说明"整段被点名"这个指标在真人侧已经饱和，往后调系数
   只能看 `margin` 与 `human-max`，别再拿 `h-flag` 当刹车。
 
