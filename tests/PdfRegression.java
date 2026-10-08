@@ -127,6 +127,15 @@ public final class PdfRegression {
                 "同名字体名跨页不串味：第一页查表、第二页用自带 cmap，两页都要读出来（" + collide.text.trim().replace("\n", " / ") + "）");
         check(!collide.text.contains(gb1Truth), "串味时才会出现的串读：第二页不许拿第一页的表去解自己的字形码");
 
+        /* 一页的 /Contents 拆成两段：字体在第一段里选好，第二段一个 Tf 都没有。
+           PDF 把一页的几段内容流当成同一条逻辑内容流，字体状态得跟着走——按段重置时第二段整段丢字
+           （真刊 zidong-cjmenet.pdf 第 1 页就是这么少了 620 个字符：改前那页 1,347 字，真值 2,367 字）。 */
+        PdfFile.Extracted split = PdfFile.extractText(java.nio.file.Files.readAllBytes(
+                new File("tests/fixture-split-content.pdf").toPath()));
+        check(split.pages == 1 && split.text.contains("孔隙跟着升高")
+                        && split.text.contains("接头导电率保持在两者之间") && split.undecodableGlyphs == 0,
+                "一页两段内容流：第二段没有 Tf 也照第一段的字体读（读出：" + split.text.trim() + "）");
+
         System.out.println("SUMMARY " + checks + " PDF range/metadata assertions passed; Android native rendering not simulated");
     }
 }

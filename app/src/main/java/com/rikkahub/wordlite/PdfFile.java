@@ -125,6 +125,14 @@ public final class PdfFile {
         Float lineY;
         float penX;
         float penY;
+        /**
+         * 当前字体与行距。放在这里而不是 interpret() 的局部变量里，是因为一页的 /Contents
+         * 可以有好几段，而 PDF 把它们当成同一条逻辑内容流：前一段选了字体，后一段接着用。
+         * 实测 zidong-cjmenet.pdf 第 1 页第 7 段一个 Tf 都没有，按段重置就把整段英文摘要
+         * （620 个字符）整个丢了，改前一页只读出 1,347 字（真值 2,367 字）。
+         */
+        Font font;
+        float leading;
         boolean reachedLimit;
         private final java.util.HashSet<String> noted = new java.util.HashSet<String>();
         PageState(StringBuilder text, Extracted out, int limit) { this.text = text; this.out = out; this.limit = limit; }
@@ -474,6 +482,12 @@ public final class PdfFile {
         /** 解析一页的文字流。inherited 是父节点继承下来的 /Resources，页面自己的优先。 */
         void pageText(Dict page, Dict inherited, PageState state, int depth) throws IOException {
             Dict resources = merge(dictOf(page.values.get("Resources")), inherited);
+            /* 每一页从头开始：PDF 规定每页的内容流从默认图形状态起步。
+               字体、行距、笔的位置都不许从上一页带过来。 */
+            state.font = null;
+            state.leading = 0f;
+            state.penX = 0f;
+            state.penY = 0f;
             Object contents = resolve(page.values.get("Contents"));
             if (contents instanceof StreamObj) {
                 runStream((StreamObj) contents, resources, state, depth);
@@ -502,8 +516,8 @@ public final class PdfFile {
         private void interpret(byte[] content, Dict resources, PageState state, int depth) {
             Reader reader = new Reader(content, 0);
             ArrayList<Object> operands = new ArrayList<Object>();
-            Font font = null;
-            float leading = 0f;
+            Font font = state.font;      // 上一段内容流选中的字体，这一段接着用
+            float leading = state.leading;
             while (!state.reachedLimit) {
                 Object value = Reader.read(reader);
                 if (value == Reader.END) break;
@@ -522,19 +536,23 @@ public final class PdfFile {
                     if (array instanceof List) for (Object item : (List<?>) array) show(resolve(item), font, state);
                 } else if (operator.equals("Tf") && size >= 2) {
                     String key = nameOf(operands.get(size - 2));
-                    if (key != null) font = fontFor(key, resources, state);
+                    if (key != null) {
+                        font = fontFor(key, resources, state);
+                        state.font = font;
+                    }
                 } else if (operator.equals("Td") || operator.equals("TD")) {
                     if (size >= 2) {
                         state.penX += numOf(operands.get(size - 2));
                         float dy = numOf(operands.get(size - 1));
                         state.penY += dy;
-                        if (operator.equals("TD")) leading = -dy;
+                        if (operator.equals("TD")) { leading = -dy; state.leading = leading; }
                     }
                 } else if (operator.equals("Tm") && size >= 6) {
                     state.penX = numOf(operands.get(size - 2));
                     state.penY = numOf(operands.get(size - 1));
                 } else if (operator.equals("TL") && size >= 1) {
                     leading = numOf(operands.get(size - 1));
+                    state.leading = leading;
                 } else if (operator.equals("T*")) {
                     state.penY -= leading;
                     state.lineY = null;

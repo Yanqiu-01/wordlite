@@ -246,3 +246,53 @@ if UCS_TO_CID:
         print("   第 1 页真值:", COLLIDE_A, " 第 2 页真值:", COLLIDE_B)
 
     two_page_collision()
+
+
+# ---------------------------------------------------------------------------
+# 8) 一页的 /Contents 分成两段：字体在前一段里选好，后一段一个 Tf 都没有。
+#    PDF 把一页的几段内容流当成同一条逻辑内容流，字体状态必须带过去；
+#    按段重置的话后一段整段丢字（真刊 zidong-cjmenet.pdf 第 1 页就是这么少了 620 个字符）。
+# ---------------------------------------------------------------------------
+SPLIT_A = "孔隙跟着升高"        # 第 1 段：带 Tf（这一句和第 2 句没有重复字，夹具里的 cmap 才装得下）
+SPLIT_B = "接头导电率保持在两者之间"  # 第 2 段：只 Td + Tj，没有 Tf
+
+def split_content_stream():
+    codes_a = list(range(1, len(SPLIT_A) + 1))
+    codes_b = list(range(len(codes_a) + 1, len(codes_a) + len(SPLIT_B) + 1))
+    pairs = [(ord(ch), gid) for ch, gid in zip(SPLIT_A + SPLIT_B, codes_a + codes_b)]
+    ttf = zlib.compress(fake_ttf(pairs))
+    c1 = ("BT /C1 11 Tf 20 170 Td <%s> Tj ET" % hex_codes(codes_a)).encode("latin1")
+    c2 = ("BT 20 140 Td <%s> Tj ET" % hex_codes(codes_b)).encode("latin1")
+    objs = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 220] /Resources << /Font << /C1 4 0 R >> >>"
+            b" /Contents [6 0 R 7 0 R] >>"),
+        4: (b"<< /Type /Font /Subtype /Type0 /BaseFont /SplitCJK /Encoding /Identity-H"
+            b" /DescendantFonts [8 0 R] >>"),
+        6: (("<< /Length %d >>\nstream\n" % len(c1)).encode("latin1") + c1 + b"\nendstream"),
+        7: (("<< /Length %d >>\nstream\n" % len(c2)).encode("latin1") + c2 + b"\nendstream"),
+        8: (b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /SplitCJK /CIDSystemInfo << /Registry (Adobe)"
+            b" /Ordering (Identity) /Supplement 0 >> /CIDToGIDMap /Identity /FontDescriptor 9 0 R /DW 1000 >>"),
+        9: (b"<< /Type /FontDescriptor /FontName /SplitCJK /Flags 4 /FontBBox [-100 -200 1000 900]"
+            b" /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 10 0 R >>"),
+        10: (("<< /Length %d /Filter /FlateDecode >>\nstream\n" % len(ttf)).encode("latin1")
+             + ttf + b"\nendstream"),
+    }
+    out = bytearray(b"%PDF-1.4\n% one page, two content streams, font set in the first\n")
+    offs = {}
+    for num in sorted(objs):
+        offs[num] = len(out)
+        out += ("%d 0 obj\n" % num).encode("latin1") + objs[num] + b"\nendobj\n"
+    top = max(objs)
+    xref = len(out)
+    out += ("xref\n0 %d\n" % (top + 1)).encode("latin1") + b"0000000000 65535 f \n"
+    for num in range(1, top + 1):
+        out += (("%010d 00000 n \n" % offs[num]).encode("latin1") if num in offs else b"0000000000 65535 f \n")
+    out += ("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (top + 1, xref)).encode("latin1")
+    with open(os.path.join(OUT, "fixture-split-content.pdf"), "wb") as handle:
+        handle.write(bytes(out))
+    print("wrote fixture-split-content.pdf %d B  真值：%s + %s" % (len(out), SPLIT_A, SPLIT_B))
+
+
+split_content_stream()
