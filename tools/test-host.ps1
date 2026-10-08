@@ -72,6 +72,8 @@ Add-Suite "AigcOfflineModelRegression" @("app/src/main/assets/aigc", "tests/corp
 Add-Suite "LocalRewriteRegression" @()
 Add-Suite "DeepModeAudit"          @("tests/corpus/real-prose.txt", "tests/corpus/oa-planted-cjmenet.txt")
 Add-Suite "RewriteRateRegression"  @("tests/samples/input-liu.docx", "tests/corpus/oa-planted-cjmenet.txt", "$out/rewrite-rate")
+# 降重器在真命中区上换掉了多少字：逐段报覆盖率，不许只报一个总数。
+Add-Suite "RewriteCoverageAudit"   @("tests/samples/input-liu.docx", "tests/corpus/oa-planted-cjmenet.txt", "$out/rewrite-coverage")
 Add-Suite "DetectRegression"       @()
 Add-Suite "RetrievalCoverageRegression" @()
 Add-Suite "WanfangPagingRegression"    @()
@@ -89,6 +91,8 @@ Add-Suite "ZeroRateAudit"          @("tests/samples/input-liu.docx", "tests/corp
 Add-Suite "DetectionFloor"       @("tests/corpus", "$out/detection-floor-library")
 # 摘要层（近似）的量台与闸门：阈值两堆分布 + 负对照 + 不与正文级同账 + 每次请求留档（A4）。全程离线。
 Add-Suite "AbstractLayerRegression" @("tests/corpus")
+# 取回开放获取全文这一步：假链接、只有 html、真给 PDF 三种形状分开算，回环桩，不外呼。
+Add-Suite "FullTextYieldRegression" @()
 # 字体替代表的账：标题写着华文新魏的稿子不许再悄悄变宋体，替代是谁、缺了哪些字，都要说得出。
 Add-Suite "FontSubstitution"      @("tests/samples/input-liu.docx")
 # 结果页那句"手机有没有网"的判据：手机有网时不许说手机没网（真机被这句话坑过一次）。
