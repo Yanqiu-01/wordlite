@@ -10,6 +10,10 @@
 param(
     [string]$Serial = "",
     [string]$Docx = "tests/samples/input-liu.docx",
+    # Source tree for the "new" implementation. Defaults to the working tree; point it at a snapshot
+    # (tools/tree-snapshot.ps1) when someone else has an unfinished .java in app/src/main/java, so a
+    # half-written file cannot break the build and a measurement cannot drift under your feet.
+    [string]$Tree = "app/src/main/java",
     [string]$Apk = "base.apk.1",
     [string[]]$Impls = @("old", "new"),
     [string]$OutDir = "artifacts/device",
@@ -81,7 +85,7 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
     tar -xf (Join-Path $tmp "head.tar") -C $oldSrc
 
-    $sources = @{ old = (Join-Path $oldSrc "app/src/main/java"); new = (Join-Path $root "app/src/main/java") }
+    $sources = @{ old = (Join-Path $oldSrc "app/src/main/java"); new = (Join-Path $root $Tree) }
     foreach ($name in $Impls) {
         $classes = Join-Path $tmp "$name-classes"; New-Item -ItemType Directory -Force -Path $classes | Out-Null
         $files = @(Get-ChildItem -Recurse -File -Filter *.java $sources[$name] | ForEach-Object { $_.FullName })

@@ -16,6 +16,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Tag,
     [string]$OutRoot = "artifacts/agent-layout-verify",
     [string]$WordCache = "artifacts/parity",
+    # Engine source tree for both device runs, from tools/tree-snapshot.ps1. Empty = the working tree.
+    [string]$Tree = "",
 # 第 4 条把"每行差多少"换成"一页差几行"要乘的每页数。27 = 桌面 Word 正文页行数下界（真值
 # artifacts/agent-layout-verify/page-stack-all/page_lines.tsv：正文页 27-35 行，章首页与图页更少；
 # 与 docs/layout-parity-target.md 第 0 节记下的基准同一个口径，前后才可比。
@@ -46,9 +48,14 @@ function Grab($lines, [string]$pattern, [int]$group) {
 }
 
 # ---------- 1. 手机侧采样：编译工作树，手机上装的那个 APK 不参与 ----------
+$treeArgs = @()
+if ($Tree) { $treeArgs = @("-Tree", $Tree) }
 if (-not $SkipDevice) {
-    Run @("tools/capture-device.ps1", "-Serial", $Serial, "-Impls", "new", "-OutDir", $Out)
-    Run @("artifacts/agent-typeset/run-repaginate.ps1", "-Serial", $Serial, "-OutDir", (Join-Path $Out "repag"))
+    $capArgs = @("tools/capture-device.ps1", "-Serial", $Serial, "-Impls", "new", "-OutDir", $Out) + $treeArgs
+    $repArgs = @("artifacts/agent-typeset/run-repaginate.ps1", "-Serial", $Serial,
+                 "-OutDir", (Join-Path $Out "repag")) + $treeArgs
+    Run $capArgs
+    Run $repArgs
 }
 if (-not (Test-Path (Join-Path $d "lines-all.tsv"))) { throw "missing capture: $d/lines-all.tsv" }
 
