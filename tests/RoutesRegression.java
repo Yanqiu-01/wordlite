@@ -45,6 +45,7 @@ public final class RoutesRegression {
             answeredRoadWins();
             refusedExplicitPortIsNotAPortDown();
             livedRoadStaysQueued();
+            routeColumn();
             refusedRoadKeepsProvenRoad();
         } finally {
             Routes.reset();
@@ -276,6 +277,8 @@ public final class RoutesRegression {
             check(error.refused, "拒绝连接单独记一笔，不和\"网络失败\"混成一类");
             check(error.getMessage().startsWith("网络连接失败"),
                     "只有一条路时报它自己的那句话——汇总只在该换路而没路可换时才加：" + error.getMessage());
+            check(Routes.routeFor("127.0.0.1:" + closed).equals("没走通：直连 拒绝连接"),
+                    "一条路都没答话时那一栏写清是哪条路拨不通：" + Routes.routeFor("127.0.0.1:" + closed));
         } catch (java.io.IOException error) {
             throw new AssertionError("预期拿到 ApiClient.Failure，实际 " + error);
         }
@@ -342,6 +345,12 @@ public final class RoutesRegression {
             check(DuplicateEngine.reachOf(thrown) > 0,
                     "答过话的源不许被记成「这一轮没通」：它答了，只是匿名配额到顶");
             check(!Routes.anyPortDown(), "把包送出去的那条路不进冷却，429 不是「没人监听」");
+            /* 真机 2026-10-09 09:38 的检索自检里，同一行前半句写"代理 127.0.0.1:7897 答了 HTTP 429"，
+               后面那一栏写"未走过"。这一条钉的就是这两半句不许再打架。 */
+            String column = Routes.routeFor("127.0.0.1:" + dead);
+            check(column.equals("代理 127.0.0.1:" + proxyPort + " 答了 429"),
+                    "自检那一栏与同一行的前半句同档：答过话就写那条路加那一句（实得 " + column + "）");
+            check(!column.contains("未走过"), "答过话的那一栏里没有「未走过」三个字（实得 " + column + "）");
             ApiClient.Failure solo = null;
             try {
                 HttpTransport.get("http://127.0.0.1:" + proxyPort + "/search", null, 2, 0, null);
@@ -427,6 +436,38 @@ public final class RoutesRegression {
             out.append(Routes.label(proxy));
         }
         return out.toString();
+    }
+
+    /**
+     * 自检那一栏的三档：走通 / 答过话 / 拨不通。真机 2026-10-09 09:38 那一屏（9/9 个源可用）里
+     * OpenAlex 那行长这样：前半句「检索源限流，约 3600 秒后恢复，本次跳过（这一轮走过的路：
+     * 代理 127.0.0.1:7897 答了 HTTP 429；直连 拒绝连接）」，最后一栏「未走过」——同一行自己打自己。
+     */
+    private static void routeColumn() {
+        Routes.reset();
+        String openalex = "https://api.openalex.org/works?q=x";
+        Proxy tunnel = Routes.parse("127.0.0.1:7897");
+        check(Routes.routeFor("api.openalex.org").equals("未走过"), "一次都没被碰过才写未走过");
+        Routes.failed(openalex, null, "拒绝连接");
+        check(Routes.routeFor("api.openalex.org").equals("没走通：直连 拒绝连接"),
+                "直连拨不上：那一栏写出是哪条路、撞上什么（实得 " + Routes.routeFor("api.openalex.org") + "）");
+        Routes.failed(openalex, Routes.parse("127.0.0.1:7890"), "超时");
+        check(Routes.routeFor("api.openalex.org").equals("没走通：直连 拒绝连接"),
+                "同一台主机留第一次量到的那句下场，不会被后一条路改口");
+        Routes.answered(openalex, tunnel, 429);
+        check(Routes.routeFor("api.openalex.org").equals("代理 127.0.0.1:7897 答了 429"),
+                "有一条路答过话就升到答话那一档（实得 " + Routes.routeFor("api.openalex.org") + "）");
+        check(!Routes.routeFor("api.openalex.org").contains("未走过"),
+                "答过话的那一栏里没有「未走过」三个字");
+        check(!Routes.routeFor("api.openalex.org").contains("没走通"),
+                "答过话的那一栏也不说「没走通」——它答了话，只是配额到顶");
+        Routes.note(openalex, tunnel);
+        check(Routes.routeFor("api.openalex.org").equals("代理 127.0.0.1:7897"),
+                "真的走通之后回到只有路名，不带答话后缀");
+        check(Routes.summary().equals("api.openalex.org 代理 127.0.0.1:7897"),
+                "走通那本账不变：答话与拨不通两档只进那一栏，不混进 summary");
+        Routes.reset();
+        check(Routes.routeFor("api.openalex.org").equals("未走过"), "reset 把三档一起清掉");
     }
 
     /** 确定没人监听的回环端口：让系统发一个，立刻关掉。 */

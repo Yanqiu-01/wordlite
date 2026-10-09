@@ -209,13 +209,14 @@ public final class HttpTransport {
                    换路也不把它记成"这条路不通"——那条路本身是好的，下一次还得走它。 */
                 boolean reroutable = error.status == 429;
                 if (roadDown) {
-                    Routes.failed(url, via);
+                    Routes.failed(url, via, brief(error));
                     if (error.refused) Routes.portRefused(via);
                     if (burned.length() > 0) burned.append("；");
                     burned.append(Routes.label(via)).append(' ').append(brief(error));
                 } else if (error.status > 0) {
                     /* 源答了话：这条路把包送出去了，它的冷却当场作废；先答的那一条留着当这一轮的说法。 */
                     Routes.proofOfLife(via);
+                    Routes.answered(url, via, error.status);
                     if (answered == null) {
                         answered = error;
                         answeredVia = via;
