@@ -53,6 +53,9 @@ Add-Suite "ScriptRegression"       @()
 Add-Suite "WordLineHeightRegression" @()
 # Word 悬挂末行标点的落点算术：真值是 Word 导出 PDF 里那 22 行越界的行（tools/hang-truth.py）。
 Add-Suite "HangPunctuationRegression" @()
+# 斜不断行：Word 在 Cu/SB/P-Cu/SB/Cu 这种串上从不切在斜杠后（真值 tools/slash-break-truth.py 量死），
+# 规则的范围（斜杠两边都得是字母数字、不许比行宽、区间不许以斜杠开头结尾）都在这里钉着。
+Add-Suite "SlashAtomicRegression" @()
 Add-Suite "TextCorpusRegression"   @()
 Add-Suite "SourceLedgerRegression" @()
 Add-Suite "CharLedgerRegression"   @()

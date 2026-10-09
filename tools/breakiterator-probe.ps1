@@ -14,8 +14,12 @@ param(
     [string]$Serial = "EAMUT20528011355",
     # Which probe to build: BreakIteratorProbe (can the platform take our break rules?) or
     # ScriptBreakProbe (does a script/scale span inside a token create a break opportunity?).
-    [ValidateSet("BreakIteratorProbe", "ScriptBreakProbe")]
-    [string]$Probe = "BreakIteratorProbe")
+    [ValidateSet("BreakIteratorProbe", "ScriptBreakProbe", "TokenBreakProbe")]
+    [string]$Probe = "BreakIteratorProbe",
+    # TokenBreakProbe lays out the document's own paragraphs when they are on the phone: which w:p,
+    # given as the paragraph numbers every other tool uses (tools/para-text.py). Pass "" to run the
+    # probe's invented cases only.
+    [string]$Paras = "86,94,113")
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
@@ -36,6 +40,11 @@ if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
 $dev = "/data/local/tmp/wlbreak"
 RunAdb @("shell", "mkdir", "-p", $dev) | Out-Null
 RunAdb @("push", (Join-Path $dexDir "classes.dex"), "$dev/probe.dex") | Out-Null
+if ($Probe -eq "TokenBreakProbe" -and $Paras) {
+    $paraFile = Join-Path $tmp "paras.txt"   # not $paras: PowerShell names are case-insensitive
+    py (Join-Path $root "tools/para-text.py") -Paras $Paras -Out $paraFile | Out-Null
+    RunAdb @("push", $paraFile, "$dev/paras.txt") | Out-Null
+}
 $out = RunAdb @("shell", "CLASSPATH=$dev/probe.dex app_process -Xmx256m / com.rikkahub.wordlite.probe.$Probe")
 $sdk = (RunAdb @("shell", "getprop", "ro.build.version.sdk")).Trim()
 Write-Host "== device sdk=$sdk  (Word truth: artifacts/word-break/word-lines.tsv)"
@@ -44,3 +53,5 @@ $dst = Join-Path $root "artifacts/agent-layout-verify/$Probe.txt"
 New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
 Set-Content -Encoding utf8NoBOM -Path $dst -Value (@("sdk=$sdk") + $out)
 Write-Host "== wrote $dst"
+
+
