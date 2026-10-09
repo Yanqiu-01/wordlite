@@ -13,8 +13,12 @@ answers three questions:
   2. for each group, Word's line height, ours, and the paragraph numbers involved;
   3. how much of the whole p90 each group is responsible for, so the fix order is set by evidence.
 
+The docx paragraph numbers come from tools/break-agreement.py's point list when it sits in the capture
+directory, so a person reading the table can open the paragraph in the document, not only in a capture.
+
 Usage:
     py tools/line-height-tail.py                       # default capture artifacts/agent-layout-verify/pdfgate1
+    py tools/line-height-tail.py -Capture artifacts/agent-layout-verify/265-release   # adds docx paragraphs
     py tools/line-height-tail.py -Capture <dir> -Top 8
 """
 import argparse, collections, csv, os, statistics, sys
@@ -32,12 +36,26 @@ def main():
     ap.add_argument("-Capture", default="artifacts/agent-layout-verify/pdfgate1")
     ap.add_argument("-Rows", default="", help="default: <Capture>/line-height-rows.tsv")
     ap.add_argument("-Top", type=int, default=8)
+    ap.add_argument("-Map", default="", help="break-agreement.tsv, to also print the Word paragraph"
+                    " numbers of the blocks in each cohort (device block index and docx paragraph"
+                    " index are not the same number: tables and figures take blocks too).")
     a = ap.parse_args()
     path = a.Rows or os.path.join(a.Capture, "line-height-rows.tsv")
     if not os.path.exists(path):
         print("missing %s" % path)
         return 1
     rows = list(csv.DictReader(open(path, encoding="utf-8-sig", newline=""), delimiter="\t"))
+    docx_of_block = {}
+    map_path = a.Map or os.path.join(a.Capture, "break-agreement.tsv")
+    if os.path.exists(map_path):
+        with open(map_path, encoding="utf-8-sig", newline="") as fh:
+            for m in csv.DictReader(fh, delimiter="\t"):
+                try:
+                    docx_of_block[int(m["device_block"])] = int(m["word_para"])
+                except (KeyError, ValueError):
+                    pass
+        print("block -> docx paragraph map: %s (%d blocks covered; a block missing here simply has no"
+              " compared line)" % (map_path, len(docx_of_block)))
     for r in rows:
         r["delta"] = float(r["delta"]); r["abs"] = abs(float(r["delta"]))
         r["word"] = float(r["word"]); r["billed"] = float(r["billed"])
@@ -69,6 +87,11 @@ def main():
                  statistics.median([x["delta"] for x in g]), min(x["delta"] for x in g)))
         print("      device blocks: %s" % ", ".join(str(b) for b in blocks[:a.Top])
               + (" ..." if len(blocks) > a.Top else ""))
+        known = [(b, docx_of_block[b]) for b in blocks if b in docx_of_block]
+        if known:
+            print("      docx paragraphs (same lines, Word's own numbering): %s"
+                  % ", ".join("blk%d=para%d" % kb for kb in known[:a.Top])
+                  + (" ..." if len(known) > a.Top else ""))
         print("      share of the whole |delta| sum in the tail: %.1f%%"
               % (100.0 * sum(x["abs"] for x in g) / sum(x["abs"] for x in tail)))
     print("")
