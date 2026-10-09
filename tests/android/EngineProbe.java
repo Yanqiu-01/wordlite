@@ -52,6 +52,76 @@ import java.util.Set;
  *    recoverable from outside HttpTransport.
  */
 public final class EngineProbe {
+    /**
+     * 应用那一路的整轮复现：把一篇真稿（从 docx 抽出的正文，一行一段）喂给
+     * DuplicateEngine.scan，参数照 ApiWorkflow 里发起查重那一处：perEngine=12、windows=6、
+     * fullTexts=6、timeout=20。报的就是屏幕上那几行——可比正文（抓到开放获取全文的篇数）、
+     * "可以下进自建库"那一屏的逐篇形状，以及屏上那句汇总。
+     *
+     * <p>为什么能在手机上跑这一段：DuplicateEngine / TextCorpus / PaperSources / CorpusImport
+     * 都没有 android 依赖，缺的只是 DocxParser，所以稿件以纯文本推进同一条 scan。
+     */
+    private static void scanPass(String document, PaperSources.Limits limits) throws Exception {
+        DocxDocument document2 = new DocxDocument();
+        int index = 0;
+        for (String line : document.split("\n", -1)) {
+            if (line.trim().isEmpty()) continue;
+            DocxDocument.ParagraphBlock block = new DocxDocument.ParagraphBlock();
+            block.index = index++;
+            block.text = line;
+            document2.blocks.add(block);
+            document2.paragraphs.add(block);
+        }
+        TextSelection selection = TextSelection.all(document2);
+        System.out.println("SCAN 稿件=" + selection.text.length() + " 字 可比字数待报告给"
+                + " 段数=" + index + " 参数 per=" + limits.perEngine + " windows=" + limits.windows
+                + " fullTexts=" + limits.fullTexts + " timeout=" + limits.timeoutSeconds
+                + "s proxy=" + (limits.proxy.isEmpty() ? "(none)" : limits.proxy));
+        long began = System.currentTimeMillis();
+        DuplicateEngine.Report report = DuplicateEngine.scan(selection, new TextCorpus(), true,
+                PaperSources.engines(), limits, null, new DuplicateEngine.Progress() {
+                    public void step(String label, int done, int total) {
+                        System.out.println("  [" + done + "/" + total + "] " + label);
+                    }
+                });
+        System.out.println("SCAN 候选=" + report.candidates.size() + " 入库=" + report.comparableCandidates
+                + " 可比正文(抓到开放获取全文)=" + report.fullTextCandidates
+                + " 只有摘要=" + report.abstractOnlyCandidates
+                + " 只有题录=" + report.recordOnlyCandidates
+                + " 窗口=" + report.windowsRetrieved + "/" + report.windowsAvailable
+                + " 覆盖=" + report.coveredChars + "/" + report.comparableChars + " 字"
+                + " 总相似度比=" + String.format(Locale.ROOT, "%.2f%%", report.overallRate)
+                + " 用时=" + (System.currentTimeMillis() - began) + "ms");
+        for (String note : report.notes) System.out.println("note: " + note);
+
+        /* "可以下进自建库"那一屏：逐篇按 app 的取法取一遍，形状留给回执，再拼屏上那句汇总。 */
+        CorpusImport.Batch batch = new CorpusImport.Batch();
+        batch.total = report.downloadables.size();
+        int number = 0;
+        for (DuplicateEngine.Downloadable pick : report.downloadables) {
+            number++;
+            PaperSources.PdfFetch got = PaperSources.fetchPdf(pick.url, limits, null);
+            CorpusImport.Receipt receipt = new CorpusImport.Receipt();
+            receipt.number = number;
+            receipt.name = clip(pick.title, 40);
+            receipt.status = got.chars > 0 ? CorpusImport.Status.IMPORTED : CorpusImport.Status.FAILED;
+            receipt.chars = got.chars;
+            receipt.pages = got.pages;
+            receipt.shape = got.chars > 0 ? "" : got.shape;
+            receipt.message = got.chars > 0 ? "已入库" : PaperSources.describeFetch(got);
+            batch.receipts.add(receipt);
+            System.out.printf(Locale.ROOT,
+                    "  DL #%-2d %-9s rank=%-2d hops=%-2d status=%-4d bytes=%-9d chars=%-6d shape=%s%n"
+                            + "       %s%n       %s%n",
+                    number, pick.engine, 0, got.hops, got.status, got.bytes.length, got.chars, got.shape,
+                    clip(pick.title, 60), clip(pick.url, 110));
+        }
+        System.out.println("屏上标题行 summary(): " + batch.summary());
+        for (String line : batch.detail().split("\n")) System.out.println("  回执 " + line);
+        System.out.println("可比正文 " + report.fullTextCandidates + " 篇 · 下载那一屏 " + batch.total
+                + " 篇里真能解出字 " + batch.imported() + " 篇");
+    }
+
     /** Sentinel the staged CnkiSearch placeholder throws, so an excluded engine reads as SKIP. */
     private static final String EXCLUDED = "WORDLITE_PROBE_EXCLUDED";
     private static final int TCP_MILLIS = 5000;
@@ -61,7 +131,8 @@ public final class EngineProbe {
     public static void main(String[] argv) throws Exception {
         String query = "深度学习 图像分割 综述";
         String only = "", proxy = "", coreKey = trim(System.getenv("WORDLITE_CORE_KEY")), file = "";
-        int per = 5, timeout = 25, repeat = 1, fetch = 3, budget = 6;
+        int per = 5, timeout = 25, repeat = 1, fetch = 3, budget = 6, windows = 0;
+        String doc = "";
         boolean tcp = true, tcpOnly = false;
         ArrayList<String> words = new ArrayList<String>();
         for (String arg : argv) {
@@ -75,14 +146,18 @@ public final class EngineProbe {
             else if (arg.startsWith("--timeout=")) timeout = number(arg.substring(10), timeout);
             else if (arg.startsWith("--core-key=")) coreKey = arg.substring(11).trim();
             else if (arg.startsWith("--query-file=")) file = arg.substring(13).trim();
+            else if (arg.startsWith("--windows=")) windows = number(arg.substring(10), windows);
+            else if (arg.startsWith("--doc=")) doc = arg.substring(6).trim();
             else if (arg.equals("--no-tcp")) tcp = false;
             else if (arg.equals("--tcp-only")) { tcp = true; tcpOnly = true; }
             else words.add(arg);
         }
         int ft = words.indexOf("fulltext");
+        int sc = words.indexOf("scan");
         int at = words.indexOf("engines");
         if (at >= 0) words.remove(at);
         if (ft >= 0) words.remove(ft);
+        if (sc >= 0) words.remove(sc);
         if (!words.isEmpty()) query = words.get(0);
         if (!file.isEmpty()) {
             String read = new String(Files.readAllBytes(Paths.get(file)), Charset.forName("UTF-8")).trim();
@@ -100,12 +175,18 @@ public final class EngineProbe {
                 + " per=" + per + " timeout=" + timeout + "s proxy=" + (limits.proxy.isEmpty() ? "(none)" : limits.proxy));
         System.out.println("java=" + System.getProperty("java.vm.name", "?") + " " + System.getProperty("java.version", "?")
                 + " android=" + System.getProperty("java.vm.version", "?"));
+        if (windows > 0) limits.windows = windows;
         if (tcp) tcpPrecheck(limits);
         if (tcpOnly) {
             System.out.println("SUMMARY tcp-only");
             return;
         }
 
+        if (sc >= 0) {
+            String body = new String(Files.readAllBytes(Paths.get(doc)), Charset.forName("UTF-8"));
+            scanPass(body, limits);
+            return;
+        }
         if (ft >= 0) {
             ArrayList<PaperSources.Candidate> pool = fulltextPass(query, limits, wanted(only), fetch);
             queuedPass(query, limits, pool, budget, per);
