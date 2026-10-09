@@ -266,6 +266,9 @@ public final class ApiWorkflow {
                    不再是 PaperSources.Limits 里一个没人读的摆设。 */
                 limits.windows = options.windows;
                 limits.fullTexts = DuplicateEngine.MAX_FULL_TEXTS;
+                /* 检索设置里那个开关到得了检索循环：开着就用剩下的请求额度顺手抓几篇开放获取正文，
+                   关掉（或设成 0）就还是只在名次队那几篇上花全文额度。 */
+                limits.autoFullTexts = options.autoPdf ? options.autoPdfs : 0;
                 limits.coreKey = options.coreKey;
                 limits.proxy = options.proxy;
                 ArrayList<String> engines = new ArrayList<String>();
@@ -848,6 +851,11 @@ public final class ApiWorkflow {
            后者是 2.6.2 之前的实际行为，那会儿 12 意味着第 9 扇之后一个字都没查。 */
         final EditText windows = field(String.valueOf(engine.windows),
                 "每源检索窗口数（1-24，每家最多问几扇）");
+        final CheckBox autoPdf = check("扫描时顺手抓开放获取全文进比对（用剩下的检索请求额度）",
+                engine.autoPdf);
+        box.addView(autoPdf);
+        final EditText autoPdfs = field(String.valueOf(engine.autoPdfs), "顺手抓正文最多几篇（0-10，0 为关掉）");
+        box.addView(autoPdfs);
         final EditText core = field(engine.coreKey, "CORE API Key（可留空）");
         final EditText proxy = field(engine.proxy, "HTTP 代理 host:port（海外检索源需经电脑代理时填写，可留空）");
         box.addView(perEngine); box.addView(timeout); box.addView(windows); box.addView(core); box.addView(proxy);
@@ -863,6 +871,8 @@ public final class ApiWorkflow {
                     value.perEngine = number(perEngine.getText().toString(), engine.perEngine);
                     value.timeoutSeconds = number(timeout.getText().toString(), engine.timeoutSeconds);
                     value.windows = number(windows.getText().toString(), engine.windows);
+                    value.autoPdf = autoPdf.isChecked();
+                    value.autoPdfs = number(autoPdfs.getText().toString(), engine.autoPdfs);
                     value.coreKey = core.getText().toString().trim();
                     value.proxy = proxy.getText().toString().trim();
                     try { value.validate(); settings.saveEngine(value); engine = value; toast("已保存检索设置"); }

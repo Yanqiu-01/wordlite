@@ -43,6 +43,8 @@ public final class RetrievalCoverageRegression {
     private static boolean sticky;
     /** E 组夹具：真出处只在第 MID_WINDOW_SEQ 扇窗口回得来，其余窗口一律回套话。 */
     private static boolean midWindow;
+    /** 全文桩回空正文：验"抓回来没有正文层"那一档仍然按摘要比对，不许谎称比过正文。 */
+    private static boolean fullTextEmpty;
     /** 慢桩每请求的耗时，时间闸门那组用它把挂钟闸门压出来。 */
     private static long slowMillis;
     /** 命中这些路径直接回 429，用来验限流不被误算成整轮不可用。 */
@@ -119,6 +121,7 @@ public final class RetrievalCoverageRegression {
         crossrefSize = -1;
         sticky = false;
         midWindow = false;
+        fullTextEmpty = false;
         slowMillis = 0L;
         SLOW_MILLIS.clear();
         throttled.clear();
@@ -215,6 +218,7 @@ public final class RetrievalCoverageRegression {
            落在 /europepmc/ 下；2.5.0 之前这一路是拿 pmcid 拼出来的，那条口实测 404。 */
         server.createContext("/europepmc/", exchange -> {
             record("/europepmc/fulltext");
+            if (fullTextEmpty) { respond(exchange, 200, ""); return; }
             respond(exchange, 200, FULL_TEXT_XML);
         });
         server.createContext("/arxiv", exchange -> {
@@ -225,7 +229,7 @@ public final class RetrievalCoverageRegression {
         /* crossref 那条对题论文的开放获取位置：只有名次第一才配得上这次抓取。 */
         server.createContext("/fulltext", exchange -> {
             record("/fulltext");
-            respond(exchange, 200, FULL_TEXT_XML);
+            respond(exchange, 200, fullTextEmpty ? "" : FULL_TEXT_XML);
         });
         /* 恒 429 的源：验"补试一次"与"N 个源不可用"按源计而不是按次数计。 */
         server.createContext("/throttled", exchange -> {
@@ -1034,6 +1038,111 @@ public final class RetrievalCoverageRegression {
                 "补了几次写几次，一次没补也不许写");
     }
 
+
+    // ---- H 组：扫描时顺手抓开放获取正文（检索设置里那个开关） ----
+
+    /**
+     * 真机 2.6.4 那一轮：12/49 扇、比对材料 51 篇，正文可比只有 4 篇，另有 8 篇挂着能直接下的 PDF
+     * 等用户到结果页点。这一组量的是同一轮里顺手把它们抓回来按正文比对之后，屏幕上那几个数怎么变，
+     * 以及额度不够时是不是照实说"还有几篇没来得及下"。
+     */
+    private static void autoFullTextFetch() {
+        /* 一、开关与上限：默认开着、最多 6 篇；老设置里没这两项也按开着处理。 */
+        EngineSettings fresh = new EngineSettings();
+        check(fresh.autoPdf && fresh.autoPdfs == 6,
+                "新装机默认顺手抓正文，上限 6 篇：" + fresh.autoPdf + "/" + fresh.autoPdfs);
+        EngineSettings saved = new EngineSettings();
+        saved.autoPdf = false; saved.autoPdfs = 2;
+        EngineSettings back = EngineSettings.deserialize(EngineSettings.serialize(saved));
+        check(!back.autoPdf && back.autoPdfs == 2, "关掉与改上限都存得住、读得回");
+        EngineSettings old = EngineSettings.deserialize("{\"version\":3,\"web\":true,"
+                + "\"engines\":[\"cnki\",\"openalex\"],\"perEngine\":12,\"timeout\":20,"
+                + "\"windows\":12,\"coreKey\":\"\",\"proxy\":\"\"}");
+        check(old.autoPdf && old.autoPdfs == 6,
+                "3 号设置里没这两项：按新装机一样开着，不许静默关掉继续给用户看 0%");
+        boolean refused = false;
+        try { EngineSettings greedy = new EngineSettings(); greedy.autoPdfs = 11; greedy.validate(); }
+        catch (IllegalArgumentException error) { refused = true; }
+        check(refused, "上限超过 10 篇直接拒，不许拿设置当挡箭牌把请求额度全花在下载上");
+
+        /* 二、开关开着：名次那一份全文额度之外的候选，由剩下的请求额度接住。 */
+        resetFixtures();
+        crossrefSize = 1;
+        responseSize = 12;
+        TextCorpus corpus = new TextCorpus();
+        PaperSources.Limits on = limits(12, 4);
+        on.fullTexts = 1;
+        on.autoFullTexts = 3;
+        DuplicateEngine.Report got = scan(thesis(3), corpus,
+                engines("crossref", "openalex", "semantic-scholar", "europepmc"), on);
+        check(got.autoPdfTried == 3 && got.autoPdfFetched == 3,
+                "设了 3 篇就抓 3 篇，篇篇都带回正文：试 " + got.autoPdfTried + " 抓成 " + got.autoPdfFetched);
+        check(got.fullTextCandidates == 4,
+                "正文可比材料从名次队那 1 篇变成 4 篇：" + got.fullTextCandidates);
+        check(hits("/fulltext") + hits("/europepmc/fulltext") == 4,
+                "全文请求确实发了四次，不是报告自己写的："
+                        + hits("/fulltext") + "+" + hits("/europepmc/fulltext"));
+        check(corpusContains(corpus, FULL_TEXT_PROBE), "抓回来的正文进了比对语料");
+        check(got.autoPdfLeft == 0, "额度够的时候不许喊没来得及：" + got.autoPdfLeft);
+        check(notes(got, "本轮顺手抓了 3 篇开放获取全文，3 篇已按正文比对"),
+                "注记按篇数说实话");
+        check(!notes(got, "没来得及下"), "上限是自己设的，不许写成没来得及");
+        check(CheckReport.html("thesis.docx", got).contains("顺手抓正文"),
+                "报告那张表里有顺手抓正文那一行");
+        int fullWith = got.fullTextCandidates;
+
+        /* 三、开关关掉（或上限 0）：与之前一字不差，一篇也不许多抓。 */
+        resetFixtures();
+        crossrefSize = 1;
+        responseSize = 12;
+        PaperSources.Limits off = limits(12, 4);
+        off.fullTexts = 1;
+        off.autoFullTexts = 0;
+        DuplicateEngine.Report shut = scan(thesis(3), new TextCorpus(),
+                engines("crossref", "openalex", "semantic-scholar", "europepmc"), off);
+        check(shut.autoPdfTried == 0 && shut.autoPdfLeft == 0,
+                "上限 0 就是关掉：一次下载都不许多发");
+        check(shut.fullTextCandidates == 1 && shut.fullTextCandidates < fullWith,
+                "关掉之后正文可比回到名次队那一篇：" + shut.fullTextCandidates);
+        check(!notes(shut, "顺手抓"), "没做这件事就不许在注记里提它");
+        check(!CheckReport.html("thesis.docx", shut).contains("顺手抓正文"),
+                "报告里也不多那一行");
+
+        /* 四、抓回来没有正文层：仍然按摘要比对，且这一篇不许冒充正文可比。 */
+        resetFixtures();
+        crossrefSize = 1;
+        responseSize = 12;
+        fullTextEmpty = true;
+        PaperSources.Limits dry = limits(12, 4);
+        dry.fullTexts = 1;
+        dry.autoFullTexts = 3;
+        DuplicateEngine.Report empty = scan(thesis(3), new TextCorpus(),
+                engines("crossref", "openalex", "semantic-scholar", "europepmc"), dry);
+        check(empty.autoPdfTried == 3 && empty.autoPdfFetched == 0 && empty.autoPdfFailed == 3,
+                "三次抓取一个字都没拿到：试 3 抓成 0 落空 3");
+        check(empty.fullTextCandidates == 0,
+                "抓回空正文的一篇也不许标成正文可比：" + empty.fullTextCandidates);
+        check(notes(empty, "3 篇抓回来没有正文层，仍按摘要比对"), "落空那几篇要说清仍按摘要比");
+        fullTextEmpty = false;
+
+        /* 五、检索把 120 次额度花光了：剩下的候选照实写"没来得及下"，并写明是被什么挡的。 */
+        resetFixtures();
+        responseSize = 12;
+        PaperSources.Limits tight = limits(12, 24);
+        tight.autoFullTexts = 10;
+        DuplicateEngine.Report drained = scan(thesis(200), new TextCorpus(), nine(), tight);
+        check(drained.asksSent == DuplicateEngine.MAX_REQUESTS,
+                "这一轮检索先把请求额度花光：" + drained.asksSent + "/" + DuplicateEngine.MAX_REQUESTS);
+        check(drained.asksSent + drained.autoPdfTried <= DuplicateEngine.MAX_REQUESTS,
+                "顺手抓正文与检索抢的是同一个 120 次，合计不许越过去："
+                        + drained.asksSent + "+" + drained.autoPdfTried);
+        check(drained.autoPdfLeft > 0 && notes(drained, "没来得及下（检索请求额度已用完）"),
+                "还有 " + drained.autoPdfLeft + " 篇挂着 PDF 没排上，注记里要写明是额度用完");
+        check(drained.autoPdfTried == 0, "额度见底之后一篇也不许多抓：" + drained.autoPdfTried);
+        resetFixtures();
+        crossrefSize = -1;
+    }
+
     // ---- D 组：按名次入库，零分候选不进语料 ----
 
     private static void rankedIntake() {
@@ -1263,6 +1372,7 @@ public final class RetrievalCoverageRegression {
             requestCeiling();
             timeCeiling();
             rankedIntake();
+            autoFullTextFetch();
             midWindowHitEntersCorpus();
             corpusCeiling();
             throttleCountsBySource();

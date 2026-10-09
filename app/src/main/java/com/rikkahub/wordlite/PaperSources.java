@@ -25,6 +25,12 @@ public final class PaperSources {
         public int windows = 12;
         /** 本次检测允许的开放获取全文抓取次数。 */
         public int fullTexts = 6;
+        /**
+         * 本轮还允许"顺手抓正文"几篇：名次队花完全文额度之后，还只有摘要可比、又挂着可直下 PDF 的
+         * 候选由它接住。用的是检索剩下的请求额度，与检索抢同一个数。默认 0 = 关，由 app 从检索设置
+         * 里写进来——不给默认值，免得哪条没设它的调用路径悄悄开始下载。
+         */
+        public int autoFullTexts;
         public String coreKey = "";
         /** host:port of an HTTP proxy for this retrieval pass, empty to dial out directly. */
         public String proxy = "";
@@ -48,6 +54,7 @@ public final class PaperSources {
             out.perEngine = perEngine;
             out.windows = windows;
             out.fullTexts = fullTexts;
+            out.autoFullTexts = autoFullTexts;
             out.coreKey = coreKey;
             out.proxy = proxy;
             out.shapes = shapes;

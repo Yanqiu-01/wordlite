@@ -17,6 +17,15 @@ public final class EngineSettings {
        挂钟闸。用户自己设过的值在 deserialize() 里原样读回，这条只改新装机。
        perEngine 只管每次请求要几条，不再是整轮配额。 */
     public int perEngine = 12, timeoutSeconds = 20, windows = 6;
+    /**
+     * 扫描时顺手抓正文：检索回来的候选里挂着可直下的开放获取 PDF 的那些，不再等用户到结果页点
+     * "下进自建库"，同一轮里直接抓回来按正文比对。真机 2.6.4 那轮 12/49 扇、比对材料 51 篇里
+     * 只有 4 篇有正文，另有 8 篇挂着能下的 PDF 躺在那儿等手指——0.13% 就是这么来的。
+     * 抓取用的是检索剩下的那点请求额度（与检索抢同一个 120 次），所以 autoPdfs 有上限。
+     */
+    public boolean autoPdf = true;
+    /** 一轮最多顺手抓几篇（0-10）。0 等于关掉。 */
+    public int autoPdfs = 6;
     public String coreKey = "";
     /** Optional HTTP proxy for the built-in sources, written as host:port and empty by default:
      *  a phone on a network that resets these hosts needs one to retrieve anything at all. */
@@ -34,6 +43,8 @@ public final class EngineSettings {
         out.perEngine = perEngine;
         out.timeoutSeconds = timeoutSeconds;
         out.windows = windows;
+        out.autoPdf = autoPdf;
+        out.autoPdfs = autoPdfs;
         out.coreKey = coreKey;
         out.proxy = proxy;
         return out;
@@ -42,6 +53,7 @@ public final class EngineSettings {
     public void validate() {
         if (perEngine < 1 || perEngine > 50 || timeoutSeconds < 5 || timeoutSeconds > 120
                 || windows < 1 || windows > 24) throw new IllegalArgumentException("检索参数无效");
+        if (autoPdfs < 0 || autoPdfs > 10) throw new IllegalArgumentException("顺手抓正文的篇数需为 0-10");
         if (coreKey.length() > 4096 || coreKey.indexOf('\r') >= 0 || coreKey.indexOf('\n') >= 0)
             throw new IllegalArgumentException("CORE 密钥无效");
         proxy = proxy.trim();
@@ -59,10 +71,12 @@ public final class EngineSettings {
 
     public static String serialize(EngineSettings value) {
         LinkedHashMap<String, Object> out = new LinkedHashMap<String, Object>();
-        out.put("version", 3); out.put("web", value.web); out.put("engines", value.engines);
+        out.put("version", 4); out.put("web", value.web); out.put("engines", value.engines);
         out.put("perEngine", value.perEngine); out.put("timeout", value.timeoutSeconds);
         out.put("windows", value.windows); out.put("coreKey", value.coreKey);
         out.put("proxy", value.proxy);
+        out.put("autoPdf", value.autoPdf);
+        out.put("autoPdfs", value.autoPdfs);
         return ApiJson.stringify(out);
     }
 
@@ -92,6 +106,10 @@ public final class EngineSettings {
         out.windows = integer(ApiJson.path(root, "windows"), out.windows);
         Object key = ApiJson.path(root, "coreKey");
         out.coreKey = key instanceof String ? (String) key : "";
+        /* 4 号格式新增顺手抓正文。老设置里没有这两项，按新装机处理：开着、最多 6 篇——
+           这一条改变的是"有没有正文可比"，静默关掉等于让老用户继续看 0%。 */
+        out.autoPdf = !Boolean.FALSE.equals(ApiJson.path(root, "autoPdf"));
+        out.autoPdfs = integer(ApiJson.path(root, "autoPdfs"), out.autoPdfs);
         Object via = ApiJson.path(root, "proxy");
         out.proxy = via instanceof String ? ((String) via).trim() : "";
         return out;

@@ -28,6 +28,8 @@ public final class DuplicateEngine {
     public static final String MATERIAL_SPLIT_LABEL = "命中材料分档";
     /** 报告里列几条"可以下进自建库"的候选：再多那一屏就没人看了。 */
     static final int MAX_DOWNLOADABLES = 10;
+    /** 一轮里"顺手抓正文"的篇数天花板：设置里的数最高也只能到这里，剩下的额度得留给检索。 */
+    static final int MAX_AUTO_FULL_TEXTS = 10;
     /* 挂钟闸门与限速：实测一轮 9 个源约 10 秒（维普最慢 4062ms），但 Routes 的多路尝试能把单个
        请求拖到 20 秒以上，所以只设请求数上限挡不住慢网络，两个闸必须同时存在。 */
     static final long MAX_SEARCH_MILLIS = 180000L, MIN_ENGINE_GAP_MILLIS = 400L;
@@ -236,6 +238,15 @@ public final class DuplicateEngine {
          * 带着可下载 PDF 直链的候选：结果页给一条"下进自建库"的入口。
          * 自建库走的是与联网正文同一个判据（TextCorpus 那一次 match），所以这一条不是安慰奖。
          */
+        /**
+         * 本轮顺手抓开放获取正文的四笔账，逐篇可核：试着抓了几篇（autoPdfTried）、真按正文比对的
+         * 有几篇（autoPdfFetched）、抓回来一个字都没有、仍按摘要算的有几篇（autoPdfFailed）、
+         * 还挂着链接但这一轮没排上的有几篇（autoPdfLeft，原因写在 autoPdfReason）。
+         * autoPdfTried 与 autoPdfLeft 都是零，说明这一轮没开这个开关。
+         */
+        public int autoPdfTried, autoPdfFetched, autoPdfFailed, autoPdfLeft;
+        /** autoPdfLeft 那几个字到底是被什么挡住的："检索请求额度已用完"或"检索时间已用满"。 */
+        public String autoPdfReason = "";
         public final ArrayList<Downloadable> downloadables = new ArrayList<Downloadable>();
         /** 留档被 MAX_SHAPE_ROWS 裁过的行数：档里没这一行才说明真的问了几次就是几行。 */
         public int shapesDropped;
@@ -359,6 +370,22 @@ public final class DuplicateEngine {
     /** 比对材料清单那一行的唯一写法；空语料返回空串，界面连那一行都不画。 */
     public static String inventoryLine(Report report) {
         return report == null || report.inventory == null ? "" : report.inventory.summaryLine();
+    }
+
+    /**
+     * "本轮顺手抓正文"那一句的唯一写法：结果页的注记与报告那张表读同一句，两处各起一名就一定漂移。
+     * 四个数各说一件事，不许谁替谁下结论——抓了 3 篇不等于 3 篇都有正文，剩下的也不许偷偷不算。
+     */
+    public static String autoFetchLine(int tried, int got, int failed, int left, String reason) {
+        if (tried <= 0 && left <= 0) return "";
+        StringBuilder out = new StringBuilder("本轮顺手抓了 ").append(tried)
+                .append(" 篇开放获取全文，").append(got).append(" 篇已按正文比对");
+        if (failed > 0) out.append("，").append(failed).append(" 篇抓回来没有正文层，仍按摘要比对");
+        if (left > 0) {
+            out.append("，还有 ").append(left).append(" 篇没来得及下");
+            if (reason != null && !reason.isEmpty()) out.append("（").append(reason).append("）");
+        }
+        return out.toString();
     }
 
     /** 摘要层的注记：报告中心与面板的注记列表都要能查到这一层做了、做了什么口径。 */
@@ -1079,7 +1106,8 @@ public final class DuplicateEngine {
         report.asksRefilled = sweep.refillCells();
         /* 第二阶段用本轮那份 Limits（带留档出口）：全文抓取也要落一行，出口不在这就没法落。 */
         phaseB(sweep.askedQueries(), corpus, report, engines, sweep.limits, cancellation, sweep.pool, skipped,
-                failedLast, exhausted, silent, requestCap, timeCap, poolCap, sweep.droppedCandidates(), sweep.deadline);
+                failedLast, exhausted, silent, requestCap, timeCap, poolCap, sweep.droppedCandidates(),
+                sweep, sweep.deadline);
     }
 
     /**
@@ -1554,7 +1582,7 @@ public final class DuplicateEngine {
                                ArrayList<PaperSources.Candidate> pool, LinkedHashMap<String, Boolean> skipped,
                                LinkedHashMap<String, Boolean> failedLast, LinkedHashMap<String, Boolean> exhausted,
                                LinkedHashMap<String, Boolean> silent, boolean requestCap, boolean timeCap,
-                               int poolCap, int poolDropped, long deadline) {
+                               int poolCap, int poolDropped, Sweep sweep, long deadline) {
         CandidateRanker.Dedup merged = CandidateRanker.dedup(pool);
         report.mergedDuplicates = merged.merges.size();
         report.merges.addAll(merged.merges);
@@ -1576,6 +1604,12 @@ public final class DuplicateEngine {
         ArrayList<CandidateRanker.Selection> plan = CandidateRanker.plan(query, merged.kept, budget,
                 Math.max(1, limits.perEngine));
         boolean corpusCap = false;
+        /* 顺手抓正文的额度：名次那一队的花完之后才轮到它，篇数由检索设置说了算。
+           它每次抓之前要从 sweep 那份请求额度里领一次——领不到就是与检索抢同一个 120 次抢输了，
+           照实写"还有几篇没来得及下"，不许假装这一轮没这事。 */
+        int autoCap = sweep == null ? 0 : Math.min(MAX_AUTO_FULL_TEXTS, Math.max(0, limits.autoFullTexts));
+        int autoTried = 0, autoGot = 0, autoFailed = 0, autoLeft = 0;
+        String autoOut = "";
         for (int i = 0; i < plan.size(); i++) {
             CandidateRanker.Selection pick = plan.get(i);
             if (cancelled(cancellation)) { note(report, "检索已取消，结果只覆盖已完成的窗口"); break; }
@@ -1599,6 +1633,26 @@ public final class DuplicateEngine {
                     if (got != null && !got.trim().isEmpty()) { body = body.isEmpty() ? got : body + "\n" + got; fetched = true; }
                 } catch (IOException error) { note(report, "全文抓取失败，改用摘要比对：" + message(error)); }
             }
+            if (autoCap > 0 && !fetched && !cancelled(cancellation)
+                    && PaperSources.pdfUrlRank(candidate.fullTextUrl) <= 2) {
+                if (autoTried >= autoCap) {
+                    /* 用户自己设的篇数到了：这一篇照旧进"可下进自建库"那张表，不算没来得及。 */
+                } else if (deadline - System.currentTimeMillis()
+                        <= limits.timeoutSeconds * 1000L + 1000L) {
+                    autoLeft++; autoOut = "检索时间已用满";
+                } else if (!sweep.spendRequest()) {
+                    autoLeft++; autoOut = "检索请求额度已用完";
+                } else {
+                    autoTried++;
+                    String got = null;
+                    try { got = PaperSources.fullText(candidate, limits, cancellation); }
+                    catch (IOException error) { note(report, "顺手抓正文没成，仍按摘要比对：" + message(error)); }
+                    if (got != null && !got.trim().isEmpty()) {
+                        body = body.isEmpty() ? got : body + "\n" + got;
+                        fetched = true; autoGot++;
+                    } else autoFailed++;
+                }
+            }
             report.candidates.add(candidate);
             bump(report.candidateCount, CandidateRanker.sourceKey(candidate));
             if (body.trim().isEmpty()) {
@@ -1620,6 +1674,11 @@ public final class DuplicateEngine {
                 report.downloadables.add(new Downloadable(candidate.source.title,
                         candidate.source.engine, pick.candidate.fullTextUrl.trim()));
         }
+        report.autoPdfTried = autoTried;
+        report.autoPdfFetched = autoGot;
+        report.autoPdfFailed = autoFailed;
+        report.autoPdfLeft = autoLeft;
+        report.autoPdfReason = autoOut;
         everyConnectorFailed(report, engines, skipped);
         disclose(report, silent, failedLast, exhausted, requestCap, timeCap, corpusCap, poolCap, poolDropped);
     }
@@ -1725,6 +1784,9 @@ public final class DuplicateEngine {
             if (count(report.candidateCount, engine) > 0) chinese++;
         if (chinese > 0 && report.fullTextCandidates == 0)
             note(report, "知网、万方、维普只回摘要，正文与图表无法比对，相似率是下限");
+        if (report.autoPdfTried > 0 || report.autoPdfLeft > 0)
+            note(report, autoFetchLine(report.autoPdfTried, report.autoPdfFetched,
+                    report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason));
         if (!report.downloadables.isEmpty())
             note(report, "另有 " + report.downloadables.size() + " 篇候选挂着可直接下载的开放获取 PDF，"
                     + "结果页可一键下进自建库（自建库按正文比对，不按摘要）");
