@@ -25,7 +25,9 @@
 """
 import argparse, gzip, hashlib, io, json, os, re, sys, time
 import math
+import threading
 import urllib.parse, urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 import xml.etree.ElementTree as ET
 
@@ -67,6 +69,30 @@ def band_of(n):
     return -1
 
 
+# 英文侧的句边界不能只数句号级的符号：SENT_END 里没有 "."（那是给中文用的），
+# 直接套会让整段变成一个"句子"，全被"不足两句"剔掉——英文第一版就是这么只出得 4,617 段。
+EN_ABBREV = ("e.g", "i.e", "etc", "vs", "viz", "cf", "approx", "et al", "no", "nos", "dr", "prof",
+             "mr", "mrs", "ms", "st", "fig", "figs", "ref", "refs", "sec", "vol", "vols", "eds",
+             "trans", "pp", "inc", "ltd", "al", "dept", "univ", "resp", "misc")
+NUL = "\u0000"
+# 缩写后面那个点不能切句。这里必须按词边界匹：上一版用子串替换，结果 "observed."、"reported."
+# 这种以 ed. 结尾的普通句子末尾全被保护起来，整段变成一个句子，英文侧只剩 5 段。
+EN_ABBREV_RE = re.compile(r"(?<![A-Za-z])(?:" + "|".join(re.escape(a) for a in EN_ABBREV) + r")(\.)", re.I)
+
+
+def split_sents(text, lang="zh"):
+    return en_sentences(text) if lang != "zh" else sentences(text)
+
+
+def en_sentences(text):
+    t = re.sub(r"(?<=\d)\.(?=\d)", NUL, text)                       # 小数点：0.5 不是句末
+    t = EN_ABBREV_RE.sub(lambda m: m.group(0)[:-1] + NUL, t)
+    t = re.sub(r"(?<=\b[A-Z])\.(?=\s)", NUL, t)                     # 首字母缩写：J. Smith
+    t = re.sub(r"(?<=\b[A-Z])\.(?=[A-Z])", NUL, t)
+    parts = re.split(r"""(?<=[.!?;\u3002\uff01\uff1f])["')\]\u300d\u300f]*[ \t\r\n]+""", t)
+    return [p.replace(NUL, ".").strip() for p in parts if p.strip()]
+
+
 def sentences(text):
     out, cur = [], []
     for ch in text:
@@ -82,10 +108,10 @@ def sentences(text):
     return [s.strip() for s in out if s.strip()]
 
 
-def pack(text, cap=12):
-    """句号级边界贪心打包到 TARGET 上下，160~520 字才算一段；一篇最多取 cap 段。"""
+def pack(text, cap=12, lang="zh"):
+    """句号级边界贪心打包到 TARGET 上下，160~520 字才算一段；一篇最多取 cap 段。拉丁族句子之间要补一个空格，否则拼回去的段再也切不开句（上一版英文只剩 5 段就是这个）。"""
     out, cur = [], ""
-    for s in sentences(norm(text)):
+    for s in (split_sents(norm(text), lang) if lang != "zh" else sentences(norm(text))):
         n = len_ns(s)
         if not n:
             continue
@@ -94,9 +120,9 @@ def pack(text, cap=12):
             continue
         l = len_ns(cur)
         if l < TARGET and l + n <= CEIL:
-            cur = cur + s
+            cur = cur + ("" if lang == "zh" else " ") + s
         elif l < TARGET + TOL and l + n <= CEIL:
-            cur = cur + s
+            cur = cur + ("" if lang == "zh" else " ") + s
         else:
             out.append(cur); cur = s
         if len(out) >= cap:
@@ -138,7 +164,7 @@ def reject_reason(text, lang):
     digits = len(re.findall(r"[0-9\uFF10-\uff19]", text))
     if digits > 0.30 * n:
         return "数字占比过高"
-    nsent = len(sentences(text))
+    nsent = len(split_sents(text, lang))
     if nsent < 2:
         return "不足两句"
     if text.count("\uff1b") > 12:
@@ -157,6 +183,30 @@ def reject_reason(text, lang):
         if len(words) > 0 and sum(1 for w in words if w.isupper() and len(w) > 2) > 0.12 * len(words):
             return "全大写占比过高（像标题或表头）"
     return None
+
+
+def norm_license(s):
+    """把各家写法收敛到 ACCEPTED 那几档：CC BY-SA 4.0 / by-sa 3.0 是同一档，不能因为带版本号就整篇丢。"""
+    t = re.sub(r"\s+", " ", (s or "").upper().replace("\u2013", "-").replace("\u2014", "-")).strip()
+    if not t:
+        return "NONE"
+    if "BY-NC-ND" in t:
+        return "CC BY-NC-ND"
+    if "BY-NC-SA" in t:
+        return "CC BY-NC-SA"
+    if "BY-SA" in t or "SHARE ALIKE" in t:
+        return "CC BY-SA"
+    if "BY-NC" in t:
+        return "CC BY-NC"
+    if t.startswith("CC BY") or t.startswith("CC-BY") or "ATTRIBUTION 4.0" in t or t == "CC BY 3.0":
+        return "CC BY"
+    if "PUBLIC DOMAIN" in t or "CC0" in t or t.startswith("PD"):
+        return "公有领域"
+    if "GFDL" in t:
+        return "GFDL"
+    if "ALL RIGHTS RESERVED" in t or "\u7248\u6743\u6240\u6709" in t:
+        return "CLOSED"
+    return t[:24]
 
 
 def now():
@@ -470,7 +520,7 @@ def stage_build(args):
         stats["许可过的篇数"] += 1
         cand = []
         for order, (sec, txt) in enumerate(art["sections"]):
-            for piece in pack(txt, cap=args.per_paper * 3):
+            for piece in pack(txt, cap=args.per_paper * 3, lang=lang):
                 why = reject_reason(piece, lang)
                 if why:
                     reasons[why] += 1
@@ -539,6 +589,8 @@ def article_records(fam, lang, d):
         return pmc_records(d)
     if fam == "wiki":
         return wiki_records(lang, d)
+    if fam == "qa":
+        return qa_records(lang, d)
     raise SystemExit("这一族还没接：build %s" % fam)
 
 # ---------------------------------------------------------------- 族二：维基百科条目正文
@@ -614,7 +666,10 @@ def wiki_rights(h, lang, d):
     return rec
 
 
-def wiki_fetch(h, lang, d, redo=False):
+def wiki_fetch(h, lang, d, redo=False, workers=12):
+    """整篇正文只能一篇一次请求：TextExtracts 不给 exlimit>1 的全文（一次回 20 篇时它只填第一篇，
+    上一版 4,600 篇因此只落回 230 篇）。这里改成一篇一请求 + 4 个 worker，断点续跑。"""
+    from concurrent.futures import ThreadPoolExecutor
     rows = json.load(io.open(os.path.join(d, "titles.json"), encoding="utf-8"))
     rights = wiki_rights(h, lang, d)
     out = os.path.join(d, "extracts.jsonl")
@@ -623,30 +678,49 @@ def wiki_fetch(h, lang, d, redo=False):
         for line in io.open(out, encoding="utf-8"):
             have.add(json.loads(line)["pageid"])
     todo = [r for r in rows if r["pageid"] not in have]
-    print("取条目正文：还差 %d 篇（每请求 20 篇）" % len(todo))
-    with io.open(out, "a" if have else "w", encoding="utf-8", newline="") as f:
-        for k in range(0, len(todo), 20):
-            batch = todo[k:k + 20]
-            j = wiki_api(h, lang, {"action": "query", "prop": "extracts|revisions", "explaintext": 1,
-                                   "exsectionformat": "plain", "exlimit": 20, "rvprop": "ids|timestamp",
-                                   "rvslots": "main", "pageids": "|".join(str(r["pageid"]) for r in batch)})
-            pages = (j.get("query") or {}).get("pages") or {}
-            for r in batch:
-                p = pages.get(str(r["pageid"])) or {}
-                rev = (p.get("revisions") or [{}])[0]
-                ex = (p.get("extract") or "").strip()
-                if not ex:
-                    continue
+    print("取条目正文：还差 %d 篇（一篇一请求，%d 个 worker）" % (len(todo), workers), flush=True)
+    lock = threading.Lock()
+    done = [0]
+    f = io.open(out, "a" if have else "w", encoding="utf-8", newline="")
+
+    def one(r):
+        hh = opener(PROXY_DEFAULT)
+        try:
+            j = wiki_api(hh, lang, {"action": "query", "prop": "extracts|revisions", "explaintext": 1,
+                                    "exsectionformat": "plain", "exlimit": 1, "rvprop": "ids|timestamp",
+                                    "rvslots": "main", "pageids": r["pageid"]})
+        except Exception as e:
+            with lock:
+                done[0] += 1
+            return
+        pages = (j.get("query") or {}).get("pages") or {}
+        p = pages.get(str(r["pageid"])) or {}
+        rev = (p.get("revisions") or [{}])[0]
+        ex = (p.get("extract") or "").strip()
+        with lock:
+            done[0] += 1
+            if ex:
                 f.write(json.dumps({"pageid": r["pageid"], "title": r["title"], "cat": r["cat"],
                                     "extract": ex, "revid": rev.get("revid"), "revid_ts": rev.get("timestamp"),
                                     "fetched_at": now(), "license": rights["license"],
                                     "license_raw": "%s（%s）；本条取修订 %s（%s）"
                                                    % (rights["text"], rights["url"], rev.get("revid"),
                                                       rev.get("timestamp"))}, ensure_ascii=False) + "\n")
-            f.flush()
-            if k % 600 == 0:
-                print("  extracts %-6d / %d" % (k + len(batch), len(todo)), flush=True)
-            time.sleep(0.25)
+            if done[0] % 200 == 0:
+                f.flush()
+                print("  extracts 已试 %-6d / %d（写入 %d）" % (done[0], len(todo), _lines(out)), flush=True)
+        time.sleep(0.05)
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(one, todo))
+    finally:
+        f.close()
+    print("条目正文落盘：%d 篇" % _lines(out))
+
+
+def _lines(path):
+    return sum(1 for _ in io.open(path, encoding="utf-8")) if os.path.exists(path) else 0
 
 
 SEC_HEAD = re.compile(r"^(={2,6})\s*(.+?)\s*=+\s*$")
@@ -680,6 +754,103 @@ def wiki_records(lang, d):
                "fetched_at": r["fetched_at"], "sections": wiki_sections(r["extract"], skip_re)}
 
 
+# ---------------------------------------------------------------- 族三：问答（Stack Exchange）
+#
+# 挑站子挑的是"散文多、代码少"：academia/history/philosophy/english/literature 这些站的长答案
+# 是要量的人写散文，stackoverflow 那种代码答案不要。许可逐条取 API 回的 content_license，
+# 再把作者与永久链接一起记下——CC BY-SA 的署名要求本来就欠这两样。
+
+QA_SITES = {
+    "en": [("academia", 5, 700), ("history", 40, 700), ("philosophy", 30, 600),
+           ("english", 30, 500), ("literature", 20, 400), ("worldbuilding", 40, 400),
+           ("travel", 30, 300), ("politics", 40, 300)],
+    "zh": [("chinese", 2, 1200)],
+}
+TAG_LINE = re.compile(r"(?is)<[^>]+>")
+
+
+def qa_api(h, params, path="answers"):
+    u = "https://api.stackexchange.com/2.3/%s?%s" % (path, urllib.parse.urlencode(params))
+    last = None
+    for k in range(5):
+        try:
+            j = json.loads(fetch(u, h, tries=2).decode("utf-8", "replace"), strict=False)
+            if j.get("error_id"):                       # 接口自己说错了：退避再看
+                time.sleep(2.0 * (k + 1))
+                continue
+            return j
+        except Exception as e:
+            last = e
+            time.sleep(1.5 * (k + 1))
+    raise IOError("Stack Exchange 取不回：%s（%s）" % (u[:110], type(last).__name__))
+
+
+def qa_answers(h, lang, d, redo=False):
+    out = os.path.join(d, "answers.jsonl")
+    have = set()
+    if os.path.exists(out) and not redo:
+        for line in io.open(out, encoding="utf-8"):
+            have.add(json.loads(line)["answer_id"])
+    with io.open(out, "a" if have else "w", encoding="utf-8", newline="") as f:
+        for site, minscore, cap in QA_SITES[lang]:
+            got = sum(1 for l in io.open(out, encoding="utf-8")
+                      if json.loads(l)["site"] == site) if have else 0
+            page = 1
+            while got < cap and page <= 12:
+                j = qa_api(h, {"site": site, "sort": "votes", "order": "desc", "filter": "withbody",
+                               "minscore": minscore, "pagesize": 100, "page": page})
+                items = j.get("items") or []
+                if not items:
+                    break
+                for it in items:
+                    own = it.get("owner") or {}
+                    f.write(json.dumps({
+                        "answer_id": it.get("answer_id"), "site": site, "question_id": it.get("question_id"),
+                        "score": it.get("score"), "is_accepted": bool(it.get("is_accepted")),
+                        "created": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(it.get("creation_date") or 0)),
+                        "link": it.get("link"), "body": it.get("body") or "",
+                        "license": (it.get("content_license") or "").strip(),
+                        "author": own.get("display_name"), "author_id": own.get("user_id"),
+                        "fetched_at": now()}, ensure_ascii=False) + "\n")
+                f.flush()
+                got += len(items)
+                print("  %-14s 第 %d 页取回 %-4d 累计 %-5d（门槛 %d 分，封顶 %d）"
+                      % (site, page, len(items), got, minscore, cap), flush=True)
+                page += 1
+                time.sleep(0.35)
+    print("答案缓存：%d 条" % sum(1 for _ in io.open(out, encoding="utf-8")))
+
+
+def html_paragraphs(html):
+    """答案 HTML 转正文：代码块、脚本整块去掉，段落与列表项换行。"""
+    import html as _html
+    t = re.sub(r"(?is)<(pre|script|style|kbd)[^>]*>.*?</>", " ", html or "")
+    t = re.sub(r"(?is)<code[^>]*>.*?</code>", " ", t)
+    t = re.sub(r"(?is)<br\s*/?>", "\n", t)
+    t = re.sub(r"(?is)</(p|li|div|h[1-6]|blockquote|tr)>", "\n\n", t)
+    t = re.sub(r"(?is)<li[^>]*>", "\u00b7 ", t)
+    t = _html.unescape(TAG_LINE.sub(" ", t))
+    return " ".join(t.split())
+
+
+def qa_records(lang, d):
+    for line in io.open(os.path.join(d, "answers.jsonl"), encoding="utf-8"):
+        r = json.loads(line)
+        txt = html_paragraphs(r.get("body"))
+        if not txt:
+            continue
+        lic = (r.get("license") or "").strip()
+        yield {"pid": "qa:%s:%s" % (r["site"], r["answer_id"]), "url": r.get("link"),
+               "doi": None, "journal": "StackExchange/%s" % r["site"], "title": None,
+               "year": (r.get("created") or "")[:4],
+               "license": norm_license(lic),
+               "license_raw": ("content_license=%s；本条取 %s 站答案 %s（作者 %s / id %s，%s 年，采纳=%s，%d 分）%s"
+                               % (lic or "空", r["site"], r["answer_id"], r.get("author"), r.get("author_id"),
+                                  (r.get("created") or "")[:4], r.get("is_accepted"), r.get("score") or 0,
+                                  r.get("link") or "")),
+               "fetched_at": r.get("fetched_at"), "sections": [("答案", txt)]}
+
+
 # ---------------------------------------------------------------- 按篇三分与清单
 
 SPLIT_RULE = "按篇：md5(family|pid) 稳定哈希，前 8%% 进 SPARE（备用样本位；原计划给机器改写，2026-10-09 那一路取消），其后 20%% 进 FIT（定阈值），余下进 HOLD（只量真人误报）"
@@ -693,6 +864,9 @@ def split_of(fam, pid):
 FAMILY_DOC = {
     "pmc": {"name": "PMC 开放获取子集（已发表论文正文 XML）",
             "license_source": "XML 的 permissions/license_ref 字段，逐篇核；读不到明确开放许可整篇丢"},
+    "qa": {"name": "Stack Exchange 长答案（挑散文多的站：academia/history/philosophy/english/literature/"
+                                   "worldbuilding/travel/politics；中文取 chinese 站）",
+            "license_source": "逐条取 API 回的 content_license 字段，并把作者名与永久链接一起记进清单（CC BY-SA 的署名要求）"},
     "wiki": {"name": "维基百科条目正文（zh 取典范条目+优良条目，en 取 Featured+Good）",
              "license_source": "条目正文的授权在站点使用条款里：siteinfo.rightsinfo 的原文取一次存缓存，"
                                "逐篇再记取的是哪一号修订与时间，这两样一起进清单"},
@@ -740,7 +914,16 @@ def stage_report(args):
                 out["family"], out["lang"] = rec["family"], rec["lang"]
                 out["split"] = pid_split[rec["pid"]]
                 f.write(json.dumps(out, ensure_ascii=False) + "\n")
-        per_family[name]["license_excerpts"] = dict((v, k[:150]) for k, v in lic_table.items())
+        # 许可原文对照表：同一族里原文重复度极高，去重后仍可能上千条，全量嵌进清单会把清单撑到
+        # 比正文摘要还大。这里只嵌使用次数最高的 300 条，其余每条仍给号，指向仓库外那份逐篇记录。
+        by_use = Counter()
+        for rec in papers:
+            by_use[lic_table.get(rec.get("license_raw") or "", "?")] += 1
+        top = set(k for k, _ in by_use.most_common(300))
+        per_family[name]["license_excerpts"] = dict(
+            (lid, (txt[:130] if lid in top else "（原文见仓库外 ../aigc-corpus/holdout3/%s/papers.jsonl 的 license_raw）" % name))
+            for txt, lid in lic_table.items())
+        per_family[name]["license_excerpt_count"] = len(lic_table)
         print("%-12s 篇 %-6d（有段 %-6d）｜段 %-7d｜三分 段 FIT %-6d HOLD %-6d SPARE %-6d｜篇 FIT %-5d HOLD %-5d SPARE %-5d"
               % (name, len(papers), len(set(u["pid"] for u in units)), len(units),
                  sp_units["FIT"], sp_units["HOLD"], sp_units["SPARE"],
@@ -782,6 +965,7 @@ def main():
     ap.add_argument("--per-paper", type=int, default=4)
     ap.add_argument("--proxy", default=PROXY_DEFAULT)
     ap.add_argument("--redo", action="store_true")
+    ap.add_argument("--workers", type=int, default=12)
     a = ap.parse_args()
     os.makedirs(DATA, exist_ok=True)
     if a.stage == "ids":
@@ -790,6 +974,8 @@ def main():
             pmc_ids(h, fam_dir(a.family, a.lang), a.lang, a.redo)
         elif a.family == "wiki":
             wiki_titles(h, a.lang, fam_dir(a.family, a.lang), a.redo)
+        elif a.family == "qa":
+            qa_answers(h, a.lang, fam_dir(a.family, a.lang), a.redo)
         else:
             raise SystemExit("这一族还没接：ids %s" % a.family)
     elif a.stage == "fetch":
@@ -799,7 +985,9 @@ def main():
             ids = json.load(io.open(os.path.join(d, "ids.json"), encoding="utf-8"))
             pmc_xml(h, ids, os.path.join(d, "xml"), a.redo)
         elif a.family == "wiki":
-            wiki_fetch(h, a.lang, d, a.redo)
+            wiki_fetch(h, a.lang, d, a.redo, workers=a.workers)
+        elif a.family == "qa":
+            print("这一族的正文与题录是一次请求同时回的，fetch 无额外动作；直接跑 build")
         else:
             raise SystemExit("这一族还没接：fetch %s" % a.family)
     elif a.stage == "build":
