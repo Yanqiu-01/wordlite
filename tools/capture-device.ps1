@@ -133,6 +133,102 @@ if (-not $SkipBuild) {
     $archive.Dispose(); $zipStream.Dispose()
 }
 
+# ---------- 2b. which engine is this capture? (the stamp written into <impl>/engine.tsv) ----------
+# capture 是构建产物，它必须自己说清属于哪一份源码。-Tree 指向 tools/tree-snapshot.ps1 的快照时,
+# 章只能写快照 manifest 里的 head_sha 并写快照根目录：2026-10-09 量 2.6.7 发布包就吃过亏 —— 报表上
+# 写着跑脚本那棵树的 HEAD(7fc94a2)，真正编进 dex 的却是快照里 1879266 那份源码,靠手工比 blob sha 才发现。
+# 现在章从 manifest 读，并把编进 dex 的每个 .java 逐个按 sha256 复核一遍:章与源码不一致当场抛。
+function Find-SnapshotManifest([string]$dirPath) {
+    $dir = Get-Item -LiteralPath $dirPath
+    if (-not $dir.PSIsContainer) { $dir = $dir.Parent }
+    for ($i = 0; $i -lt 8 -and $null -ne $dir; $i++) {
+        $candidate = Join-Path $dir.FullName "manifest.tsv"
+        if (Test-Path -LiteralPath $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
+        $dir = $dir.Parent
+    }
+    return $null
+}
+
+function Get-EngineStamp([string]$treePath, [string]$repoRoot) {
+    $treeFull = (Resolve-Path -LiteralPath $treePath).Path.TrimEnd("\", "/")
+    $dirtyWorkTree = (@(& git -C $repoRoot status --porcelain -- app/src/main/java).Count -gt 0)
+    $manifest = Find-SnapshotManifest $treeFull
+    if ($null -eq $manifest) {
+        $working = (Join-Path $repoRoot "app") + "\src\main\java"
+        if ((Resolve-Path -LiteralPath $working).Path -ne $treeFull) {
+            throw ("engine stamp refused: $treeFull is not the working tree and has no snapshot ".TrimEnd() +
+                   "manifest.tsv above it, so nothing declares which commit these bytes are. Build the ".TrimEnd() +
+                   "tree with tools/tree-snapshot.ps1, which writes the manifest this stamp reads.")
+        }
+        return [pscustomobject]@{
+            headSha = ((& git -C $repoRoot rev-parse HEAD) | Select-Object -First 1).Trim()
+            source  = "working tree"
+            dirty   = $dirtyWorkTree
+            manifest = ""
+            checked = (@(Get-ChildItem -Recurse -File -Filter *.java $treeFull).Count)
+            overlays = @()
+        }
+    }
+    $snapRoot = (Get-Item -LiteralPath $manifest).DirectoryName
+    $head = ""; $rows = @{}
+    foreach ($line in @(Get-Content -LiteralPath $manifest -Encoding UTF8)) {
+        $kv = $line -split "`t"
+        if ($kv.Count -ge 2 -and $kv[0] -eq "head_sha") { $head = $kv[1].Trim() }
+        elseif ($kv.Count -ge 3 -and $kv[0] -ne "file") { $rows[$kv[0].Trim()] = $kv }
+    }
+    if ($head -notmatch "^[0-9a-f]{40}$") {
+        throw "engine stamp refused: $manifest carries no 40-hex head_sha, so it cannot stamp a capture"
+    }
+    $kindOfHead = ((& git -C $repoRoot cat-file -t $head 2>&1) | Select-Object -First 1)
+    if ("$kindOfHead" -ne "commit") {
+        throw "engine stamp refused: manifest head_sha $head is not a commit object in this repository ($kindOfHead)"
+    }
+    $checked = 0; $overlays = @()
+    foreach ($f in @(Get-ChildItem -Recurse -File -Filter *.java $treeFull)) {
+        $rel = $f.FullName.Substring($snapRoot.Length + 1) -replace '\\', "/"
+        if (-not $rows.ContainsKey($rel)) {
+            throw ("engine stamp refused: " + $f.FullName + " is compiled into the dex but the snapshot " +
+                   "manifest ($manifest) does not declare it, so the stamp cannot name its commit.")
+        }
+        $kv = $rows[$rel]; $state = $kv[2].Trim(); $declared = $kv[1].Trim()
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $f.FullName).Hash
+        if ($state -eq "overlay") { $overlays += $rel; $checked++ }
+        elseif ($state -eq "base") {
+            if ($actual.ToUpperInvariant() -ne $declared.ToUpperInvariant()) {
+                throw ("engine stamp refused: " + $rel + " is declared state=base of $head but its bytes " +
+                       "changed (manifest sha256 " + $declared.Substring(0, 16) + "..., on disk " +
+                       $actual.Substring(0, 16) + "...). The stamp would claim a commit this file is not from.")
+            }
+            $checked++
+        } else {
+            throw "engine stamp refused: $rel has an unknown manifest state '$state'"
+        }
+    }
+    $rootLabel = if ($snapRoot.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $snapRoot.Substring($repoRoot.Length).TrimStart("\", "/")
+    } else { $snapRoot }
+    $rootLabel = $rootLabel -replace "\\", "/"
+    return [pscustomobject]@{
+        headSha = $head
+        source  = "snapshot " + $rootLabel
+        dirty   = ($overlays.Count -gt 0)
+        manifest = $rootLabel + "/manifest.tsv"   # always forward slashes: reports get grepped
+        checked = $checked
+        overlays = $overlays
+    }
+}
+
+if (-not $SkipBuild) {
+    $headShaWorkTree = ((& git -C $root rev-parse HEAD) | Select-Object -First 1).Trim()
+    $oldStamp = [pscustomobject]@{ headSha = $headShaWorkTree; source = "git-archive HEAD";
+        dirty = (@(& git -C $root status --porcelain -- app/src/main/java).Count -gt 0);
+        manifest = ""; checked = 0; overlays = @() }
+    $newStamp = Get-EngineStamp -treePath (Join-Path $root $Tree) -repoRoot $root
+    Write-Host ("== engine stamp new: head_sha={0} source={1} files_checked={2} overlays={3} dirty={4}" -f
+        $newStamp.headSha, $newStamp.source, $newStamp.checked, $newStamp.overlays.Count, $newStamp.dirty)
+    Write-Host ("== engine stamp old: head_sha={0} source={1}" -f $oldStamp.headSha, $oldStamp.source)
+}
+
 # ---------- 3. push and run ----------
 RunAdbShell "mkdir -p $deviceTmp" | Out-Null
 $assetZipPushed = "$deviceTmp/wordlite-assets.zip"
@@ -160,13 +256,15 @@ foreach ($name in $Impls) {
         # 或者去拼后来的 HEAD，都会算出一个理直气壮的假数——2026-10-08 就是这么被坑过一次：
         # 10-07 留下的 old 产物读出"错位段 50"，用今天的 HEAD 重建同一个引擎再跑一遍是 7。
         # tools/word-parity.ps1 会核对这里写下的 head_sha，对不上就拒绝出报告。
-        $headSha = ((& git -C $root rev-parse HEAD) | Select-Object -First 1)
-        $layoutDirty = @(& git -C $root status --porcelain -- app/src/main/java).Count -gt 0
+        # old 永远是 HEAD 的只读归档，章就是 HEAD；new 的章是真正编进 dex 那棵树自己的章。
+        $stamp = if ($name -eq "old") { $oldStamp } else { $newStamp }
         Set-Content -Encoding utf8NoBOM -Path (Join-Path $local "engine.tsv") -Value @(
             ("impl`t{0}" -f $name),
-            ("head_sha`t{0}" -f $headSha),
-            ("source`t{0}" -f $(if ($name -eq "old") { "git-archive HEAD" } else { "working tree" })),
-            ("layout_dirty`t{0}" -f $layoutDirty),
+            ("head_sha`t{0}" -f $stamp.headSha),
+            ("source`t{0}" -f $stamp.source),
+            ("layout_dirty`t{0}" -f $stamp.dirty),
+            ("stamp_manifest`t{0}" -f $stamp.manifest),
+            ("stamp_files_checked`t{0}" -f $stamp.checked),
             ("built_at`t{0}" -f ([DateTime]::Now.ToString("yyyy-MM-dd HH:mm:ss"))),
             ("dex_sha256`t{0}" -f ((Get-FileHash -Algorithm SHA256 -LiteralPath $dexes[$name]).Hash.ToLower())),
             ("docx`t{0}" -f ([System.IO.Path]::GetFileName($Docx))))
