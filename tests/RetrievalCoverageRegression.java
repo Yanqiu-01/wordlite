@@ -208,9 +208,11 @@ public final class RetrievalCoverageRegression {
         server.createContext("/europepmc/search", exchange -> {
             int seq = ask("/europepmc/search");
             queryOf(exchange);
-            respond(exchange, 200, europePmcBody(seq, responseSize));
+            respond(exchange, 200, europePmcBody(seq, responseSize).replace("__BASE__",
+                    "http://" + exchange.getRequestHeaders().getFirst("Host")));
         });
-        /* europepmc 的全文由 pmcid 拼出来，落在 /europepmc/ 下；这一路是全文额度的唯一出口。 */
+        /* europepmc 的全文链接由源自己在 fullTextUrlList 里给（见 europePmcBody 的 __BASE__ 那条），
+           落在 /europepmc/ 下；2.5.0 之前这一路是拿 pmcid 拼出来的，那条口实测 404。 */
         server.createContext("/europepmc/", exchange -> {
             record("/europepmc/fulltext");
             respond(exchange, 200, FULL_TEXT_XML);
@@ -451,7 +453,11 @@ public final class RetrievalCoverageRegression {
                     .append(",\"source\":\"MED\",\"doi\":\"10.3333/ep-").append(seq).append('-').append(i)
                     .append("\",\"title\":\"").append(title).append("\",\"pubYear\":\"2020\"")
                     .append(",\"authorList\":{\"author\":[{\"firstName\":\"A.\",\"lastName\":\"Ito\"}]}")
-                    .append(",\"abstractText\":\"").append(summary).append("\"}");
+                    .append(",\"abstractText\":\"").append(summary).append("\"")
+                    /* 源自己说这篇开放获取并给出一条 documentStyle=xml 的正文链接——这是 2026-10-09
+                       对着真接口量到的形状，解析器只认这种自己给的证据。 */
+                    .append(",\"isOpenAccess\":\"Y\",\"fullTextUrlList\":{\"fullTextUrl\":[{\"availability\":\"Free\","
+                    + "\"documentStyle\":\"xml\",\"url\":\"__BASE__/europepmc/body\"}]}}");
         }
         return out.append("]}}").toString();
     }

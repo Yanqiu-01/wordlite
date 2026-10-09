@@ -193,13 +193,20 @@ public final class HttpTransport {
                    把这种失败记成「路不通」会让下一次绕开一条其实好着的路。 */
 
                 roadDown = error.status == 0 && routeIsDown(error);
+                /* 限流是唯一一种"换条路可能就通了"的答复：OpenAlex 与 Semantic Scholar 的匿名配额按
+                   出口 IP 计，2026-10-09 实测同一条 OpenAlex 请求经 Clash 出口是 429
+                   （响应里明写 "counts against the free daily budget shared by everyone on your IP"，
+                   Retry-After 2768~3250 秒），同一条直连是 200。403/401 不一样，那是照着 UA 与 cookie
+                   拒的，换条路同样挨拒，所以这一条只对 429 开。
+                   换路也不把它记成"这条路不通"——那条路本身是好的，下一次还得走它。 */
+                boolean reroutable = error.status == 429;
                 if (roadDown) {
                     Routes.failed(url, via);
                     if (error.refused) Routes.portRefused(via);
                     if (burned.length() > 0) burned.append("；");
                     burned.append(Routes.label(via)).append(' ').append(brief(error));
                 }
-                if (++i >= order.size() || !roadDown) break;
+                if (++i >= order.size() || (!roadDown && !reroutable)) break;
             }
         }
 
