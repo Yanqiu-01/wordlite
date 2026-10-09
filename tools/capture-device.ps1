@@ -14,6 +14,9 @@ param(
     # (tools/tree-snapshot.ps1) when someone else has an unfinished .java in app/src/main/java, so a
     # half-written file cannot break the build and a measurement cannot drift under your feet.
     [string]$Tree = "app/src/main/java",
+    # The versioned rig is tools/device-probe/DeviceCapture.java; -Probe overrides it, and the older
+    # gitignored copy under artifacts/device/probe is still used when nothing else is around.
+    [string]$Probe = "",
     [string]$Apk = "base.apk.1",
     [string[]]$Impls = @("old", "new"),
     [string]$OutDir = "artifacts/device",
@@ -75,7 +78,11 @@ if (-not $SkipBuild) {
         "    public static final class layout { public static final int simple_spinner_dropdown_item = 3; }",
         "}"
     )
-    $probeSrc = Join-Path $root "artifacts/device/probe/DeviceCapture.java"
+    $probeSrc = if ($Probe -and [System.IO.Path]::IsPathRooted($Probe)) { $Probe }
+        elseif ($Probe) { Join-Path $root $Probe }
+        elseif (Test-Path (Join-Path $root "tools/device-probe/DeviceCapture.java")) {
+            Join-Path $root "tools/device-probe/DeviceCapture.java"
+        } else { Join-Path $root "artifacts/device/probe/DeviceCapture.java" }
     if (-not (Test-Path $probeSrc)) { throw "missing probe: $probeSrc" }
 
     $oldSrc = Join-Path $tmp "head-src"
@@ -85,6 +92,8 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
     tar -xf (Join-Path $tmp "head.tar") -C $oldSrc
 
+    # "old" is HEAD of the repository this script is running from: in a worktree that is the
+    # branch base, which is exactly the engine the measurement should be compared with.
     $sources = @{ old = (Join-Path $oldSrc "app/src/main/java"); new = (Join-Path $root $Tree) }
     foreach ($name in $Impls) {
         $classes = Join-Path $tmp "$name-classes"; New-Item -ItemType Directory -Force -Path $classes | Out-Null

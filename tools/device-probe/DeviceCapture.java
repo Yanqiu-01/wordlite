@@ -1,0 +1,640 @@
+/*
+ * DeviceCapture -- the layout measurement rig that tools/capture-device.ps1 runs on the phone through
+ * app_process: the real DocxParser + A4Paginator + DocxTextLayout, no APK installed, no UI involved.
+ * It is the source of every number in docs/layout-parity-target.md section 0, so it lives in the repo
+ * next to the tools that read its output.
+ *
+ * One rule this file learned the hard way (2026-10-09): a column header must end with a newline.
+ * Adding hangOverPx without it glued the header to the first data row, and every reader that maps
+ * columns by name quietly reported zeros instead of failing -- "no line hangs punctuation" read clean
+ * for a run where 8 lines hung. Check the printed header against the printed first row whenever a
+ * column is added here.
+ */
+package com.rikkahub.wordlite;
+
+import android.content.Context;
+import android.content.res.AssetManager;
+import android.graphics.Typeface;
+import android.text.StaticLayout;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+
+/**
+ * On-device capture of the app's own pagination/line-breaking, run under app_process
+ * so no APK install is needed. Layout coordinates are 96-DPI document units, so this
+ * is the same layout the app would draw on this phone; only the platform shaper and
+ * the bundled fonts decide the breaks.
+ *
+ * args: <docx> <assetsZip> <outDir> [tag] [screenWidthPx]
+ */
+public final class DeviceCapture {
+    private static String tag = "impl";
+
+    public static void main(String[] args) throws Exception {
+        String docxPath = args[0];
+        String assetsZip = args[1];
+        File out = new File(args[2]);
+        tag = args.length > 3 ? args[3] : "impl";
+        float screenWidthPx = args.length > 4 ? Float.parseFloat(args[4]) : 1080f;
+        out.mkdirs();
+
+        exemptHiddenApi();
+        // hwui installs its default typeface from Typeface's class init; without this,
+        // any measureText() aborts the process outside a zygote-forked app process.
+        Class.forName("android.graphics.Typeface");
+
+        AssetManager assets = assetManager(assetsZip);
+        Context ctx = new ProbeContext(assets);
+        DocxTextLayout.initialize(ctx);
+
+        long begin = System.currentTimeMillis();
+        DocxDocument doc;
+        try (FileInputStream in = new FileInputStream(docxPath)) {
+            doc = DocxParser.parse(in, "input-liu.docx");
+        }
+        long parseMs = System.currentTimeMillis() - begin;
+        A4Paginator.PageResult result = new A4Paginator(doc.section).paginate(doc);
+        long totalMs = System.currentTimeMillis() - begin;
+
+        PageGeometry g = new PageGeometry(doc.section);
+        int words = wordCount(doc);
+        int scale = Math.round(g.fitScale(screenWidthPx) * 100);
+
+        write(new File(out, "summary.txt"), summary(doc, result, g, parseMs, totalMs));
+        write(new File(out, "status.txt"), status(result, words, scale));
+        write(new File(out, "pages.tsv"), pages(result));
+        write(new File(out, "lines-all.tsv"), lines(result, false));
+        write(new File(out, "chars-at-punct.tsv"), charsAtPunct(result));
+        write(new File(out, "lines-geo.tsv"), linesGeo(result));
+        write(new File(out, "page-geo.tsv"), pageGeo(result));
+        write(new File(out, "superscript-inventory.txt"), inventory(doc));
+        write(new File(out, "superscript-lines.txt"), lines(result, true));
+        write(new File(out, "paragraphs-wordformat.tsv"), paragraphPages(result, doc));
+        write(new File(out, "span-edges.tsv"), spanEdges(result));
+        System.out.println("DONE tag=" + tag + " pages=" + result.totalPages()
+                + " words=" + words + " parseMs=" + parseMs + " totalMs=" + totalMs);
+    }
+
+    // ---------- evidence dumps ----------
+
+    private static String summary(DocxDocument doc, A4Paginator.PageResult result,
+                                 PageGeometry g, long parseMs, long totalMs) {
+        StringBuilder sb = new StringBuilder();
+        int sup = 0, sub = 0, positioned = 0;
+        LinkedHashSet<String> families = new LinkedHashSet<String>();
+        for (DocxDocument.ParagraphBlock p : doc.paragraphs) {
+            for (DocxDocument.Run r : p.runs) {
+                if (r.style.superscript) sup++;
+                if (r.style.subscript) sub++;
+                if (r.style.positionSet) positioned++;
+                if (r.style.fontFamily != null && r.style.fontFamily.length() > 0)
+                    families.add(r.style.fontFamily);
+            }
+        }
+        sb.append("impl=").append(tag).append('\n');
+        sb.append("device_sdk=").append(android.os.Build.VERSION.SDK_INT)
+          .append(" model=").append(android.os.Build.MODEL).append('\n');
+        sb.append("paragraphs=").append(doc.paragraphs.size())
+          .append(" images=").append(doc.imageCount)
+          .append(" superscriptRuns=").append(sup)
+          .append(" subscriptRuns=").append(sub)
+          .append(" positionedRuns=").append(positioned).append('\n');
+        sb.append("pages=").append(result.totalPages())
+          .append(" imageFragments=").append(result.imageFragments).append('\n');
+        sb.append("geometry_units96 width=").append(g.width).append(" height=").append(g.height)
+          .append(" contentWidth=").append(g.contentWidth)
+          .append(" contentHeight=").append(g.contentHeight).append('\n');
+        sb.append("parseMs=").append(parseMs).append(" paginateMs=").append(totalMs - parseMs).append('\n');
+        sb.append("font_loadedFaces=").append(FontManager.loadedCount()).append('\n');
+        sb.append("font_resolution_probe:");
+        String[] probeFamilies = { "Times New Roman", "宋体", "黑体", "Calibri", "仿宋", "楷体" };
+        for (String family : probeFamilies) {
+            Typeface face = DocxTextLayout.resolve(family);
+            String path = FontManager.pathFor(face);
+            sb.append(' ').append(family).append("=>").append(path == null ? "SYSTEM:" + face : path);
+        }
+        sb.append('\n');
+        sb.append("script_metrics(OS/2):");
+        for (String family : new String[] { "Times New Roman", "宋体", "Calibri" }) {
+            FontScriptMetrics m = FontManager.metrics(family);
+            sb.append(' ').append(family)
+              .append(" supScale=").append(m.scale(true)).append(" supRaise=").append(m.offset(true))
+              .append(" subScale=").append(m.scale(false)).append(" subLower=").append(m.offset(false));
+        }
+        sb.append('\n');
+        String script = scriptGeometry();
+        if (script != null) sb.append("ScriptGeometry(new impl)=").append(script).append('\n');
+        sb.append("doc_families=").append(families).append('\n');
+        return sb.toString();
+    }
+
+    /** Reflection only: ScriptGeometry exists in the fixed implementation. */
+    private static String scriptGeometry() {
+        try {
+            Class<?> sg = Class.forName("com.rikkahub.wordlite.ScriptGeometry");
+            Method of = sg.getMethod("of", boolean.class, FontScriptMetrics.class);
+            StringBuilder sb = new StringBuilder();
+            for (String family : new String[] { "Times New Roman", "宋体" }) {
+                FontScriptMetrics m = FontManager.metrics(family);
+                for (boolean sup : new boolean[] { true, false }) {
+                    Object geo = of.invoke(null, Boolean.valueOf(sup), m);
+                    sb.append(' ').append(family).append(sup ? "/sup" : "/sub")
+                      .append(" scale=").append(floatOf(geo, "scale"))
+                      .append(" shift=").append(floatOf(geo, "shift"));
+                }
+            }
+            return sb.toString().trim();
+        } catch (Throwable absent) {
+            return null;
+        }
+    }
+
+    private static float floatOf(Object target, String name) throws Exception {
+        Field f = target.getClass().getDeclaredField(name);
+        f.setAccessible(true);
+        return f.getFloat(target);
+    }
+
+    private static String status(A4Paginator.PageResult result, int words, int scale) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# status-bar text reproduced with EditorActivity.updateStatus()'s format\n");
+        sb.append("# (app cannot be installed on this device; see capture-report.md)\n");
+        for (int i = 0; i < result.totalPages(); i++) {
+            A4Paginator.PageContent page = result.pages.get(i);
+            sb.append(String.format(Locale.CHINA,
+                    "page %d:   %d / %d 页  ·  %d 字  ·  中文  ·  %d%%",
+                    i + 1, i + 1, result.totalPages(), words, scale));
+            if (page.footerTemplate != null && page.footerTemplate.length() > 0)
+                sb.append("   [footer template present: NUMPAGES-dependent pagination renders in-page]");
+            sb.append('\n');
+        }
+        return sb.toString();
+    }
+
+    private static String pages(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page\tdisplayedNo\tsection\tfragments\tfirstLine\tlastLine\tusedHeight\toverflow\n");
+        for (int i = 0; i < result.totalPages(); i++) {
+            A4Paginator.PageContent page = result.pages.get(i);
+            String[] ends = firstAndLastText(page);
+            sb.append(i + 1).append('\t').append(page.displayedPageNumber).append('\t')
+              .append(page.sectionIndex).append('\t').append(page.paragraphs.size()).append('\t')
+              .append(one(ends[0])).append('\t').append(one(ends[1])).append('\t')
+              .append(Math.round(page.usedHeight)).append('\t').append(page.overflow).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private static String[] firstAndLastText(A4Paginator.PageContent page) {
+        String first = null, last = null;
+        for (A4Paginator.ParagraphLayout pl : page.paragraphs) {
+            if (pl.text == null) continue;
+            StaticLayout l = pl.text.layout;
+            for (int i = pl.startLine; i < pl.endLine && i < l.getLineCount(); i++) {
+                String text = clean(l.getText().subSequence(l.getLineStart(i), l.getLineEnd(i)).toString());
+                if (text.length() == 0) continue;
+                if (first == null) first = text;
+                last = text;
+            }
+        }
+        return new String[] { first == null ? "" : first, last == null ? "" : last };
+    }
+
+    /**
+     * Per-character x for every line where a Latin/digit character sits right in front of CJK
+     * punctuation ("120 \u03bcm\uff0c\u56fe\u4e2d"). Defect B on the user's page 8: a fullwidth comma with a visible gap in
+     * front of it. Word's own per-character x for the same sentence is in
+     * artifacts/word-break/word-chars.tsv, so the two sides are subtracted character by character.
+     * One row per character: page, paragraph, line, char index, char, x from the line's left edge.
+     */
+    private static String charsAtPunct(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page\tparagraph\tline\tindex\tchar\txRelPx\tstepPx\tlineWidthPx\n");
+        for (int p = 0; p < result.totalPages(); p++) {
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null) continue;
+                StaticLayout l = pl.text.layout;
+                for (int i = pl.startLine; i < pl.endLine && i < l.getLineCount(); i++) {
+                    int lineStart = l.getLineStart(i), lineEnd = l.getLineEnd(i);
+                    CharSequence t = l.getText();
+                    if (!hasLatinThenCjkPunct(t, lineStart, lineEnd)) continue;
+                    float left = l.getLineLeft(i);
+                    float prev = l.getPrimaryHorizontal(lineStart);
+                    for (int c = lineStart; c < lineEnd; c++) {
+                        float x = l.getPrimaryHorizontal(c);
+                        sb.append(p + 1).append('\t').append(pl.blockIndex).append('\t').append(i)
+                          .append('\t').append(c - lineStart).append('\t')
+                          .append(t.charAt(c) == '\n' ? ' ' : t.charAt(c)).append('\t')
+                          .append(Math.round((x - left) * 100) / 100f).append('\t')
+                          .append(Math.round((x - prev) * 100) / 100f).append('\t')
+                          .append(Math.round(l.getLineWidth(i) * 100) / 100f).append('\n');
+                        prev = x;
+                    }
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    private static boolean isLatinOrDigit(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                || Character.isLetterOrDigit(c) && c < 0x2E80;
+    }
+
+    /** True when the line holds a Latin/digit character with CJK punctuation in front of it. */
+    private static boolean hasLatinThenCjkPunct(CharSequence t, int start, int end) {
+        for (int c = start + 1; c < end; c++) {
+            char prev = t.charAt(c - 1), now = t.charAt(c);
+            if (DocxTextLayout.isCjkPunctuation(now) && isLatinOrDigit(prev)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * `Paragraph.lineOverhang` only exists on an engine that hangs punctuation past the margin. It is
+     * read reflectively so this one probe compiles against a HEAD without the field as well as against
+     * an engine with it, which lets a single device run print both readings side by side.
+     */
+    private static final java.lang.reflect.Field LINE_OVERHANG = lineOverhangField();
+
+    private static java.lang.reflect.Field lineOverhangField() {
+        try {
+            java.lang.reflect.Field f = DocxTextLayout.Paragraph.class.getField("lineOverhang");
+            f.setAccessible(true);
+            return f;
+        } catch (Throwable absent) {
+            return null;
+        }
+    }
+
+    private static float lineOverhang(Object paragraph, int line) {
+        if (LINE_OVERHANG == null) return 0f;
+        try {
+            float[] over = (float[]) LINE_OVERHANG.get(paragraph);
+            return over != null && line < over.length ? over[line] : 0f;
+        } catch (Throwable unreadable) {
+            return 0f;
+        }
+    }
+
+    /** paragraph \t line \t first8 \t last8 (+ page and width for auditing). */
+    private static String lines(A4Paginator.PageResult result, boolean scriptsOnly) {
+        java.util.Set<Integer> scriptBlocks = scriptsOnly ? scriptParagraphIndexes(result) : null;
+        StringBuilder sb = new StringBuilder();
+        if (!scriptsOnly)
+            sb.append("page\tparagraph\tline\tfirst8\tlast8\tlineChars\tlineWidthPx\tlineFull"
+                    + "\tlineLeftPx\tparaXPx\topenGaps\tautoGaps\thangOverPx\n");
+        for (int p = 0; p < result.totalPages(); p++) {
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null) continue;
+                if (scriptsOnly && !scriptBlocks.contains(Integer.valueOf(pl.blockIndex))) continue;
+                StaticLayout l = pl.text.layout;
+                for (int i = pl.startLine; i < pl.endLine && i < l.getLineCount(); i++) {
+                    int s = l.getLineStart(i), e = l.getLineEnd(i);
+                    String raw = l.getText().subSequence(s, e).toString();
+                    String text = clean(raw);
+                    if (text.length() == 0) continue;
+                    // How the line got its width: gaps opened by the justification pass, and seams still
+                    // carrying only the automatic CJK/Latin quarter em. A line short of the column with
+                    // openGaps=0 was never spread, which is a different bug than a spread that fell short.
+                    int openGaps = 0, autoGaps = 0;
+                    if (l.getText() instanceof android.text.Spanned) {
+                        android.text.Spanned sp = (android.text.Spanned) l.getText();
+                        openGaps = sp.getSpans(s, e, DocxTextLayout.WidenGap.class).length;
+                        autoGaps = sp.getSpans(s, e, DocxTextLayout.AutoGap.class).length;
+                    }
+                    // A mark Word hangs past the margin is measured inside the column and drawn outside, so
+                    // StaticLayout says the line ends at the margin while the ink ends hangOverPx past it.
+                    float hangOver = lineOverhang(pl.text, i);
+                    if (scriptsOnly) {
+                        sb.append(pl.blockIndex).append('\t').append(i + 1).append('\t')
+                          .append(edge(text, true)).append('\t').append(edge(text, false)).append('\n');
+                    } else {
+                        sb.append(p + 1).append('\t').append(pl.blockIndex).append('\t').append(i)
+                          .append('\t').append(edge(text, true)).append('\t')
+                          .append(edge(text, false)).append('\t').append(text.length())
+                          .append('\t').append(Math.round(l.getLineWidth(i) * 100) / 100f)
+                          .append('\t').append(one(text))
+                          .append('\t').append(Math.round(l.getLineLeft(i) * 100) / 100f)
+                          .append('\t').append(Math.round(pl.text.x * 100) / 100f)
+                          .append('\t').append(openGaps).append('\t').append(autoGaps)
+                          .append('\t').append(Math.round(hangOver * 100) / 100f).append('\n');
+                    }
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Every laid-out line with its box, measured from the page's top edge: table cell rows
+     * included. Word's exported PDF gives the same three numbers per line (box top, baseline,
+     * box bottom), so a page closes as first baseline + pitches between baselines + last
+     * baseline to page bottom with nothing estimated. Document px (96 dpi).
+     */
+    private static String linesGeo(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page\tsection\tblock\tkind\tline\ttop\tadvance\tbaseline\tbottom\tx0\tx1\ttext\n");
+        for (int p = 0; p < result.totalPages(); p++) {
+            A4Paginator.PageContent page = result.pages.get(p);
+            float pageTop = page.geometry == null ? 0f : page.geometry.top;
+            for (A4Paginator.ParagraphLayout pl : page.paragraphs) {
+                if (pl.text != null) {
+                    StaticLayout l = pl.text.layout;
+                    int first = Math.max(0, pl.startLine);
+                    float origin = pageTop + pl.top - (first < l.getLineCount() ? l.getLineTop(first) : 0f);
+                    for (int i = first; i < pl.endLine && i < l.getLineCount(); i++) {
+                        String text = clean(l.getText().subSequence(l.getLineStart(i), l.getLineEnd(i)).toString());
+                        sb.append(p + 1).append('\t').append(pl.sectionIndex).append('\t')
+                          .append(pl.blockIndex).append("\ttext\t").append(i).append('\t')
+                          .append(px(origin + l.getLineTop(i))).append('\t')
+                          .append(px(l.getLineBottom(i) - l.getLineTop(i))).append('\t')
+                          .append(px(origin + l.getLineBaseline(i))).append('\t')
+                          .append(px(origin + l.getLineBottom(i))).append('\t')
+                          .append(px(pl.text.x + l.getLineLeft(i))).append('\t')
+                          .append(px(pl.text.x + l.getLineLeft(i) + l.getLineWidth(i))).append('\t')
+                          .append(one(text, 24)).append('\n');
+                    }
+                }
+                if (pl.row == null) continue;
+                for (A4Paginator.CellParagraph cp : pl.row.paragraphs) {
+                    if (cp.text == null || cp.text.layout == null) continue;
+                    StaticLayout l = cp.text.layout;
+                    float origin = pageTop + pl.top + cp.y;
+                    for (int i = 0; i < l.getLineCount(); i++) {
+                        String text = clean(l.getText().subSequence(l.getLineStart(i), l.getLineEnd(i)).toString());
+                        sb.append(p + 1).append('\t').append(pl.sectionIndex).append('\t')
+                          .append(pl.blockIndex).append("\tcell\t").append(i).append('\t')
+                          .append(px(origin + l.getLineTop(i))).append('\t')
+                          .append(px(l.getLineBottom(i) - l.getLineTop(i))).append('\t')
+                          .append(px(origin + l.getLineBaseline(i))).append('\t')
+                          .append(px(origin + l.getLineBottom(i))).append('\t')
+                          .append(px(cp.x + l.getLineLeft(i))).append('\t')
+                          .append(px(cp.x + l.getLineLeft(i) + l.getLineWidth(i))).append('\t')
+                          .append(one(text, 24)).append('\n');
+                    }
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /** Per page: this section's margin box, so every page-top coordinate can be audited. */
+    private static String pageGeo(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page\tsection\tpageH\tmarginTop\tmarginBottom\tcontentH\theaderDist\tfooterDist\tused\toverflow\n");
+        for (int p = 0; p < result.totalPages(); p++) {
+            A4Paginator.PageContent page = result.pages.get(p);
+            PageGeometry g = page.geometry;
+            sb.append(p + 1).append('\t').append(page.sectionIndex).append('\t')
+              .append(px(g.height)).append('\t').append(px(g.top)).append('\t')
+              .append(px(g.bottom)).append('\t').append(px(g.contentHeight)).append('\t')
+              .append(px(g.headerDistance)).append('\t').append(px(g.footerDistance)).append('\t')
+              .append(px(page.usedHeight)).append('\t').append(page.overflow).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private static String px(float value) {
+        return String.format(Locale.US, "%.2f", value);
+    }
+
+    private static java.util.Set<Integer> scriptParagraphIndexes(A4Paginator.PageResult result) {
+        java.util.Set<Integer> blocks = new java.util.HashSet<Integer>();
+        java.util.Set<A4Paginator.ParagraphLayout> seen =
+                java.util.Collections.newSetFromMap(
+                        new java.util.IdentityHashMap<A4Paginator.ParagraphLayout, Boolean>());
+        for (int p = 0; p < result.totalPages(); p++)
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null || !seen.add(pl)) continue;
+                for (DocxDocument.Run r : pl.text.source.runs)
+                    if (r.style.superscript || r.style.subscript) { blocks.add(Integer.valueOf(pl.blockIndex)); break; }
+            }
+        return blocks;
+    }
+
+    private static String inventory(DocxDocument doc) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# paragraphs holding vertAlign runs: paragraph index \t first 40 chars \t script runs\n");
+        int index = 0;
+        for (DocxDocument.ParagraphBlock p : doc.paragraphs) {
+            StringBuilder scripts = new StringBuilder();
+            for (DocxDocument.Run r : p.runs) {
+                if (r.style.superscript || r.style.subscript)
+                    scripts.append(r.style.superscript ? "^" : "_").append('[').append(clean(r.text)).append("] ");
+            }
+            if (scripts.length() > 0)
+                sb.append(index).append('\t').append(one(clean(p.text), 40)).append('\t')
+                  .append(scripts.toString().trim()).append('\n');
+            index++;
+        }
+        return sb.toString();
+    }
+
+    /**
+     * One row per paragraph, column-compatible with artifacts/word/pages.tsv
+     * (para_index  start_page  end_page  ...  text30) so the two files diff directly.
+     * Column 4 is lines rendered on the end page; Word's line_adj_end is a paragraph
+     * format flag with no engine counterpart, so it is replaced by something measurable.
+     */
+    private static String paragraphPages(A4Paginator.PageResult result, DocxDocument doc) {
+        java.util.LinkedHashMap<Integer, int[]> pages = new java.util.LinkedHashMap<Integer, int[]>();
+        java.util.HashMap<Integer, String> texts = new java.util.HashMap<Integer, String>();
+        for (int p = 0; p < result.totalPages(); p++) {
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null) continue;
+                Integer key = Integer.valueOf(pl.blockIndex);
+                int[] span = pages.get(key);
+                if (span == null) { span = new int[] { p + 1, p + 1, 0 }; pages.put(key, span); }
+                span[1] = p + 1;
+                span[2] = pl.endLine - pl.startLine;
+                texts.put(key, pl.text.source.text);
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("para_index\tdevice_start_page\tdevice_end_page\tend_page_lines\ttext30\n");
+        for (java.util.Map.Entry<Integer, int[]> entry : pages.entrySet()) {
+            int[] span = entry.getValue();
+            String text = texts.get(entry.getKey());
+            if (text == null) text = "";
+            if (text.length() > 30) text = text.substring(0, 30);
+            sb.append(entry.getKey().intValue()).append('\t').append(span[0]).append('\t')
+              .append(span[1]).append('\t').append(span[2]).append('\t')
+              .append(one(text, 30)).append('\n');
+        }
+        return sb.toString();
+    }
+    // ---------- helpers ----------
+
+    /** Word/LibreOffice-ish count, copied from EditorActivity.updateWordCount(). */
+    private static int wordCount(DocxDocument doc) {
+        int count = 0;
+        for (DocxDocument.ParagraphBlock p : doc.paragraphs) {
+            boolean latinWord = false;
+            for (int at = 0; at < p.text.length(); at++) {
+                char c = p.text.charAt(at);
+                if (c >= 0x3400 && c <= 0x9FFF) { count++; latinWord = false; }
+                else if (Character.isLetterOrDigit(c)) { if (!latinWord) count++; latinWord = true; }
+                else latinWord = false;
+            }
+        }
+        return count;
+    }
+
+    private static String clean(String value) {
+        StringBuilder sb = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\n' || c == '\r' || c == '\t' || c == ' ' || c == '\u00a0'
+                    || c == '\u3000' || c == '\ufeff' || c == '\u200b') continue;
+            sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    private static String edge(String text, boolean head) {
+        int limit = 8;
+        if (text.length() <= limit) return text;
+        return head ? text.substring(0, limit) : tail(text, limit);
+    }
+
+    private static String tail(String text, int count) {
+        int from = text.length() - count;
+        while (from > 0 && from < text.length() && Character.isLowSurrogate(text.charAt(from))) from--;
+        return text.substring(from);
+    }
+
+    private static String one(String value) { return one(value, 60); }
+
+    private static String one(String value, int max) {
+        String v = value.replace("\t", " ").replace("\r", " ").replace("\n", " ");
+        return v.length() <= max ? v : v.substring(0, max) + "...";
+    }
+
+    private static void write(File file, String content) throws Exception {
+        Writer w = new OutputStreamWriter(new FileOutputStream(file), "UTF-8");
+        w.write(content);
+        w.close();
+        System.out.println("wrote " + file.getName() + " " + content.length() + " chars");
+    }
+
+    private static void exemptHiddenApi() {
+        try {
+            Class<?> vm = Class.forName("dalvik.system.VMRuntime");
+            Object runtime = vm.getDeclaredMethod("getRuntime").invoke(null);
+            vm.getDeclaredMethod("setHiddenApiExemptions", String[].class)
+                    .invoke(runtime, new Object[] { new String[] { "L" } });
+        } catch (Throwable ignored) { }
+    }
+
+    private static AssetManager assetManager(String zip) throws Exception {
+        Constructor<AssetManager> ctor = AssetManager.class.getDeclaredConstructor();
+        ctor.setAccessible(true);
+        AssetManager am = ctor.newInstance();
+        Method add = AssetManager.class.getDeclaredMethod("addAssetPath", String.class);
+        add.setAccessible(true);
+        Object cookie = add.invoke(am, zip);
+        System.out.println("asset_cookie=" + cookie + " listing="
+                + java.util.Arrays.toString(am.list("fonts")));
+        return am;
+    }
+
+    /** FontManager only needs getAssets()/getApplicationContext(). */
+    private static final class ProbeContext extends android.content.ContextWrapper {
+        private final AssetManager assets;
+        ProbeContext(AssetManager assets) { super(null); this.assets = assets; }
+        @Override public AssetManager getAssets() { return assets; }
+        @Override public Context getApplicationContext() { return this; }
+    }
+
+    /**
+     * The rule from docs/layout-parity-target.md 第 25 节, measured on the platform that has to break the
+     * text: a ReplacementSpan edge is a break opportunity for StaticLayout, and Word never breaks a Latin
+     * or digit token, so no span of ours may start or end at a token interior. tests/ui/.../
+     * tests/ScriptTokenRegression.java asserts the rule itself; this counts it with the phone's own line
+     * breaker, on the laid-out document, with the phone's own fonts. The shape comparison (does any span
+     * placement keep a token whole?) lives in tools/script-token-lab.ps1.
+     */
+    private static String spanEdges(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("para\toffset\tinside_token\tkinds\tchars\n");
+        java.util.Map<Object, Boolean> seen = new java.util.IdentityHashMap<Object, Boolean>();
+        int interiors = 0, offenders = 0, scriptSpans = 0;
+        for (int p = 0; p < result.totalPages(); p++) {
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null) continue;
+                CharSequence t = pl.text.layout.getText();
+                if (!(t instanceof android.text.Spanned) || seen.containsKey(t)) continue;
+                seen.put(t, Boolean.TRUE);
+                android.text.Spanned sp = (android.text.Spanned) t;
+                android.text.style.ReplacementSpan[] spans =
+                        sp.getSpans(0, sp.length(), android.text.style.ReplacementSpan.class);
+                boolean[] edge = new boolean[sp.length() + 1];
+                for (android.text.style.ReplacementSpan s : spans) {
+                    edge[sp.getSpanStart(s)] = true;
+                    edge[sp.getSpanEnd(s)] = true;
+                    if (s instanceof DocxTextLayout.WordScriptSpan) scriptSpans++;
+                }
+                for (int i = 1; i < sp.length(); i++) {
+                    if (!glued(t.charAt(i - 1)) || !glued(t.charAt(i)))
+                        continue;
+                    interiors++;
+                    if (!edge[i]) continue;
+                    offenders++;
+                    StringBuilder kinds = new StringBuilder();
+                    for (android.text.style.ReplacementSpan s : spans) {
+                        if (sp.getSpanStart(s) != i && sp.getSpanEnd(s) != i) continue;
+                        if (kinds.length() > 0) kinds.append('+');
+                        kinds.append(s.getClass().getSimpleName());
+                    }
+                    sb.append(pl.blockIndex).append('\t').append(i).append("\tword_forbids\t")
+                      .append(kinds).append('\t').append(t.charAt(i - 1)).append('|')
+                      .append(t.charAt(i)).append('\n');
+                }
+            }
+        }
+        sb.append("SUMMARY\ttoken_interiors=").append(interiors)
+          .append("\tspan_edges_inside_a_token=").append(offenders)
+          .append("\tscript_spans_attached=").append(scriptSpans).append('\n');
+        return sb.toString();
+    }
+
+    /**
+     * Does Word glue this character to its neighbours inside one unbreakable token? Latin letters and
+     * digits of any alphabet plus the Unicode super/subscript code points: yes. CJK, spaces, "-", "/"
+     * and ".": no (the thesis proves Word may end a line on a hyphen or on a space). This is the rig's
+     * own copy on purpose - tools/device-probe/../ScriptTokens lives with the engine fix on the
+     * script-tokens branch, and the capture must build against plain HEAD.
+     */
+    private static boolean glued(char c) {
+        if (Character.isWhitespace(c) || isCjk(c)) return false;
+        if (FontScriptMetrics.unicodeScript(c) != 0) return true;
+        return Character.isLetterOrDigit(c);
+    }
+
+    private static boolean isCjk(char c) {
+        Character.UnicodeBlock b = Character.UnicodeBlock.of(c);
+        return b == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
+                || b == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A
+                || b == Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS
+                || b == Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION
+                || b == Character.UnicodeBlock.HANGUL_SYLLABLES
+                || b == Character.UnicodeBlock.HIRAGANA
+                || b == Character.UnicodeBlock.KATAKANA
+                || b == Character.UnicodeBlock.HALFWIDTH_AND_FULLWIDTH_FORMS;
+    }
+}
+
+
+
+
