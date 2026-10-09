@@ -1,0 +1,835 @@
+{
+ "what": "段落级风格统计实测的读数清单（tools/aigc-para-probe.py 写；只记计数与读数，原文一段不进仓库）",
+ "how": "py tools/aigc-para-probe.py prep && ... sig && ... fit，重算比对：py tools/aigc-para-probe.py check",
+ "gate": {
+  "auc": 0.85,
+  "fp_per_mille": 2.0,
+  "recall_must_be_positive": true
+ },
+ "lengths": {
+  "chunk_floor": 160,
+  "chunk_target": 300,
+  "chunk_ceil": 520,
+  "h2": [
+   120,
+   656
+  ]
+ },
+ "counts": {
+  "FIT": 11873,
+  "VAL": 6493,
+  "H2": 4455,
+  "T3": 174,
+  "OODFIT": 8446,
+  "OODVAL": 13460
+ },
+ "pairs": {
+  "FIT": 4271,
+  "VAL": 1981
+ },
+ "verdict": {
+  "any_pass": true,
+  "closest": "C符号拟合定 秩平均 全部(3)",
+  "thr_from": "fit",
+  "auc_val_pair": 0.8514,
+  "fp_combined_per_mille": 1.814,
+  "fp_combined_ci95": [
+   0.955,
+   3.445
+  ],
+  "recall_val": 1.44,
+  "t3_auc": 0.7063,
+  "t3_recall": 0.0
+ },
+ "strongest": {
+  "label": "B域内 逻辑回归 全部(8)",
+  "thr_from": "fit",
+  "kind": "lr",
+  "feats": [
+   "digit_p100",
+   "sent_std",
+   "sent_cv",
+   "punct_entropy",
+   "frac_long",
+   "connective_distinct",
+   "enum_p100",
+   "enum_distinct"
+  ],
+  "threshold": 2.81481,
+  "spec": {
+   "kind": "lr",
+   "feats": [
+    "digit_p100",
+    "sent_std",
+    "sent_cv",
+    "punct_entropy",
+    "frac_long",
+    "connective_distinct",
+    "enum_p100",
+    "enum_distinct"
+   ],
+   "signs": [
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    1,
+    1,
+    1
+   ],
+   "c": 0.5
+  },
+  "n_human": 4961,
+  "n_machine": 3682,
+  "auc_val_pair": 0.8793,
+  "auc_cross_true_half": 0.8653,
+  "auc_length_band_280_420": 0.876,
+  "auc_no_spacing_artifact": 0.871,
+  "n_pairs_no_spacing_artifact": 1981,
+  "fp_val_per_mille": 3.202,
+  "fp_true_half_per_mille": 5.581,
+  "fp_combined_per_mille": 4.233,
+  "human_flags": [
+   21,
+   4961
+  ],
+  "fp_combined_ci95": [
+   2.77,
+   6.463
+  ],
+  "t3_auc": 0.8255,
+  "t3_fp_per_mille": 8.0,
+  "t3_recall": 0.0,
+  "recall_val": 9.91,
+  "recall_ood_machine": 7.57,
+  "by_band": {
+   "120-199": {
+    "n_human": 303,
+    "fp_per_mille": 6.6,
+    "n_machine": 103,
+    "recall": 2.9
+   },
+   "200-319": {
+    "n_human": 1478,
+    "fp_per_mille": 1.35,
+    "n_machine": 265,
+    "recall": 4.9
+   },
+   "320-479": {
+    "n_human": 2616,
+    "fp_per_mille": 4.2,
+    "n_machine": 3249,
+    "recall": 10.7
+   },
+   "480-656": {
+    "n_human": 564,
+    "fp_per_mille": 10.64,
+    "n_machine": 65,
+    "recall": 0.0
+   }
+  },
+  "per_model": {
+   "deepseek-v3": {
+    "recall": 1.91,
+    "n": 682
+   },
+   "gemini-2.5-flash": {
+    "recall": 3.59,
+    "n": 1282
+   },
+   "gpt-4o": {
+    "recall": 19.44,
+    "n": 854
+   },
+   "qwen-max": {
+    "recall": 16.2,
+    "n": 864
+   }
+  },
+  "auc_fit_insample": 0.8852,
+  "pass_line": false
+ },
+ "candidates": [
+  {
+   "label": "A严格 单条最高 sent_std",
+   "thr_from": "fit",
+   "kind": "rank",
+   "threshold": 0.99764,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.832,
+   "auc_cross_true_half": 0.8049,
+   "fp_val_per_mille": 1.423,
+   "fp_true_half_per_mille": 16.279,
+   "fp_combined_per_mille": 7.861,
+   "fp_combined_ci95": [
+    5.756,
+    10.728
+   ],
+   "recall_val": 0.38,
+   "recall_ood_machine": 0.18,
+   "t3_auc": 0.6311,
+   "t3_fp_per_mille": 0.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.7901,
+   "pass_line": false
+  },
+  {
+   "label": "A严格 单条最高 sent_std",
+   "thr_from": "cal",
+   "kind": "rank",
+   "threshold": 0.99982,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.832,
+   "auc_cross_true_half": 0.8049,
+   "fp_val_per_mille": 0.0,
+   "fp_true_half_per_mille": 7.442,
+   "fp_combined_per_mille": 3.225,
+   "fp_combined_ci95": [
+    1.986,
+    5.233
+   ],
+   "recall_val": 0.0,
+   "recall_ood_machine": 0.0,
+   "t3_auc": 0.6311,
+   "t3_fp_per_mille": 0.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.7901,
+   "pass_line": false
+  },
+  {
+   "label": "A严格 秩平均 全部(3)",
+   "thr_from": "fit",
+   "kind": "rank",
+   "threshold": 0.94051,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8118,
+   "auc_cross_true_half": 0.7427,
+   "fp_val_per_mille": 2.49,
+   "fp_true_half_per_mille": 4.651,
+   "fp_combined_per_mille": 3.427,
+   "fp_combined_ci95": [
+    2.141,
+    5.481
+   ],
+   "recall_val": 0.57,
+   "recall_ood_machine": 1.32,
+   "t3_auc": 0.6967,
+   "t3_fp_per_mille": 16.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.8026,
+   "pass_line": false
+  },
+  {
+   "label": "A严格 秩平均 全部(3)",
+   "thr_from": "cal",
+   "kind": "rank",
+   "threshold": 0.9489,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8118,
+   "auc_cross_true_half": 0.7427,
+   "fp_val_per_mille": 0.711,
+   "fp_true_half_per_mille": 2.791,
+   "fp_combined_per_mille": 1.613,
+   "fp_combined_ci95": [
+    0.817,
+    3.179
+   ],
+   "recall_val": 0.19,
+   "recall_ood_machine": 0.71,
+   "t3_auc": 0.6967,
+   "t3_fp_per_mille": 8.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.8026,
+   "pass_line": false
+  },
+  {
+   "label": "A严格 逻辑回归 全部(3)",
+   "thr_from": "fit",
+   "kind": "lr",
+   "threshold": 1.80439,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8306,
+   "auc_cross_true_half": 0.8159,
+   "fp_val_per_mille": 1.067,
+   "fp_true_half_per_mille": 6.512,
+   "fp_combined_per_mille": 3.427,
+   "fp_combined_ci95": [
+    2.141,
+    5.481
+   ],
+   "recall_val": 0.27,
+   "recall_ood_machine": 0.11,
+   "t3_auc": 0.6812,
+   "t3_fp_per_mille": 0.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.8011,
+   "pass_line": false
+  },
+  {
+   "label": "A严格 逻辑回归 全部(3)",
+   "thr_from": "cal",
+   "kind": "lr",
+   "threshold": 1.91133,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8306,
+   "auc_cross_true_half": 0.8159,
+   "fp_val_per_mille": 0.356,
+   "fp_true_half_per_mille": 4.651,
+   "fp_combined_per_mille": 2.217,
+   "fp_combined_ci95": [
+    1.239,
+    3.966
+   ],
+   "recall_val": 0.05,
+   "recall_ood_machine": 0.03,
+   "t3_auc": 0.6812,
+   "t3_fp_per_mille": 0.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.8011,
+   "pass_line": false
+  },
+  {
+   "label": "B域内 单条最高 digit_p100",
+   "thr_from": "fit",
+   "kind": "rank",
+   "threshold": 0.99786,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8109,
+   "auc_cross_true_half": 0.8195,
+   "fp_val_per_mille": 8.894,
+   "fp_true_half_per_mille": 18.605,
+   "fp_combined_per_mille": 13.102,
+   "fp_combined_ci95": [
+    10.293,
+    16.664
+   ],
+   "recall_val": 9.1,
+   "recall_ood_machine": 2.18,
+   "t3_auc": 0.8101,
+   "t3_fp_per_mille": 0.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.8517,
+   "pass_line": false
+  },
+  {
+   "label": "B域内 单条最高 digit_p100",
+   "thr_from": "cal",
+   "kind": "rank",
+   "threshold": 1.0,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8109,
+   "auc_cross_true_half": 0.8195,
+   "fp_val_per_mille": 2.134,
+   "fp_true_half_per_mille": 13.953,
+   "fp_combined_per_mille": 7.257,
+   "fp_combined_ci95": [
+    5.246,
+    10.029
+   ],
+   "recall_val": 0.43,
+   "recall_ood_machine": 0.03,
+   "t3_auc": 0.8101,
+   "t3_fp_per_mille": 0.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.8517,
+   "pass_line": false
+  },
+  {
+   "label": "B域内 秩平均 全部(8)",
+   "thr_from": "fit",
+   "kind": "rank",
+   "threshold": 0.88496,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8386,
+   "auc_cross_true_half": 0.8416,
+   "fp_val_per_mille": 3.913,
+   "fp_true_half_per_mille": 3.721,
+   "fp_combined_per_mille": 3.83,
+   "fp_combined_ci95": [
+    2.453,
+    5.974
+   ],
+   "recall_val": 13.34,
+   "recall_ood_machine": 7.96,
+   "t3_auc": 0.8119,
+   "t3_fp_per_mille": 24.0,
+   "t3_recall": 2.04,
+   "auc_fit_insample": 0.843,
+   "pass_line": false
+  },
+  {
+   "label": "B域内 秩平均 全部(8)",
+   "thr_from": "cal",
+   "kind": "rank",
+   "threshold": 0.89772,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8386,
+   "auc_cross_true_half": 0.8416,
+   "fp_val_per_mille": 2.846,
+   "fp_true_half_per_mille": 3.256,
+   "fp_combined_per_mille": 3.024,
+   "fp_combined_ci95": [
+    1.833,
+    4.983
+   ],
+   "recall_val": 10.59,
+   "recall_ood_machine": 5.54,
+   "t3_auc": 0.8119,
+   "t3_fp_per_mille": 16.0,
+   "t3_recall": 2.04,
+   "auc_fit_insample": 0.843,
+   "pass_line": false
+  },
+  {
+   "label": "B域内 并尾投票 q99(8)",
+   "thr_from": "fit",
+   "kind": "vote99",
+   "threshold": 3.0,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.7279,
+   "auc_cross_true_half": 0.7065,
+   "fp_val_per_mille": 24.191,
+   "fp_true_half_per_mille": 27.442,
+   "fp_combined_per_mille": 25.6,
+   "fp_combined_ci95": [
+    21.558,
+    30.375
+   ],
+   "recall_val": 22.73,
+   "recall_ood_machine": 19.23,
+   "t3_auc": 0.8528,
+   "t3_fp_per_mille": 48.0,
+   "t3_recall": 28.57,
+   "auc_fit_insample": 0.7356,
+   "pass_line": false
+  },
+  {
+   "label": "B域内 并尾投票 q99(8)",
+   "thr_from": "cal",
+   "kind": "vote99",
+   "threshold": 4.0,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.7279,
+   "auc_cross_true_half": 0.7065,
+   "fp_val_per_mille": 2.134,
+   "fp_true_half_per_mille": 2.791,
+   "fp_combined_per_mille": 2.419,
+   "fp_combined_ci95": [
+    1.384,
+    4.223
+   ],
+   "recall_val": 6.49,
+   "recall_ood_machine": 3.54,
+   "t3_auc": 0.8528,
+   "t3_fp_per_mille": 8.0,
+   "t3_recall": 4.08,
+   "auc_fit_insample": 0.7356,
+   "pass_line": false
+  },
+  {
+   "label": "B域内 并尾投票 q95(8)",
+   "thr_from": "fit",
+   "kind": "vote95",
+   "threshold": 4.0,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.7262,
+   "auc_cross_true_half": 0.7834,
+   "fp_val_per_mille": 73.284,
+   "fp_true_half_per_mille": 52.093,
+   "fp_combined_per_mille": 64.1,
+   "fp_combined_ci95": [
+    57.616,
+    71.259
+   ],
+   "recall_val": 35.47,
+   "recall_ood_machine": 33.96,
+   "t3_auc": 0.7696,
+   "t3_fp_per_mille": 72.0,
+   "t3_recall": 22.45,
+   "auc_fit_insample": 0.7335,
+   "pass_line": false
+  },
+  {
+   "label": "B域内 并尾投票 q95(8)",
+   "thr_from": "cal",
+   "kind": "vote95",
+   "threshold": 4.0,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.7262,
+   "auc_cross_true_half": 0.7834,
+   "fp_val_per_mille": 73.284,
+   "fp_true_half_per_mille": 52.093,
+   "fp_combined_per_mille": 64.1,
+   "fp_combined_ci95": [
+    57.616,
+    71.259
+   ],
+   "recall_val": 35.47,
+   "recall_ood_machine": 33.96,
+   "t3_auc": 0.7696,
+   "t3_fp_per_mille": 72.0,
+   "t3_recall": 22.45,
+   "auc_fit_insample": 0.7335,
+   "pass_line": false
+  },
+  {
+   "label": "B域内 逻辑回归 全部(8)",
+   "thr_from": "fit",
+   "kind": "lr",
+   "threshold": 2.81481,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8793,
+   "auc_cross_true_half": 0.8653,
+   "fp_val_per_mille": 3.202,
+   "fp_true_half_per_mille": 5.581,
+   "fp_combined_per_mille": 4.233,
+   "fp_combined_ci95": [
+    2.77,
+    6.463
+   ],
+   "recall_val": 9.91,
+   "recall_ood_machine": 7.57,
+   "t3_auc": 0.8255,
+   "t3_fp_per_mille": 8.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.8852,
+   "pass_line": false
+  },
+  {
+   "label": "B域内 逻辑回归 全部(8)",
+   "thr_from": "cal",
+   "kind": "lr",
+   "threshold": 3.02575,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8793,
+   "auc_cross_true_half": 0.8653,
+   "fp_val_per_mille": 2.49,
+   "fp_true_half_per_mille": 1.86,
+   "fp_combined_per_mille": 2.217,
+   "fp_combined_ci95": [
+    1.239,
+    3.966
+   ],
+   "recall_val": 6.68,
+   "recall_ood_machine": 4.69,
+   "t3_auc": 0.8255,
+   "t3_fp_per_mille": 8.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.8852,
+   "pass_line": false
+  },
+  {
+   "label": "C符号拟合定 单条最高 sent_std",
+   "thr_from": "fit",
+   "kind": "rank",
+   "threshold": 0.99764,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.832,
+   "auc_cross_true_half": 0.8049,
+   "fp_val_per_mille": 1.423,
+   "fp_true_half_per_mille": 16.279,
+   "fp_combined_per_mille": 7.861,
+   "fp_combined_ci95": [
+    5.756,
+    10.728
+   ],
+   "recall_val": 0.38,
+   "recall_ood_machine": 0.18,
+   "t3_auc": 0.6311,
+   "t3_fp_per_mille": 0.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.7901,
+   "pass_line": false
+  },
+  {
+   "label": "C符号拟合定 单条最高 sent_std",
+   "thr_from": "cal",
+   "kind": "rank",
+   "threshold": 0.99982,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.832,
+   "auc_cross_true_half": 0.8049,
+   "fp_val_per_mille": 0.0,
+   "fp_true_half_per_mille": 7.442,
+   "fp_combined_per_mille": 3.225,
+   "fp_combined_ci95": [
+    1.986,
+    5.233
+   ],
+   "recall_val": 0.0,
+   "recall_ood_machine": 0.0,
+   "t3_auc": 0.6311,
+   "t3_fp_per_mille": 0.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.7901,
+   "pass_line": false
+  },
+  {
+   "label": "C符号拟合定 秩平均 全部(3)",
+   "thr_from": "fit",
+   "kind": "rank",
+   "threshold": 0.93072,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8514,
+   "auc_cross_true_half": 0.8405,
+   "fp_val_per_mille": 1.067,
+   "fp_true_half_per_mille": 2.791,
+   "fp_combined_per_mille": 1.814,
+   "fp_combined_ci95": [
+    0.955,
+    3.445
+   ],
+   "recall_val": 1.44,
+   "recall_ood_machine": 5.39,
+   "t3_auc": 0.7063,
+   "t3_fp_per_mille": 0.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.8371,
+   "pass_line": true
+  },
+  {
+   "label": "C符号拟合定 秩平均 全部(3)",
+   "thr_from": "cal",
+   "kind": "rank",
+   "threshold": 0.93072,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8514,
+   "auc_cross_true_half": 0.8405,
+   "fp_val_per_mille": 1.067,
+   "fp_true_half_per_mille": 2.791,
+   "fp_combined_per_mille": 1.814,
+   "fp_combined_ci95": [
+    0.955,
+    3.445
+   ],
+   "recall_val": 1.44,
+   "recall_ood_machine": 5.39,
+   "t3_auc": 0.7063,
+   "t3_fp_per_mille": 0.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.8371,
+   "pass_line": true
+  },
+  {
+   "label": "C符号拟合定 逻辑回归 全部(3)",
+   "thr_from": "fit",
+   "kind": "lr",
+   "threshold": 3.06112,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8294,
+   "auc_cross_true_half": 0.8267,
+   "fp_val_per_mille": 6.048,
+   "fp_true_half_per_mille": 3.256,
+   "fp_combined_per_mille": 4.838,
+   "fp_combined_ci95": [
+    3.253,
+    7.189
+   ],
+   "recall_val": 0.14,
+   "recall_ood_machine": 0.63,
+   "t3_auc": 0.6749,
+   "t3_fp_per_mille": 0.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.8269,
+   "pass_line": false
+  },
+  {
+   "label": "C符号拟合定 逻辑回归 全部(3)",
+   "thr_from": "cal",
+   "kind": "lr",
+   "threshold": 3.0869,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.8294,
+   "auc_cross_true_half": 0.8267,
+   "fp_val_per_mille": 5.692,
+   "fp_true_half_per_mille": 3.256,
+   "fp_combined_per_mille": 4.636,
+   "fp_combined_ci95": [
+    3.091,
+    6.948
+   ],
+   "recall_val": 0.11,
+   "recall_ood_machine": 0.57,
+   "t3_auc": 0.6749,
+   "t3_fp_per_mille": 0.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.8269,
+   "pass_line": false
+  },
+  {
+   "label": "反证：只看段长",
+   "thr_from": "fit",
+   "kind": "raw",
+   "threshold": 519.0,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.5016,
+   "auc_cross_true_half": 0.7404,
+   "fp_val_per_mille": 3.202,
+   "fp_true_half_per_mille": 136.744,
+   "fp_combined_per_mille": 61.076,
+   "fp_combined_ci95": [
+    54.746,
+    68.086
+   ],
+   "recall_val": 0.08,
+   "recall_ood_machine": 0.0,
+   "t3_auc": 0.5361,
+   "t3_fp_per_mille": 8.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.4345,
+   "pass_line": false
+  },
+  {
+   "label": "反证：只看段长",
+   "thr_from": "cal",
+   "kind": "raw",
+   "threshold": 653.0,
+   "n_human": 4961,
+   "n_machine": 3682,
+   "auc_val_pair": 0.5016,
+   "auc_cross_true_half": 0.7404,
+   "fp_val_per_mille": 0.0,
+   "fp_true_half_per_mille": 6.977,
+   "fp_combined_per_mille": 3.024,
+   "fp_combined_ci95": [
+    1.833,
+    4.983
+   ],
+   "recall_val": 0.0,
+   "recall_ood_machine": 0.0,
+   "t3_auc": 0.5361,
+   "t3_fp_per_mille": 8.0,
+   "t3_recall": 0.0,
+   "auc_fit_insample": 0.4345,
+   "pass_line": false
+  }
+ ],
+ "best": {
+  "label": "C符号拟合定 秩平均 全部(3)",
+  "thr_from": "fit",
+  "kind": "rank",
+  "feats": [
+   "sent_std",
+   "sent_cv",
+   "ttr_cjk"
+  ],
+  "threshold": 0.93072,
+  "spec": {
+   "kind": "rank",
+   "feats": [
+    "sent_std",
+    "sent_cv",
+    "ttr_cjk"
+   ],
+   "signs": [
+    -1,
+    -1,
+    1
+   ]
+  },
+  "n_human": 4961,
+  "n_machine": 3682,
+  "auc_val_pair": 0.8514,
+  "auc_cross_true_half": 0.8405,
+  "auc_length_band_280_420": 0.8476,
+  "auc_no_spacing_artifact": 0.847,
+  "n_pairs_no_spacing_artifact": 1981,
+  "fp_val_per_mille": 1.067,
+  "fp_true_half_per_mille": 2.791,
+  "fp_combined_per_mille": 1.814,
+  "human_flags": [
+   9,
+   4961
+  ],
+  "fp_combined_ci95": [
+   0.955,
+   3.445
+  ],
+  "t3_auc": 0.7063,
+  "t3_fp_per_mille": 0.0,
+  "t3_recall": 0.0,
+  "recall_val": 1.44,
+  "recall_ood_machine": 5.39,
+  "by_band": {
+   "120-199": {
+    "n_human": 303,
+    "fp_per_mille": 0.0,
+    "n_machine": 103,
+    "recall": 0.0
+   },
+   "200-319": {
+    "n_human": 1478,
+    "fp_per_mille": 0.0,
+    "n_machine": 265,
+    "recall": 0.0
+   },
+   "320-479": {
+    "n_human": 2616,
+    "fp_per_mille": 0.76,
+    "n_machine": 3249,
+    "recall": 1.6
+   },
+   "480-656": {
+    "n_human": 564,
+    "fp_per_mille": 12.41,
+    "n_machine": 65,
+    "recall": 0.0
+   }
+  },
+  "per_model": {
+   "deepseek-v3": {
+    "recall": 2.64,
+    "n": 682
+   },
+   "gemini-2.5-flash": {
+    "recall": 1.56,
+    "n": 1282
+   },
+   "gpt-4o": {
+    "recall": 1.05,
+    "n": 854
+   },
+   "qwen-max": {
+    "recall": 0.69,
+    "n": 864
+   }
+  },
+  "auc_fit_insample": 0.8371,
+  "pass_line": true,
+  "guard_n_sent_4": {
+   "fp_combined_per_mille": 1.411,
+   "recall_val": 1.44
+  }
+ },
+ "shipped_guard": {
+  "app/src/main/java/com/rikkahub/wordlite/AigcScorer.java": "e8ff909340e0e2a5c15bc2d6abdc25588adb653c",
+  "app/src/main/java/com/rikkahub/wordlite/AigcNgramModel.java": "60cfb08437fa24cbc966a1a0fe055d344162c263",
+  "app/src/main/assets/aigc/aigc-model.tsv": "6f92853d7c5df2e0801f4327cf726f3ffa9f37ae",
+  "app/src/main/assets/aigc/aigc-zh-freq.tsv": "21772e4ea57df77528b7aafd8d8eefae6310647b",
+  "app/src/main/assets/aigc/aigc-zh-weights.tsv": "ecfecf19cf620ae19b7e91242d7241b567f2c34f"
+ }
+}

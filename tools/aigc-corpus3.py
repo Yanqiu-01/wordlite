@@ -198,6 +198,43 @@ PMC_TERM = {
 PMC_EN_SAMPLE = 4200
 
 
+def pmc_ids_en(h, d, redo=False):
+    """英文侧按年分层取：eutils 的 history 只能稳定取回前一万条，深翻页会直接报错，
+    所以一年一条检索式各取 1,000 条，再按稳定哈希抽 PMC_EN_SAMPLE 篇（不是取前 N 个命中）。"""
+    out = os.path.join(d, "ids.json")
+    if os.path.exists(out) and not redo:
+        ids = json.load(io.open(out, encoding="utf-8"))
+        print("已有 ID：%d 篇" % len(ids))
+        return ids
+    pool = []
+    for yr in range(2013, 2023):
+        term = 'english[lang] AND "open access"[filter] AND %d:%d[pdat]' % (yr, yr)
+        got = []
+        for start in (0, 500):
+            u = EUTILS + "esearch.fcgi?" + urllib.parse.urlencode(
+                {"db": "pmc", "term": term, "retmax": 500, "retstart": start, "retmode": "json"})
+            res = None
+            for _ in range(4):
+                try:
+                    res = json.loads(fetch(u, h).decode("utf-8", "replace"), strict=False)["esearchresult"]
+                    break
+                except Exception:
+                    time.sleep(2.0)
+            if not res:
+                break
+            got += res.get("idlist") or []
+            time.sleep(0.4)
+        print("  %d 年取回 %-5d" % (yr, len(got)), flush=True)
+        pool += got
+    pool = sorted(set(pool))
+    pool.sort(key=lambda i: hashlib.md5(("pmc-en|" + i).encode("utf-8")).hexdigest())
+    ids = pool[:PMC_EN_SAMPLE]
+    json.dump(ids, io.open(out, "w", encoding="utf-8"), ensure_ascii=False)
+    print("ID 落盘：%d 篇（按年池 %d 篇，稳定哈希抽样）" % (len(ids), len(pool)))
+    return ids
+
+
+
 def fam_dir(fam, lang):
     d = os.path.join(DATA, "%s_%s" % (fam, lang))
     os.makedirs(d, exist_ok=True)
@@ -210,6 +247,8 @@ def pmc_ids(h, d, lang, redo=False):
         ids = json.load(io.open(out, encoding="utf-8"))
         print("已有 ID：%d 篇" % len(ids))
         return ids
+    if lang == "en":
+        return pmc_ids_en(h, d, redo)
     term = PMC_TERM[lang]
     ids, total = [], "0"
     for start in range(0, 20000, 500):
@@ -367,8 +406,8 @@ def body_sections(art):
     return out
 
 
-def dedupe(units, seen_exact, seen_shingle):
-    """跨篇去重：逐字相同（压缩后 SHA-1）与近重复（24 字长串撞上两处）。全局一本账，跨族也去。"""
+def dedupe(units, seen_exact, seen_shingle, home):
+    """跨篇去重：逐字相同（压缩后 SHA-1）与近重复（24 字长串撞上两处）。"""
     kept, dropped = [], Counter()
     for u in units:
         c = norm(u["text"]).replace(" ", "")
@@ -381,21 +420,26 @@ def dedupe(units, seen_exact, seen_shingle):
         if cnt >= NEAR_DUP_HITS:
             dropped["近重复（24 字长串撞 %d 处）" % cnt] += 1
             continue
-        seen_exact[h] = u["pid"]
+        seen_exact[h] = "%s|%s" % (u["pid"], home)
         for s in shingles(c):
-            seen_shingle.setdefault(s, u["pid"])
+            seen_shingle.setdefault(s, "%s|%s" % (u["pid"], home))
         u["compact_sha1"] = h
         kept.append(u)
     return kept, dropped
 
 
-def load_global_index(d):
-    """去重账本落在 DATA 下（仓库外）：跨族、跨次运行都认同一本账。"""
+def load_global_index(d, home):
+    """去重账本落在 DATA 下（仓库外）：跨族、跨次运行都认同一本账。
+    重建某一族时先把它自己上一遍那批条目剔掉，否则重跑会把自家段落全判成"逐字重复"。"""
     path = os.path.join(DATA, "_dedupe_index.json")
-    if os.path.exists(path):
-        j = json.load(io.open(path, encoding="utf-8"))
-        return dict(j.get("exact") or {}), dict(j.get("shingle") or {})
-    return {}, {}
+    if not os.path.exists(path):
+        return {}, {}
+    j = json.load(io.open(path, encoding="utf-8"))
+    tail = "|" + home
+    drop = lambda kv: not str(kv[1]).endswith(tail)
+    exact = dict(kv for kv in (j.get("exact") or {}).items() if drop(kv))
+    shingle = dict(kv for kv in (j.get("shingle") or {}).items() if drop(kv))
+    return exact, shingle
 
 
 def save_global_index(d, exact, shingle):
@@ -406,34 +450,26 @@ def save_global_index(d, exact, shingle):
 
 def stage_build(args):
     d = fam_dir(args.family, args.lang)
-    xp = os.path.join(d, "xml")
-    if not os.path.isdir(xp):
-        raise SystemExit("先跑 fetch：%s 不存在" % xp)
     lang, fam = args.lang, args.family
-    exact, shidx = load_global_index(d)
+    home = "%s_%s" % (args.family, args.lang)
+    exact, shidx = load_global_index(d, home)
     before_exact, before_sh = len(exact), len(shidx)
     papers, units, stats, reasons, lic_seen = [], [], Counter(), Counter(), Counter()
-    for art in iter_articles(xp):
-        ids = dict((e.get("pub-id-type") or "?", flatten(e)) for e in art.iter() if local(e) == "article-id")
-        pmcid = ids.get("pmcid") or ("PMC" + (ids.get("pmcaid") or ""))
-        if not pmcid.strip("PMC"):
-            stats["认不出 PMCID"] += 1
-            continue
-        lic, lic_raw = license_of(art)
+    for art in article_records(fam, lang, d):
+        lic = art["license"]
         lic_seen[lic] += 1
-        url = "https://pmc.ncbi.nlm.nih.gov/articles/%s/" % pmcid
-        rec = {"pid": "pmc:" + pmcid, "family": fam, "lang": lang, "url": url,
-               "doi": ids.get("doi"), "journal": art_field(art, "journal-title"),
-               "title": art_field(art, "article-title")[:160], "year": art_field(art, "year"),
-               "license": lic, "license_raw": re.sub(r"\s+", " ", lic_raw)[:160], "fetched_at": now(),
-               "candidates": 0, "kept": 0}
+        rec = {"pid": art["pid"], "family": fam, "lang": lang, "url": art["url"],
+               "doi": art.get("doi"), "journal": art.get("journal"),
+               "title": (art.get("title") or "")[:160], "year": art.get("year"),
+               "license": lic, "license_raw": re.sub(r"\s+", " ", art.get("license_raw") or "")[:160],
+               "fetched_at": art.get("fetched_at") or now(), "candidates": 0, "kept": 0}
         if lic not in ACCEPTED:
             stats["许可不过，整篇丢弃"] += 1
             papers.append(rec)
             continue
         stats["许可过的篇数"] += 1
         cand = []
-        for order, (sec, txt) in enumerate(body_sections(art)):
+        for order, (sec, txt) in enumerate(art["sections"]):
             for piece in pack(txt, cap=args.per_paper * 3):
                 why = reject_reason(piece, lang)
                 if why:
@@ -458,9 +494,9 @@ def stage_build(args):
         for i, c in enumerate(take):
             u = dict(c)
             u.update(uid="%s-%s:%05d" % (fam, lang, len(units) + 1), pid=rec["pid"], family=fam, lang=lang,
-                     url=url, license=lic, index=i)
+                     url=rec["url"], license=lic, index=i)
             units.append(u)
-    kept, dropped = dedupe(units, exact, shidx)
+    kept, dropped = dedupe(units, exact, shidx, home)
     stats["去重后剩余段"] = len(kept)
     reasons.update(dropped)
     keptpids = set(u["pid"] for u in kept)
@@ -482,6 +518,168 @@ def stage_build(args):
     print("  许可分布：%s" % json.dumps(dict(lic_seen), ensure_ascii=False))
     print("  丢弃原因：%s" % json.dumps(dict(reasons), ensure_ascii=False))
 
+# ---------------------------------------------------------------- 各族统一的"一篇"形状
+
+def pmc_records(d):
+    for art in iter_articles(os.path.join(d, "xml")):
+        ids = dict((e.get("pub-id-type") or "?", flatten(e)) for e in art.iter() if local(e) == "article-id")
+        pmcid = ids.get("pmcid") or ("PMC" + (ids.get("pmcaid") or ""))
+        if not pmcid.strip("PMC"):
+            continue
+        lic, lic_raw = license_of(art)
+        yield {"pid": "pmc:" + pmcid, "url": "https://pmc.ncbi.nlm.nih.gov/articles/%s/" % pmcid,
+               "doi": ids.get("doi"), "journal": art_field(art, "journal-title"),
+               "title": art_field(art, "article-title"), "year": art_field(art, "year"),
+               "license": lic, "license_raw": lic_raw, "fetched_at": now(),
+               "sections": body_sections(art)}
+
+
+def article_records(fam, lang, d):
+    if fam == "pmc":
+        return pmc_records(d)
+    if fam == "wiki":
+        return wiki_records(lang, d)
+    raise SystemExit("这一族还没接：build %s" % fam)
+
+# ---------------------------------------------------------------- 族二：维基百科条目正文
+#
+# 条目正文的许可不在正文里，在站点使用条款里：每个语言版 siteinfo 的 rightsinfo 给出授权文本，
+# 逐篇再记一次"取的是哪一号修订、什么时间"，这就是这一族可审的许可凭据。
+
+WIKI = {
+    "zh": {"host": "zh.wikipedia.org", "cats": ["Category:典范条目", "Category:優良條目"], "limit": 4600,
+           "skip": r"^(参见|参考资料|参考資料|外部链接|外部連結|注释|註釋|注脚|註腳|脚注|引用|文献|文献列表|"
+                   r"进一步阅读|進一步閱讀|扩展阅读|擴展閱讀|另见|另見|衍生作品|作品列表|备注|獎項|奖项记录)\s*$"},
+    "en": {"host": "en.wikipedia.org", "cats": ["Category:Featured articles", "Category:Good articles"], "limit": 5200,
+           "skip": r"^(see also|references?|external links?|notes?|footnotes?|further reading|bibliography|"
+                   r"citations?|works cited|sources?|notes and references|gallery|video|soundtrack)\b"},
+}
+
+
+def wiki_api(h, lang, params, tries=5):
+    host = WIKI[lang]["host"]
+    params = dict(params)
+    params["format"] = "json"
+    u = "https://%s/w/api.php?%s" % (host, urllib.parse.urlencode(params))
+    last = None
+    for k in range(tries):
+        try:
+            return json.loads(fetch(u, h, tries=2).decode("utf-8", "replace"), strict=False)
+        except Exception as e:
+            last = e
+            time.sleep(1.5 * (k + 1))
+    raise IOError("接口取不回：%s（%s）" % (u[:110], type(last).__name__))
+
+
+def wiki_titles(h, lang, d, redo=False):
+    out = os.path.join(d, "titles.json")
+    if os.path.exists(out) and not redo:
+        print("已有条目清单：%d 篇" % len(json.load(io.open(out, encoding="utf-8"))))
+        return json.load(io.open(out, encoding="utf-8"))
+    got = {}
+    for cat in WIKI[lang]["cats"]:
+        cont = None
+        n = 0
+        while True:
+            p = {"action": "query", "list": "categorymembers", "cmtitle": cat,
+                 "cmtype": "page", "cmlimit": 500}
+            if cont:
+                p["cmcontinue"] = cont
+            j = wiki_api(h, lang, p)
+            for m in j["query"]["categorymembers"]:
+                got[str(m["pageid"])] = {"pageid": m["pageid"], "title": m["title"], "cat": cat}
+            n += len(j["query"]["categorymembers"])
+            cont = (j.get("continue") or {}).get("cmcontinue")
+            time.sleep(0.3)
+            if not cont:
+                break
+        print("  %-28s 累计条目 %d" % (cat, n), flush=True)
+    rows = sorted(got.values(), key=lambda r: hashlib.md5(("wiki|%s|%s" % (lang, r["pageid"])).encode()).hexdigest())
+    rows = rows[:WIKI[lang]["limit"]]
+    json.dump(rows, io.open(out, "w", encoding="utf-8"), ensure_ascii=False)
+    print("条目清单落盘：%d 篇（封顶 %d）" % (len(rows), WIKI[lang]["limit"]))
+    return rows
+
+
+def wiki_rights(h, lang, d):
+    """授权原文只取一次，落在缓存里；逐篇清单引用它再配修订号。"""
+    p = os.path.join(d, "siteinfo.json")
+    if os.path.exists(p):
+        return json.load(io.open(p, encoding="utf-8"))
+    j = wiki_api(h, lang, {"action": "query", "meta": "siteinfo", "siprop": "rightsinfo"})
+    ri = j["query"]["rightsinfo"]
+    rec = {"license": "CC BY-SA", "text": (ri.get("text") or "").strip(), "url": (ri.get("url") or "").strip(),
+           "fetched_at": now()}
+    json.dump(rec, io.open(p, "w", encoding="utf-8"), ensure_ascii=False)
+    return rec
+
+
+def wiki_fetch(h, lang, d, redo=False):
+    rows = json.load(io.open(os.path.join(d, "titles.json"), encoding="utf-8"))
+    rights = wiki_rights(h, lang, d)
+    out = os.path.join(d, "extracts.jsonl")
+    have = set()
+    if os.path.exists(out) and not redo:
+        for line in io.open(out, encoding="utf-8"):
+            have.add(json.loads(line)["pageid"])
+    todo = [r for r in rows if r["pageid"] not in have]
+    print("取条目正文：还差 %d 篇（每请求 20 篇）" % len(todo))
+    with io.open(out, "a" if have else "w", encoding="utf-8", newline="") as f:
+        for k in range(0, len(todo), 20):
+            batch = todo[k:k + 20]
+            j = wiki_api(h, lang, {"action": "query", "prop": "extracts|revisions", "explaintext": 1,
+                                   "exsectionformat": "plain", "exlimit": 20, "rvprop": "ids|timestamp",
+                                   "rvslots": "main", "pageids": "|".join(str(r["pageid"]) for r in batch)})
+            pages = (j.get("query") or {}).get("pages") or {}
+            for r in batch:
+                p = pages.get(str(r["pageid"])) or {}
+                rev = (p.get("revisions") or [{}])[0]
+                ex = (p.get("extract") or "").strip()
+                if not ex:
+                    continue
+                f.write(json.dumps({"pageid": r["pageid"], "title": r["title"], "cat": r["cat"],
+                                    "extract": ex, "revid": rev.get("revid"), "revid_ts": rev.get("timestamp"),
+                                    "fetched_at": now(), "license": rights["license"],
+                                    "license_raw": "%s（%s）；本条取修订 %s（%s）"
+                                                   % (rights["text"], rights["url"], rev.get("revid"),
+                                                      rev.get("timestamp"))}, ensure_ascii=False) + "\n")
+            f.flush()
+            if k % 600 == 0:
+                print("  extracts %-6d / %d" % (k + len(batch), len(todo)), flush=True)
+            time.sleep(0.25)
+
+
+SEC_HEAD = re.compile(r"^(={2,6})\s*(.+?)\s*=+\s*$")
+
+
+def wiki_sections(extract, skip_re):
+    """纯文本正文按 == 小节标题切开；参考资料/外部链接那几节整节不要。"""
+    secs, cur, buf = [], "", []
+    for line in extract.split("\n"):
+        m = SEC_HEAD.match(line.strip())
+        if m:
+            if buf and not skip_re.match(cur or ""):
+                secs.append((cur, "\n".join(buf).strip()))
+            cur, buf = m.group(2).strip(), []
+        elif line.strip():
+            buf.append(line.strip())
+    if buf and not skip_re.match(cur or ""):
+        secs.append((cur, "\n".join(buf).strip()))
+    return secs
+
+
+def wiki_records(lang, d):
+    skip_re = re.compile(WIKI[lang]["skip"], re.I)
+    host = WIKI[lang]["host"]
+    for line in io.open(os.path.join(d, "extracts.jsonl"), encoding="utf-8"):
+        r = json.loads(line)
+        yield {"pid": "wiki:%s:%s" % (lang, r["pageid"]),
+               "url": "https://%s/wiki/%s" % (host, urllib.parse.quote(r["title"].replace(" ", "_"))),
+               "doi": None, "journal": "Wikipedia 条目（%s）" % r["cat"], "title": r["title"],
+               "year": (r.get("revid_ts") or "")[:4], "license": r["license"], "license_raw": r["license_raw"],
+               "fetched_at": r["fetched_at"], "sections": wiki_sections(r["extract"], skip_re)}
+
+
 # ---------------------------------------------------------------- 按篇三分与清单
 
 SPLIT_RULE = "按篇：md5(family|pid) 稳定哈希，前 8%% 进 SPARE（备用样本位；原计划给机器改写，2026-10-09 那一路取消），其后 20%% 进 FIT（定阈值），余下进 HOLD（只量真人误报）"
@@ -495,6 +693,9 @@ def split_of(fam, pid):
 FAMILY_DOC = {
     "pmc": {"name": "PMC 开放获取子集（已发表论文正文 XML）",
             "license_source": "XML 的 permissions/license_ref 字段，逐篇核；读不到明确开放许可整篇丢"},
+    "wiki": {"name": "维基百科条目正文（zh 取典范条目+优良条目，en 取 Featured+Good）",
+             "license_source": "条目正文的授权在站点使用条款里：siteinfo.rightsinfo 的原文取一次存缓存，"
+                               "逐篇再记取的是哪一号修订与时间，这两样一起进清单"},
 }
 
 
@@ -587,16 +788,20 @@ def main():
         h = opener(a.proxy)
         if a.family == "pmc":
             pmc_ids(h, fam_dir(a.family, a.lang), a.lang, a.redo)
+        elif a.family == "wiki":
+            wiki_titles(h, a.lang, fam_dir(a.family, a.lang), a.redo)
         else:
-            raise SystemExit("这一族还没接：%s" % a.family)
+            raise SystemExit("这一族还没接：ids %s" % a.family)
     elif a.stage == "fetch":
         h = opener(a.proxy)
         d = fam_dir(a.family, a.lang)
         if a.family == "pmc":
             ids = json.load(io.open(os.path.join(d, "ids.json"), encoding="utf-8"))
             pmc_xml(h, ids, os.path.join(d, "xml"), a.redo)
+        elif a.family == "wiki":
+            wiki_fetch(h, a.lang, d, a.redo)
         else:
-            raise SystemExit("这一族还没接：%s" % a.family)
+            raise SystemExit("这一族还没接：fetch %s" % a.family)
     elif a.stage == "build":
         stage_build(a)
     else:
