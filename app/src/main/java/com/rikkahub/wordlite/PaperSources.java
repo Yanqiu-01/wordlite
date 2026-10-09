@@ -747,8 +747,14 @@ public final class PaperSources {
             throws IOException {
         String link = url == null ? "" : url.trim();
         if (link.isEmpty()) throw new FetchFailure("这条候选没有全文链接", "no-link");
+        /* 结果页那一键下载也先问一遍账：本机已经知道这条读不出字的，一个字节都不许再花。
+           检索那一档一轮最多花 10 次，一键下载这一档能一口气点 10 篇——同一条 6 MB 的死链接
+           在这一档更贵，而它以前根本不过账本。 */
+        UnreadableLedger ledger = limits == null ? null : limits.unreadable;
+        if (ledger != null && ledger.knownUnreadable(link))
+            throw new FetchFailure("本机记着这条读不出字", "ledger-known-unreadable");
         PdfFetch got = fetchPdf(link, limits, cancellation);
-        /* 只有真是 PDF 的东西才配往下进自建库。以前这里点名四个形状才抛，
+        if (ledger != null && unreadableShape(got.shape)) ledger.rememberUnreadable(link, got.shape);        /* 只有真是 PDF 的东西才配往下进自建库。以前这里点名四个形状才抛，
            新加进来的 needs-entitlement / link-not-found / redirect-not-followed 全从缝里漏过去，
            把 0 字节当成"下载成功"交给 CorpusImport，回执就只剩一句"没下载到内容"——
            2026-10-09 真机那一屏"导入 0 篇，失败 4 个"就是这么来的：链接是 403 还是失效，
