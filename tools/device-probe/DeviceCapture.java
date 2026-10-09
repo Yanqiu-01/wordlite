@@ -81,6 +81,7 @@ public final class DeviceCapture {
         write(new File(out, "superscript-lines.txt"), lines(result, true));
         write(new File(out, "paragraphs-wordformat.tsv"), paragraphPages(result, doc));
         write(new File(out, "span-edges.tsv"), spanEdges(result));
+        write(new File(out, "run-fit.tsv"), runFit(result));
         System.out.println("DONE tag=" + tag + " pages=" + result.totalPages()
                 + " words=" + words + " parseMs=" + parseMs + " totalMs=" + totalMs);
     }
@@ -227,7 +228,8 @@ public final class DeviceCapture {
                 for (int i = pl.startLine; i < pl.endLine && i < l.getLineCount(); i++) {
                     int lineStart = l.getLineStart(i), lineEnd = l.getLineEnd(i);
                     CharSequence t = l.getText();
-                    if (!hasLatinThenCjkPunct(t, lineStart, lineEnd)) continue;
+                    if (!hasLatinThenCjkPunct(t, lineStart, lineEnd)
+                            && !hasSymbolChar(t, lineStart, lineEnd)) continue;
                     float left = l.getLineLeft(i);
                     float prev = l.getPrimaryHorizontal(lineStart);
                     for (int c = lineStart; c < lineEnd; c++) {
@@ -249,6 +251,24 @@ public final class DeviceCapture {
     private static boolean isLatinOrDigit(char c) {
         return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
                 || Character.isLetterOrDigit(c) && c < 0x2E80;
+    }
+
+    /**
+     * True when the line holds a unit symbol -- neither ASCII, nor a Chinese ideograph, nor a fullwidth
+     * mark (μ ± ℃ ² × ·). The engine may answer those with a symbol face rather than the face the run
+     * declared, and on the lines where our own advance table and the phone part company these are the
+     * only unusual characters present, so their per-character x has to come off the device.
+     */
+    private static boolean hasSymbolChar(CharSequence t, int start, int end) {
+        for (int c = start; c < end; c++) {
+            char ch = t.charAt(c);
+            if (ch < 128 || DocxTextLayout.isCjkPunctuation(ch)) continue;
+            if (ch >= 0x2E80 && ch <= 0x9FFF) continue;       // radicals, kana, ideographs
+            if (ch >= 0xF900 && ch <= 0xFAFF) continue;       // compatibility ideographs
+            if (ch >= 0xFF00 && ch <= 0xFFEF) continue;       // fullwidth forms
+            return true;
+        }
+        return false;
     }
 
     /** True when the line holds a Latin/digit character with CJK punctuation in front of it. */
@@ -293,7 +313,10 @@ public final class DeviceCapture {
         StringBuilder sb = new StringBuilder();
         if (!scriptsOnly)
             sb.append("page\tparagraph\tline\tfirst8\tlast8\tlineChars\tlineWidthPx\tlineFull"
-                    + "\tlineLeftPx\tparaXPx\topenGaps\tautoGaps\thangOverPx\n");
+                    + "\tlineLeftPx\tparaXPx\topenGaps\tautoGaps\thangOverPx"
+                    + "\tlineStretchPx\tlineNaturalPx\tlineRoomPx\tlayoutWidthPx"
+                    + "\tnextCharPx\tnextRunPx\tnextRunChars"
+                    + "\tlineInkPx\tlineTailPx\n");
         for (int p = 0; p < result.totalPages(); p++) {
             for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
                 if (pl.text == null) continue;
@@ -316,6 +339,22 @@ public final class DeviceCapture {
                     // A mark Word hangs past the margin is measured inside the column and drawn outside, so
                     // StaticLayout says the line ends at the margin while the ink ends hangOverPx past it.
                     float hangOver = lineOverhang(pl.text, i);
+                    // lineWidth is what the page shows AFTER justification stretched it, so on a spread
+                    // line it reads the same 566.93 whether the line is full or half empty. The stretch
+                    // is exactly the whole pixels every WidenGap on the line added, so subtracting it
+                    // gives the width the break was actually chosen on -- the only figure that can
+                    // answer "could this line have taken one more character".
+                    float stretch = widenExtraSum(l.getText(), s, e);
+                    float natural = l.getLineWidth(i) - stretch;
+                    float room = l.getWidth() - l.getLineLeft(i) - natural;
+                    float nextChar = nextCharAdvance(l, i);
+                    float nextRun = nextRunWidth(l, i);
+                    // The line's own ink end, and the difference between that and what the layout
+                    // reports as the line's width. A wrap that leaves a blank at the end of a line may
+                    // still bill it: the difference is what it costs, which is the figure that decides
+                    // whether a Latin token moved down because the trailing blank ate its room.
+                    float[] ink = inkEnd(l, i);
+                    float inkPx = ink[0], tailPx = ink[1];
                     if (scriptsOnly) {
                         sb.append(pl.blockIndex).append('\t').append(i + 1).append('\t')
                           .append(edge(text, true)).append('\t').append(edge(text, false)).append('\n');
@@ -328,12 +367,261 @@ public final class DeviceCapture {
                           .append('\t').append(Math.round(l.getLineLeft(i) * 100) / 100f)
                           .append('\t').append(Math.round(pl.text.x * 100) / 100f)
                           .append('\t').append(openGaps).append('\t').append(autoGaps)
-                          .append('\t').append(Math.round(hangOver * 100) / 100f).append('\n');
+                          .append('\t').append(Math.round(hangOver * 100) / 100f)
+                          .append('\t').append(Math.round(stretch * 100) / 100f)
+                          .append('\t').append(Math.round(natural * 100) / 100f)
+                          .append('\t').append(Math.round(room * 100) / 100f)
+                          .append('\t').append(Math.round(l.getWidth() * 100) / 100f)
+                          .append('\t').append(Math.round(nextChar * 100) / 100f)
+                          .append('\t').append(Math.round(nextRun * 100) / 100f)
+                          .append('\t').append(nextRunChars(l, i))
+                          .append('\t').append(Math.round(inkPx * 100) / 100f)
+                          .append('\t').append(Math.round(tailPx * 100) / 100f).append('\n');
                     }
                 }
             }
         }
         return sb.toString();
+    }
+
+    /**
+     * WidenGap owns the stretched advance and its fields are private. The sum is read reflectively on
+     * purpose: a capture has to be able to say how far the engine stretched a line without the engine
+     * growing an accessor just for the measuring rig.
+     */
+    private static final java.lang.reflect.Field WIDEN_EXTRA = widenField("extraPx");
+
+    private static java.lang.reflect.Field widenField(String name) {
+        try {
+            java.lang.reflect.Field f = DocxTextLayout.WidenGap.class.getDeclaredField(name);
+            f.setAccessible(true);
+            return f;
+        } catch (Throwable absent) {
+            return null;
+        }
+    }
+
+    /** Whole pixels the justification pass added to this line's advances; 0 when it never spread. */
+    private static float widenExtraSum(CharSequence text, int start, int end) {
+        if (WIDEN_EXTRA == null || !(text instanceof android.text.Spanned)) return 0f;
+        android.text.Spanned sp = (android.text.Spanned) text;
+        int sum = 0;
+        for (DocxTextLayout.WidenGap gap : sp.getSpans(start, end, DocxTextLayout.WidenGap.class)) {
+            if (sp.getSpanStart(gap) < start || sp.getSpanEnd(gap) > end) continue;
+            try {
+                sum += WIDEN_EXTRA.getInt(gap);
+            } catch (Throwable unreadable) {
+                return 0f;
+            }
+        }
+        return sum;
+    }
+
+    /**
+     * What the first character of the NEXT line costs, unstretched. A line that stopped short of the
+     * column left this much ink on the floor, so room >= nextCharPx means we broke where we did not
+     * have to. -1 on the last line of a paragraph, where there is no next character.
+     */
+    private static float nextCharAdvance(StaticLayout l, int line) {
+        if (line + 1 >= l.getLineCount()) return -1f;
+        int at = l.getLineStart(line + 1);
+        if (at + 1 > l.getText().length()) return -1f;
+        float step = l.getPrimaryHorizontal(at + 1) - l.getPrimaryHorizontal(at);
+        if (step <= 0f) return -1f;
+        return step - widenExtraSum(l.getText(), at, at + 1);
+    }
+
+    /**
+     * The range that has to cross this break whole. The engine refuses to split a Latin/digit string
+     * that Word keeps together (AtomicRunSpan), so such a string moves to the next line entire and a
+     * single character's box is the wrong yardstick for a line that stopped in front of it.
+     */
+    private static int[] nextRunRange(StaticLayout l, int line) {
+        if (line + 1 >= l.getLineCount()) return null;
+        int at = l.getLineStart(line + 1), lineEnd = l.getLineEnd(line + 1);
+        if (at >= l.getText().length()) return null;
+        if (l.getText() instanceof android.text.Spanned) {
+            android.text.Spanned sp = (android.text.Spanned) l.getText();
+            for (DocxTextLayout.AtomicRunSpan run
+                    : sp.getSpans(at, at + 1, DocxTextLayout.AtomicRunSpan.class)) {
+                int from = sp.getSpanStart(run), to = sp.getSpanEnd(run);
+                if (from <= at && to > at) return new int[] { at, Math.min(to, lineEnd) };
+            }
+        }
+        return new int[] { at, Math.min(at + 1, lineEnd) };
+    }
+
+    /** Natural width of that range -- the ink a line that stopped short would have had to find. */
+    private static float nextRunWidth(StaticLayout l, int line) {
+        int[] r = nextRunRange(l, line);
+        if (r == null) return -1f;
+        float from = l.getPrimaryHorizontal(r[0]), to = l.getPrimaryHorizontal(r[1]);
+        if (to < from) return -1f;
+        return (to - from) - widenExtraSum(l.getText(), r[0], r[1]);
+    }
+
+    private static String nextRunChars(StaticLayout l, int line) {
+        int[] r = nextRunRange(l, line);
+        if (r == null) return "";
+        return one(clean(l.getText().subSequence(r[0], r[1]).toString()), 24);
+    }
+
+    /** DocxTextLayout.build is private; the control layout below needs it and nothing else. */
+    private static final java.lang.reflect.Method LAYOUT_BUILD = docxBuild();
+
+    private static java.lang.reflect.Method docxBuild() {
+        try {
+            java.lang.reflect.Method m = DocxTextLayout.class.getDeclaredMethod("build",
+                    android.text.Spannable.class, android.text.TextPaint.class, int.class,
+                    android.text.Layout.Alignment.class, boolean.class, boolean.class);
+            m.setAccessible(true);
+            return m;
+        } catch (Throwable absent) {
+            return null;
+        }
+    }
+
+    /** True when a glued Latin/digit run starts this line (the glue that forbids the after-slash break). */
+    private static boolean gluedAt(StaticLayout l, int line) {
+        if (!(l.getText() instanceof android.text.Spanned)) return false;
+        android.text.Spanned sp = (android.text.Spanned) l.getText();
+        return sp.getSpans(l.getLineStart(line), l.getLineStart(line) + 1,
+                DocxTextLayout.AtomicRunSpan.class).length > 0;
+    }
+
+    /** Room the line still had before the justification pass stretched it. */
+    private static float roomOf(StaticLayout l, int line) {
+        int s = l.getLineStart(line), e = l.getLineEnd(line);
+        return l.getWidth() - l.getLineLeft(line)
+                - (l.getLineWidth(line) - widenExtraSum(l.getText(), s, e));
+    }
+
+    /**
+     * Control layout of one paragraph: the same text with the same paint and width, the justification
+     * stretch taken out (it is a consequence of the break, never a cause) and the glue taken off. If
+     * the line in front of a glued run takes that run in the control but left it outside in the live
+     * layout, the run moved because of the rule and not because of the width model -- which is the
+     * difference between "our advance table charges too much" and "the rule reaches further than Word's".
+     */
+    private static String relayError = "";
+
+    private static StaticLayout relaidWithoutGlue(StaticLayout live) {
+        relayError = LAYOUT_BUILD == null ? "no build() to call" : "";
+        if (LAYOUT_BUILD == null) return null;
+        try {
+            android.text.SpannableStringBuilder copy =
+                    new android.text.SpannableStringBuilder(live.getText());
+            for (DocxTextLayout.AtomicRunSpan glue
+                    : copy.getSpans(0, copy.length(), DocxTextLayout.AtomicRunSpan.class)) copy.removeSpan(glue);
+            for (DocxTextLayout.WidenGap gap
+                    : copy.getSpans(0, copy.length(), DocxTextLayout.WidenGap.class)) copy.removeSpan(gap);
+            return (StaticLayout) LAYOUT_BUILD.invoke(null, copy, live.getPaint(), live.getWidth(),
+                    live.getAlignment(), false, true);
+        } catch (Throwable failed) {
+            Throwable cause = failed instanceof java.lang.reflect.InvocationTargetException
+                    && failed.getCause() != null ? failed.getCause() : failed;
+            relayError = cause.getClass().getSimpleName() + ":" + cause.getMessage();
+            return null;
+        }
+    }
+
+    /**
+     * One row per glued run that sits at the start of a line: what it cost, what room the line in
+     * front of it had, and where the same text broke once the glue came off.
+     */
+    /**
+     * What AtomicRunSpan.getSize answers for the run (the number the platform fits the line against),
+     * and what an ordinary measureText of the same range answers. They are only equal when the glue
+     * prices the run with the same faces the line itself uses; a gap between them is the glue charging
+     * the wrong face, and it is the glue's own fit test that decides whether the run stays on the line.
+     */
+    private static float[] glueWidths(StaticLayout l, int line) {
+        int[] r = nextRunRange(l, line - 1);
+        if (r == null) return new float[] { -1f, -1f };
+        android.text.TextPaint paint = l.getPaint();
+        CharSequence t = l.getText();
+        int glued = 0;
+        float sum = 0f;
+        if (t instanceof android.text.Spanned) {
+            android.text.Spanned sp = (android.text.Spanned) t;
+            for (DocxTextLayout.AtomicRunSpan run
+                    : sp.getSpans(r[0], r[0] + 1, DocxTextLayout.AtomicRunSpan.class)) {
+                glued = 1;
+                for (int i = sp.getSpanStart(run); i < sp.getSpanEnd(run); i++)
+                    sum += Math.round(paint.measureText(t, i, i + 1));
+            }
+        }
+        float plain = Math.round(paint.measureText(t, r[0], r[1]));
+        return new float[] { glued == 1 ? sum : -1f, plain };
+    }
+
+    private static String runFit(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page\tblock\tline\trun_chars\trun_px\troom_px\tlive_run_line\tctrl_run_line"
+                + "\tctrl_line_end\tctrl_line_px\tctrl_room_px\tsize_px\tplain_px\trun_would_fit\ttake_run\tctrl_err\n");
+        java.util.IdentityHashMap<StaticLayout, StaticLayout> cache = new java.util.IdentityHashMap<>();
+        for (int p = 0; p < result.totalPages(); p++) {
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null) continue;
+                StaticLayout l = pl.text.layout;
+                for (int i = Math.max(1, pl.startLine); i < pl.endLine && i < l.getLineCount(); i++) {
+                    if (!gluedAt(l, i)) continue;
+                    StaticLayout c = cache.get(l);
+                    if (c == null) {
+                        c = relaidWithoutGlue(l);
+                        cache.put(l, c);
+                    }
+                    int liveEnd = l.getLineStart(i);
+                    int ctrlEnd = -1, ctrlLine = -1;
+                    float ctrlPx = -1f, ctrlRoom = -1f;
+                    if (c != null && liveEnd < c.getText().length()) {
+                        ctrlLine = c.getLineForOffset(liveEnd);
+                        ctrlEnd = c.getLineEnd(ctrlLine);
+                        ctrlPx = c.getLineWidth(ctrlLine);
+                        ctrlRoom = c.getWidth() - c.getLineLeft(ctrlLine) - ctrlPx;
+                    }
+                    float run = nextRunWidth(l, i - 1), room = roomOf(l, i - 1);
+                    float[] glue = glueWidths(l, i);
+                    String err = c == null ? relayError : "";
+                    sb.append(p + 1).append('\t').append(pl.blockIndex).append('\t').append(i)
+                      .append('\t').append(one(clean(l.getText().subSequence(
+                              l.getLineStart(i), Math.min(l.getLineEnd(i),
+                              l.getLineStart(i) + 24)).toString()), 24))
+                      .append('\t').append(Math.round(run * 100) / 100f)
+                      .append('\t').append(Math.round(room * 100) / 100f)
+                      .append('\t').append(i).append('\t').append(ctrlLine)
+                      .append('\t').append(ctrlEnd)
+                      .append('\t').append(Math.round(ctrlPx * 100) / 100f)
+                      .append('\t').append(Math.round(ctrlRoom * 100) / 100f)
+                      .append('\t').append(Math.round(glue[0] * 100) / 100f)
+                      .append('\t').append(Math.round(glue[1] * 100) / 100f)
+                      .append('\t').append(run <= room ? 1 : 0)
+                      .append('\t').append(ctrlLine >= 0 && ctrlLine < i ? 1 : 0)
+                      .append('\t').append(one(err, 60)).append('\n');
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Where this line's ink really ends, and what its tail costs the layout.
+     *
+     * StaticLayout keeps the blanks a wrap left at the end of the line inside the line, and the engine
+     * bills them as nothing (BlankTail) because Word's line width stops at the last character with ink.
+     * Whether the platform honored that on a given line can only be measured, and it decides the case
+     * where Word and we break differently: a line reported as ending at 524 px of a 567 px column with
+     * a Latin token pushed to the next line only makes sense if something at the tail -- the blank in
+     * front of that token -- took the room. So: ink end, and width minus ink end.
+     */
+    private static float[] inkEnd(StaticLayout l, int line) {
+        int s = l.getLineStart(line), e = l.getLineEnd(line);
+        int last = e - 1;
+        CharSequence t = l.getText();
+        while (last > s && Character.isWhitespace(t.charAt(last))) last--;
+        float from = l.getPrimaryHorizontal(s), to = l.getPrimaryHorizontal(last + 1);
+        if (to < from) return new float[] { -1f, -1f };
+        return new float[] { to - from, l.getLineWidth(line) - l.getLineLeft(line) - (to - from) };
     }
 
     /**
