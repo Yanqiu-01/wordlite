@@ -109,7 +109,7 @@ public final class CheckReport {
         /* 顺手抓正文那一行只在真抓过（或该抓而没排上）的那一轮出现，没开的轮次一个字都不许多。
            措辞与结果页注记同出一处（DuplicateEngine.autoFetchLine），两处不许各写一遍。 */
         String autoFetch = DuplicateEngine.autoFetchLine(report.autoPdfTried, report.autoPdfFetched,
-                report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason);
+                report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason, report.autoPdfShapes);
         if (!autoFetch.isEmpty()) metricText(out, "顺手抓正文", autoFetch);
         /* 通了几个检索源单独占一行，只在"路是通的、可比正文一篇都没有"那一轮印：那一屏要分清的正是
            "站点只回了题录摘要"与"手机根本没有一条路走到检索站"，两者的下一步相反。出口那一档的原因行

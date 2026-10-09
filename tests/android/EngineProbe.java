@@ -102,7 +102,7 @@ public final class EngineProbe {
         CorpusLedger ledger = CorpusLedger.aggregate(corpus);
         System.out.println("屏上比对材料行: " + ledger.summaryLine());
         String auto = DuplicateEngine.autoFetchLine(report.autoPdfTried, report.autoPdfFetched,
-                report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason);
+                report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason, report.autoPdfShapes);
         if (!auto.isEmpty()) System.out.println("屏上顺手抓正文行: " + auto);
         for (String note : report.notes) System.out.println("note: " + note);
 

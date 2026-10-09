@@ -1119,11 +1119,23 @@ public final class RetrievalCoverageRegression {
         dry.autoFullTexts = 3;
         DuplicateEngine.Report empty = scan(thesis(3), new TextCorpus(),
                 engines("crossref", "openalex", "semantic-scholar", "europepmc"), dry);
-        check(empty.autoPdfTried == 3 && empty.autoPdfFetched == 0 && empty.autoPdfFailed == 3,
-                "三次抓取一个字都没拿到：试 3 抓成 0 落空 3");
+        check(empty.autoPdfTried == DuplicateEngine.MAX_AUTO_MISS_STREAK
+                        && empty.autoPdfFetched == 0 && empty.autoPdfFailed == DuplicateEngine.MAX_AUTO_MISS_STREAK,
+                "连着两篇抓回来一个字都没有就收手，剩下的请求还给检索：试 "
+                        + empty.autoPdfTried + " 抓成 " + empty.autoPdfFetched
+                        + " 落空 " + empty.autoPdfFailed);
         check(empty.fullTextCandidates == 0,
                 "抓回空正文的一篇也不许标成正文可比：" + empty.fullTextCandidates);
-        check(notes(empty, "3 篇抓回来没有正文层，仍按摘要比对"), "落空那几篇要说清仍按摘要比");
+        check(notes(empty, "2 篇抓回来没有正文层，仍按摘要比对"), "落空那几篇要说清仍按摘要比");
+        check(notes(empty, "没来得及下（连着 2 篇都读不出正文层）"),
+                "收手之后剩下的篇数照实写成没来得及，并写明是被连着落空挡的：" + empty.autoPdfLeft);
+        check(notes(empty, "回来的页面几乎没字 " + DuplicateEngine.MAX_AUTO_MISS_STREAK + " 篇"),
+                "落空按形状说人话，不许只写一句\u201c没抓到\u201d：" + empty.autoPdfShapes);
+        check(CheckReport.html("thesis.docx", empty).contains("回来的页面几乎没字"),
+                "报告那张表里的顺手抓正文一行也带形状");
+        check(DuplicateEngine.autoFetchLine(2, 0, 2, 1, "连着 2 篇都读不出正文层",
+                "回来的页面几乎没字 2 篇").contains("仍按摘要比对（回来的页面几乎没字 2 篇）"),
+                "形状只跟在落空那半句后面");
         fullTextEmpty = false;
 
         /* 五、检索把 120 次额度花光了：剩下的候选照实写"没来得及下"，并写明是被什么挡的。 */

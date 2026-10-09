@@ -30,6 +30,11 @@ public final class DuplicateEngine {
     static final int MAX_DOWNLOADABLES = 10;
     /** 一轮里"顺手抓正文"的篇数天花板：设置里的数最高也只能到这里，剩下的额度得留给检索。 */
     static final int MAX_AUTO_FULL_TEXTS = 10;
+    /**
+     * 连着几篇抓回来读不出正文层就收手：2026-10-09 真机那一轮六次全落空（扫描版、挂羊头的链接），
+     * 白烧六次请求额度，一篇正文都没多出来。落空是有形状的，连着两次同一种落空就该把额度还给检索。
+     */
+    static final int MAX_AUTO_MISS_STREAK = 2;
     /** "本轮顺手抓了 N 篇……"那句的开头。注记要按它找到紧跟其后的"存进自建库"那一句。 */
     static final String AUTO_FETCH_PREFIX = "本轮顺手抓了 ";
     /* 挂钟闸门与限速：实测一轮 9 个源约 10 秒（维普最慢 4062ms），但 Routes 的多路尝试能把单个
@@ -249,6 +254,8 @@ public final class DuplicateEngine {
         public int autoPdfTried, autoPdfFetched, autoPdfFailed, autoPdfLeft;
         /** autoPdfLeft 那几个字到底是被什么挡住的："检索请求额度已用完"或"检索时间已用满"。 */
         public String autoPdfReason = "";
+        /** 落空那几篇的形状（"扫描版无文字层 2 篇、回来的不是 PDF 1 篇"）：同一句注记的补充。 */
+        public String autoPdfShapes = "";
         /**
          * 顺手抓成正文的那几篇的正文本身：引擎不碰磁盘，这一份交给 app 落进自建库
          * （fileAutoBodies）。空列表 = 这一轮没开开关，或一篇都没抓成。
@@ -394,10 +401,18 @@ public final class DuplicateEngine {
      * 四个数各说一件事，不许谁替谁下结论——抓了 3 篇不等于 3 篇都有正文，剩下的也不许偷偷不算。
      */
     public static String autoFetchLine(int tried, int got, int failed, int left, String reason) {
+        return autoFetchLine(tried, got, failed, left, reason, "");
+    }
+
+    public static String autoFetchLine(int tried, int got, int failed, int left, String reason,
+                                       String shapes) {
         if (tried <= 0 && left <= 0) return "";
         StringBuilder out = new StringBuilder(AUTO_FETCH_PREFIX).append(tried)
                 .append(" 篇开放获取全文，").append(got).append(" 篇已按正文比对");
-        if (failed > 0) out.append("，").append(failed).append(" 篇抓回来没有正文层，仍按摘要比对");
+        if (failed > 0) {
+            out.append("，").append(failed).append(" 篇抓回来没有正文层，仍按摘要比对");
+            if (shapes != null && !shapes.isEmpty()) out.append("（").append(shapes).append("）");
+        }
         if (left > 0) {
             out.append("，还有 ").append(left).append(" 篇没来得及下");
             if (reason != null && !reason.isEmpty()) out.append("（").append(reason).append("）");
@@ -1231,6 +1246,20 @@ public final class DuplicateEngine {
             Integer value = byThread.get(Long.valueOf(Thread.currentThread().getId()));
             return value == null ? 0 : value.intValue();
         }
+        /** 留档里现在的行数：顺手抓正文用它认出"这一次抓取留下的那一行"。 */
+        int rows() { synchronized (lock) { return report.shapes.size(); } }
+        /**
+         * 那一次抓取留下的最后一个形状号。一条都没留下按 no-response 算——连接都没建成，
+         * 比"扫描件没字"更靠前，用户能做的下一步也不同。
+         */
+        String lastShapeSince(int from) {
+            synchronized (lock) {
+                int size = report.shapes.size();
+                if (size <= from) return "no-response";
+                String shape = report.shapes.get(size - 1).shape;
+                return shape == null || shape.trim().isEmpty() ? "no-response" : shape.trim();
+            }
+        }
         private void bump() {
             Long key = Long.valueOf(Thread.currentThread().getId());
             Integer value = byThread.get(key);
@@ -1690,8 +1719,9 @@ public final class DuplicateEngine {
            它每次抓之前要从 sweep 那份请求额度里领一次——领不到就是与检索抢同一个 120 次抢输了，
            照实写"还有几篇没来得及下"，不许假装这一轮没这事。 */
         int autoCap = sweep == null ? 0 : Math.min(MAX_AUTO_FULL_TEXTS, Math.max(0, limits.autoFullTexts));
-        int autoTried = 0, autoGot = 0, autoFailed = 0, autoLeft = 0;
+        int autoTried = 0, autoGot = 0, autoFailed = 0, autoLeft = 0, autoMissStreak = 0;
         String autoOut = "";
+        LinkedHashMap<String, Integer> autoShapes = new LinkedHashMap<String, Integer>();
         for (int i = 0; i < plan.size(); i++) {
             CandidateRanker.Selection pick = plan.get(i);
             if (cancelled(cancellation)) { note(report, "检索已取消，结果只覆盖已完成的窗口"); break; }
@@ -1722,13 +1752,23 @@ public final class DuplicateEngine {
                 } else if (deadline - System.currentTimeMillis()
                         <= limits.timeoutSeconds * 1000L + 1000L) {
                     autoLeft++; autoOut = "检索时间已用满";
+                } else if (autoMissStreak >= MAX_AUTO_MISS_STREAK) {
+                    autoLeft++; autoOut = "连着 " + MAX_AUTO_MISS_STREAK + " 篇都读不出正文层";
                 } else if (!sweep.spendRequest()) {
                     autoLeft++; autoOut = "检索请求额度已用完";
                 } else {
                     autoTried++;
                     String got = null;
+                    int shapeRow = sweep.shapes.rows();
                     try { got = PaperSources.fullText(candidate, limits, cancellation); }
                     catch (IOException error) { note(report, "顺手抓正文没成，仍按摘要比对：" + message(error)); }
+                    if (got == null || got.trim().isEmpty()) {
+                        /* 落空要记下它到底是什么形状：六篇全是"扫描版无文字层"与"回来的不是 PDF"
+                           是两回事，前者是这一轮的运气，后者是这一路的链接本身就不对。 */
+                        autoMissStreak++;
+                        String shape = CorpusImport.Batch.shapeLabel(sweep.shapes.lastShapeSince(shapeRow));
+                        autoShapes.put(shape, Integer.valueOf(count(autoShapes, shape) + 1));
+                    } else autoMissStreak = 0;
                     if (got != null && !got.trim().isEmpty()) {
                         body = body.isEmpty() ? got : body + "\n" + got;
                         fetched = true; autoGot++;
@@ -1765,6 +1805,7 @@ public final class DuplicateEngine {
         report.autoPdfFailed = autoFailed;
         report.autoPdfLeft = autoLeft;
         report.autoPdfReason = autoOut;
+        report.autoPdfShapes = tally(autoShapes);
         everyConnectorFailed(report, engines, skipped);
         disclose(report, silent, failedLast, exhausted, requestCap, timeCap, corpusCap, poolCap, poolDropped);
     }
@@ -1872,7 +1913,8 @@ public final class DuplicateEngine {
             note(report, "知网、万方、维普只回摘要，正文与图表无法比对，相似率是下限");
         if (report.autoPdfTried > 0 || report.autoPdfLeft > 0)
             note(report, autoFetchLine(report.autoPdfTried, report.autoPdfFetched,
-                    report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason));
+                    report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason,
+                    report.autoPdfShapes));
         if (!report.downloadables.isEmpty())
             note(report, "另有 " + report.downloadables.size() + " 篇候选挂着可直接下载的开放获取 PDF，"
                     + "结果页可一键下进自建库（自建库按正文比对，不按摘要）");
@@ -2291,6 +2333,23 @@ public final class DuplicateEngine {
     private static void note(Report report, String value) {
         if (report.notes.size() < MAX_NOTES && !report.notes.contains(value)) report.notes.add(value);
     }
+    /** "扫描版无文字层 4 篇、回来的不是 PDF 2 篇"：按篇数从多到少，最多三种，再多那一屏读不动。 */
+    private static String tally(LinkedHashMap<String, Integer> shapes) {
+        java.util.ArrayList<Map.Entry<String, Integer>> rows =
+                new java.util.ArrayList<Map.Entry<String, Integer>>(shapes.entrySet());
+        Collections.sort(rows, new Comparator<Map.Entry<String, Integer>>() {
+            public int compare(Map.Entry<String, Integer> a, Map.Entry<String, Integer> b) {
+                return Integer.valueOf(b.getValue().intValue() - a.getValue().intValue());
+            }
+        });
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < rows.size() && i < 3; i++) {
+            if (out.length() > 0) out.append("、");
+            out.append(rows.get(i).getKey()).append(' ').append(rows.get(i).getValue()).append(" 篇");
+        }
+        return out.toString();
+    }
+
     private static int count(LinkedHashMap<String, Integer> counts, String engine) {
         Integer value = counts.get(engine);
         return value == null ? 0 : value.intValue();
