@@ -83,6 +83,14 @@ $parityArgs = @("tools/word-parity.ps1", "-Impl", "new",
                  "-OutFile", (Join-Path $Out "parity.tsv"), "-MaxShifted", "999")
 if ($Tree) { $parityArgs += "-AllowStale" }
 $parity = @(Run $parityArgs)
+# Run 把子进程的输出收进变量里，所以 word-parity 一旦拒（章与 HEAD 不一致、真值比采样旧……）
+# 这里就什么都抓不到，第 1 条会打成 "0 段错页 / 0 [过]" —— 一个理直气壮的假绿。宁可当场抛。
+if (-not (@($parity | Select-String -Pattern '^aligned=\d+ shifted') ).Count) {
+    $why = @($parity | Where-Object { "$_" -match "refused|STALE|MISSING|not under|missing" })
+    if ($why.Count -eq 0) { $why = @($parity | Select-Object -Last 8) }
+    throw ("item 1 produced no numbers; tools/word-parity.ps1 said: " +
+           ((@($why | Select-Object -First 3) -join " | ").Trim()))
+}
 $m1Shifted = [int](Grab $parity '^shifted_paragraphs=(\d+)$' 1)
 $m1Aligned = [int](Grab $parity '^aligned=(\d+) shifted' 1)
 $m1Exact = Grab $parity '^exact_page_match=(\S+)$' 1
