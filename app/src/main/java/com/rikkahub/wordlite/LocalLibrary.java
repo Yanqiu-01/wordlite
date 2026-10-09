@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 /** 自建文献库：文档写进应用私有目录，index.json 存元数据，index() 把正文灌进 TextCorpus 参与本机比对。 */
-public final class LocalLibrary {
+public final class LocalLibrary implements PaperSources.UnreadableLedger {
     public static final class Entry {
         public String name = "";
         public long bytes;
@@ -46,11 +46,17 @@ public final class LocalLibrary {
     }
 
     /** 入库回执：批量导入要知道落库的文件名与"重复撞在哪一篇上"，只回一个错误串不够用。 */
+    /** 自建库名额用满 / 字节容量用满：顺手抓正文与批量导入都按这两个原因号说人话。 */
+    public static final String REASON_QUOTA = "quota-full";
+    public static final String REASON_BYTES = "bytes-full";
+
     public static final class AddResult {
         public boolean ok;
         public String name = "";
         public String error = "";
         public String duplicateOf = "";
+        /** 失败原因号：只有自建库额度这两条填（quota-full / bytes-full），别的失败留空。 */
+        public String reason = "";
     }
 
     private static final String INDEX_NAME = "index.json";
@@ -58,18 +64,24 @@ public final class LocalLibrary {
      * 版本 2 起每条带正文哈希。批量导入是一串连续写盘，中途取消或进程被杀都是常态，
      * 所以索引必须任何时候都读得回来，见 persist() 的临时文件 + 改名。
      */
-    private static final int INDEX_VERSION = 2;
+    /* 版本 3 起索引里多一本"已知读不出正文层的链接"。老版本应用读到多出来的 unreadable 键会直接
+       忽略它（它只挑 entries），所以降级安装也不至于读不回库。 */
+    private static final int INDEX_VERSION = 3;
     private static final String INDEX_TMP_NAME = "index.json.tmp";
     /** 扫描版 PDF 单独一句口径：它不是"读出来正好是空"，是压根没有文字层。 */
     public static final String NO_TEXT_LAYER_MESSAGE = "这个 PDF 没有文字层（扫描版），请先转成可复制文字的 PDF";
     private static final long MAX_DOCUMENT_BYTES = 24L * 1024 * 1024;
     private static final long MAX_TOTAL_BYTES = 96L * 1024 * 1024;
     private static final int MAX_ENTRIES = 400;
+    /** 已知读不出正文层的链接最多记这么多条：一条 90 字节上下，300 条不到 30 KB，够几百轮用。 */
+    public static final int MAX_UNREADABLE = 300;
     private static final int MAX_NAME_CHARS = 120;
     private static final int MAX_TEXT_CHARS = 4 * 1024 * 1024;
 
     private final File directory;
     private final ArrayList<Entry> entries = new ArrayList<Entry>();
+    /** 已知读不出正文层的链接：{地址, 形状号, 记下时间}，与文档条目一起存进 index.json。 */
+    private final ArrayList<String[]> unreadableUrls = new ArrayList<String[]>();
     private boolean loaded;
 
     /** 只接 File：由调用方给出应用私有目录，本类不碰 Context。 */
@@ -138,10 +150,10 @@ public final class LocalLibrary {
                 return fail(result, "库里已有同一篇正文：" + known);
             }
         }
-        if (entries.size() >= MAX_ENTRIES) return fail(result, "自建库最多 " + MAX_ENTRIES + " 个文件");
+        if (entries.size() >= MAX_ENTRIES) return quotaFail(result, REASON_QUOTA, "自建库最多 " + MAX_ENTRIES + " 个文件");
         long total = 0L;
         for (int i = 0; i < entries.size(); i++) total += entries.get(i).bytes;
-        if (total + content.length > MAX_TOTAL_BYTES) return fail(result, "自建库容量已满（上限 96 MB）");
+        if (total + content.length > MAX_TOTAL_BYTES) return quotaFail(result, REASON_BYTES, "自建库容量已满（上限 96 MB）");
         if (!directory.isDirectory() && !directory.mkdirs()) return fail(result, "无法创建自建库目录");
         File target = place(uniqueName(safe));
         if (target == null) return fail(result, "文件名越出自建库目录");
@@ -171,6 +183,11 @@ public final class LocalLibrary {
         result.ok = true;
         result.name = entry.name;
         return result;
+    }
+
+    private static AddResult quotaFail(AddResult result, String reason, String error) {
+        result.reason = reason;
+        return fail(result, error);
     }
 
     private static AddResult fail(AddResult result, String error) {
@@ -212,6 +229,8 @@ public final class LocalLibrary {
             if (file != null && file.isFile()) file.delete();
         }
         entries.clear();
+        // 库都清了，"这条链接读不出字"也没必要再记着：用户大概正要换一批文件重看。
+        unreadableUrls.clear();
         persist();
     }
 
@@ -410,10 +429,11 @@ public final class LocalLibrary {
 
     // ---- index.json 持久化 ----
 
-    private void load() {
+    private synchronized void load() {
         if (loaded) return;
         loaded = true;
         entries.clear();
+        unreadableUrls.clear();
         File index = new File(directory, INDEX_NAME);
         if (index.isFile()) {
             try {
@@ -438,6 +458,7 @@ public final class LocalLibrary {
                         entries.add(entry);
                     }
                 }
+                parseUnreadable(ApiJson.path(root, "$.unreadable"));
                 return;
             } catch (Exception error) {
                 entries.clear();
@@ -471,6 +492,87 @@ public final class LocalLibrary {
         if (!entries.isEmpty()) persist();
     }
 
+    /**
+     * 这条链接是否已经知道读不出正文层（{@link PaperSources.UnreadableLedger}）。
+     * 账落在 index.json 的 unreadable 键里，跟着自建库一起存、一起被清空，不开第二份文件。
+     */
+    public synchronized boolean knownUnreadable(String url) {
+        return unreadableShapeOf(url) != null;
+    }
+
+    /** 记下的是哪一种"读不出"（pdf-unreadable / pdf-no-text-layer / not-a-pdf ...），没有记返回 null。 */
+    public synchronized String unreadableShapeOf(String url) {
+        load();
+        String wanted = url == null ? "" : url.trim();
+        if (wanted.isEmpty()) return null;
+        for (int i = 0; i < unreadableUrls.size(); i++) {
+            String[] row = unreadableUrls.get(i);
+            if (wanted.equals(row[0])) return row[1] == null ? "" : row[1];
+        }
+        return null;
+    }
+
+    public synchronized void rememberUnreadable(String url, String shape) {
+        load();
+        String wanted = url == null ? "" : url.trim();
+        if (wanted.isEmpty()) return;
+        String stamp = String.valueOf(System.currentTimeMillis());
+        for (int i = 0; i < unreadableUrls.size(); i++) {
+            if (wanted.equals(unreadableUrls.get(i)[0])) {
+                unreadableUrls.set(i, new String[]{wanted, shape == null ? "" : shape, stamp});
+                persist();
+                return;
+            }
+        }
+        unreadableUrls.add(new String[]{wanted, shape == null ? "" : shape, stamp});
+        while (unreadableUrls.size() > MAX_UNREADABLE) unreadableUrls.remove(0);
+        persist();
+    }
+
+    /** 记了几条：结果页与自检那一屏要说得出数。 */
+    public synchronized int unreadableCount() {
+        load();
+        return unreadableUrls.size();
+    }
+
+    private void parseUnreadable(Object list) {
+        unreadableUrls.clear();
+        if (!(list instanceof List)) return;
+        for (Object item : (List<?>) list) {
+            if (!(item instanceof Map)) continue;
+            Map<?, ?> map = (Map<?, ?>) item;
+            Object url = map.get("url");
+            if (!(url instanceof String) || ((String) url).trim().isEmpty()) continue;
+            Object shape = map.get("shape");
+            unreadableUrls.add(new String[]{((String) url).trim(), text(shape),
+                    String.valueOf((long) number(map.get("at")))});
+            if (unreadableUrls.size() >= MAX_UNREADABLE) break;
+        }
+    }
+
+    /** 名额是否用满：顺手抓正文要先问这一句才知道"抓回来存不存得下"。 */
+    public synchronized boolean capacityFull() {
+        load();
+        return entries.size() >= MAX_ENTRIES || usedBytes() >= MAX_TOTAL_BYTES;
+    }
+
+    private long usedBytes() {
+        long total = 0L;
+        for (int i = 0; i < entries.size(); i++) total += entries.get(i).bytes;
+        return total;
+    }
+
+    /** 自建库那一屏顶上的额度说明：几个数只在这里有一份出处。 */
+    public synchronized String capacityLine() {
+        load();
+        long megabytes = (usedBytes() + 1023L * 1024L) / (1024L * 1024L);
+        String out = "自建库 " + entries.size() + "/" + MAX_ENTRIES + " 个文件 · 已用 " + megabytes
+                + " MB / 96 MB";
+        if (entries.size() >= MAX_ENTRIES) return out + "（名额已满：新导入与顺手抓回的正文都存不进来，删掉几篇才能继续）";
+        if (usedBytes() >= MAX_TOTAL_BYTES) return out + "（容量已满：新导入与顺手抓回的正文都存不进来，删掉几篇才能继续）";
+        return out;
+    }
+
     private void persist() {
         if (!directory.isDirectory() && !directory.mkdirs()) return;
         StringBuilder out = new StringBuilder(96 + entries.size() * 96);
@@ -489,7 +591,21 @@ public final class LocalLibrary {
                 out.append(",\"material\":").append(ApiJson.quote(entry.material));
             out.append('}');
         }
-        out.append("]}");
+        // entries 这一数组先关上，再往外面接 unreadable：它们是两个平级的键。
+        out.append(']');
+        if (!unreadableUrls.isEmpty()) {
+            out.append(",\"unreadable\":[");
+            for (int i = 0; i < unreadableUrls.size(); i++) {
+                String[] row = unreadableUrls.get(i);
+                if (i > 0) out.append(',');
+                out.append("{\"url\":").append(ApiJson.quote(row[0]))
+                        .append(",\"shape\":").append(ApiJson.quote(row[1] == null ? "" : row[1]))
+                        .append(",\"at\":").append(row[2]);
+                out.append('}');
+            }
+            out.append(']');
+        }
+        out.append('}');
         writeIndex(out.toString());
     }
 

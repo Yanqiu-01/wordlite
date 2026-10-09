@@ -62,6 +62,9 @@ public final class EngineProbe {
      * <p>为什么能在手机上跑这一段：DuplicateEngine / TextCorpus / PaperSources / CorpusImport
      * 都没有 android 依赖，缺的只是 DocxParser，所以稿件以纯文本推进同一条 scan。
      */
+    /** 探针那份"读不出正文层"的链接账放这里：与 app 的自建库分开，重跑不受装机数据影响。 */
+    private static final String PROBE_LEDGER_DIR = "/data/local/tmp/wordlite-probe-library";
+
     private static void scanPass(String document, PaperSources.Limits limits) throws Exception {
         DocxDocument document2 = new DocxDocument();
         int index = 0;
@@ -78,6 +81,12 @@ public final class EngineProbe {
                 + " 段数=" + index + " 参数 per=" + limits.perEngine + " windows=" + limits.windows
                 + " fullTexts=" + limits.fullTexts + " timeout=" + limits.timeoutSeconds
                 + "s proxy=" + (limits.proxy.isEmpty() ? "(none)" : limits.proxy));
+        /* 已知"读不出正文层"的链接账本落在探针自己的目录里：不进 app 的自建库，
+           又能跨轮有效——同一条死链接在第二轮一次请求也不该再花。 */
+        if (limits.unreadable == null) {
+            limits.unreadable = new LocalLibrary(new java.io.File(PROBE_LEDGER_DIR));
+        }
+        System.out.println("LEDGER-before 已知读不出正文层的链接 " + limits.unreadable.unreadableCount() + " 条");
         TextCorpus corpus = new TextCorpus();
         long began = System.currentTimeMillis();
         DuplicateEngine.Report report = DuplicateEngine.scan(selection, corpus, true,
@@ -99,10 +108,13 @@ public final class EngineProbe {
                 + " 用时=" + (System.currentTimeMillis() - began) + "ms");
         /* 屏上那两句原话：比对材料清单（CorpusLedger）与顺手抓正文（autoFetchLine）。
            自建库这一档探针里没有——它不读手机上的自建库，所以正文可比篇数比 app 少一篇属正常。 */
+        System.out.println("LEDGER-after 已知读不出正文层的链接 " + limits.unreadable.unreadableCount()
+                + " 条 · 本轮按这条账跳过 " + report.autoPdfSkipped + " 篇");
         CorpusLedger ledger = CorpusLedger.aggregate(corpus);
         System.out.println("屏上比对材料行: " + ledger.summaryLine());
         String auto = DuplicateEngine.autoFetchLine(report.autoPdfTried, report.autoPdfFetched,
-                report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason, report.autoPdfShapes);
+                report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason, report.autoPdfShapes,
+                report.autoPdfSkipped);
         if (!auto.isEmpty()) System.out.println("屏上顺手抓正文行: " + auto);
         /* 顺手抓正文那几次落在哪条链接上、什么形状、几毫秒：留档最后那几行就是它。
            没有这几行，"没打通 N 篇"在探针里查不下去——下载那一屏同一批链接往往是通的。 */

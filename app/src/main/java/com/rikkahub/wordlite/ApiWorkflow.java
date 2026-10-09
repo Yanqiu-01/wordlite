@@ -255,6 +255,10 @@ public final class ApiWorkflow {
         /* 点了合并那一格、可 检索设置 里"联网"是关着的：这一轮实际只比了自建库。
            这事必须写在结果页上——不然用户以为查过了全网。 */
         webAskedOff = useWeb && !options.web && !aigcOnly;
+        /* 自建库名额或容量已经用满：这一轮顺手抓回的正文照旧拿来比对，只是存不进库。
+           这一句在点下查重的当场说，不等结果页那行注记——库满了还照旧往下面费请求，
+           事后才说等于让用户以为那几篇已经落进库。 */
+        if (wantWeb && options.autoPdf && library.capacityFull()) toast(library.capacityLine());
         worker = new Thread(() -> {
             try {
                 TextCorpus corpus = new TextCorpus();
@@ -269,6 +273,9 @@ public final class ApiWorkflow {
                 /* 检索设置里那个开关到得了检索循环：开着就用剩下的请求额度顺手抓几篇开放获取正文，
                    并按正文比对、落进自建库；关掉（或设成 0）就还是只在名次队那几篇上花全文额度。 */
                 limits.autoFullTexts = options.autoPdf ? options.autoPdfs : 0;
+                /* "这条链接以前抓到过文件、一个字都读不出"的账落在自建库那份 index.json 里：
+                   开着顺手抓的时候每一轮都往里记、每一轮都先查，跨轮有效，清空自建库一起忘掉。 */
+                limits.unreadable = library;
                 limits.coreKey = options.coreKey;
                 limits.proxy = options.proxy;
                 ArrayList<String> engines = new ArrayList<String>();
@@ -625,6 +632,7 @@ public final class ApiWorkflow {
                     }).setNegativeButton("取消", null).show());
             box.addView(row);
         }
+        box.addView(label(library.capacityLine(), 12));
         ScrollView scroll = new ScrollView(activity); scroll.addView(box);
         new AlertDialog.Builder(activity).setTitle("自建库（" + entries.size() + " 篇）")
                 .setView(scroll).setNegativeButton("关闭", null)
@@ -858,7 +866,7 @@ public final class ApiWorkflow {
         final CheckBox autoPdf = check("扫描时顺手抓开放获取全文：存进自建库并按正文比对"
                 + "（用剩下的检索请求额度）", engine.autoPdf);
         box.addView(autoPdf);
-        final EditText autoPdfs = field(String.valueOf(engine.autoPdfs), "顺手抓正文最多几篇（0-10，0 为关掉）");
+        final EditText autoPdfs = field(String.valueOf(engine.autoPdfs), "顺手抓正文最多几篇（0-10，0 为关掉）；用剩下的检索请求额度，自建库满了这一轮照样按正文比对、只是不入库");
         box.addView(autoPdfs);
         final EditText core = field(engine.coreKey, "CORE API Key（可留空）");
         final EditText proxy = field(engine.proxy, "HTTP 代理 host:port（海外检索源需经电脑代理时填写，可留空）");

@@ -235,8 +235,10 @@ public final class CorpusImportRegression {
         CorpusImport.Batch afterReopen = CorpusImport.run(reopened, listOf(source("又一份.txt", padded)), null);
         check(afterReopen.duplicates() == 1, "重开一个实例仍然判重复：哈希写在索引里，不在内存里");
         String index = new String(readAll(new File(libraryDir("clones"), "index.json")), "UTF-8");
-        check(index.indexOf("\"hash\"") >= 0 && index.indexOf("\"version\":2") >= 0,
-                "index.json 带上了 hash 且版本升到 2");
+        check(index.indexOf("\"hash\"") >= 0 && index.indexOf("\"version\":3") >= 0
+                        && index.indexOf("],\"unreadable\"") < 0,
+                "index.json 带上了 hash 且版本跟到 3：3 起多一本已知读不出正文层的链接，"
+                        + "两个键平级，入口处不许把它们写进同一个数组");
 
         LocalLibrary legacy = library("legacy-v1");
         byte[] legacyBody = "旧索引里那篇论文的正文内容需要长一些才不被丢掉。".getBytes("UTF-8");
@@ -248,8 +250,8 @@ public final class CorpusImportRegression {
         check(legacy.nameForHash(LocalLibrary.bodyHash(new String(legacyBody, "UTF-8"))).equals("旧论文.txt"),
                 "老索引缺的 hash 会按文件补算，旧文件一样挡重复");
         String upgraded = new String(readAll(new File(libraryDir("legacy-v1"), "index.json")), "UTF-8");
-        check(upgraded.indexOf("\"version\":2") >= 0 && upgraded.indexOf("\"hash\"") >= 0,
-                "补算之后顺手把索引写成版本 2");
+        check(upgraded.indexOf("\"version\":3") >= 0 && upgraded.indexOf("\"hash\"") >= 0,
+                "补算之后顺手把索引写成当前版本 3");
     }
     // ---- 扫描版：单独一档，零字符，不落盘 ----
 
@@ -358,7 +360,7 @@ public final class CorpusImportRegression {
         check(redo.duplicates() == 1, "重建出来的索引补算哈希，重复照样挡住");
         rebuilt.index(new TextCorpus());
         String rewritten = new String(readAll(new File(directory, "index.json")), "UTF-8");
-        check(ApiJson.parse(rewritten) != null && rewritten.indexOf("\"version\":2") >= 0,
+        check(ApiJson.parse(rewritten) != null && rewritten.indexOf("\"version\":3") >= 0,
                 "重建之后下一次写盘又是完整索引");
     }
     // ---- PDF 进了自建库之后，真的参与本机比对 ----

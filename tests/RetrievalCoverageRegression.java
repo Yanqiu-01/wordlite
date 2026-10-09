@@ -232,6 +232,12 @@ public final class RetrievalCoverageRegression {
             record("/fulltext");
             respond(exchange, 200, fullTextEmpty ? "" : FULL_TEXT_XML);
         });
+        /* 开放获取那一路真会撞到的一种东西：链接写着 .pdf，回来的是一页 HTML。
+           形状叫 not-a-pdf，重试一百次还是它——用来量“已知读不出来”那本账省掉的就是这一类。 */
+        server.createContext("/dead-link.pdf", exchange -> {
+            record("/dead-link.pdf");
+            respond(exchange, 200, "<html><body>just a landing page</body></html>");
+        });
         /* 恒 429 的源：验"补试一次"与"N 个源不可用"按源计而不是按次数计。 */
         server.createContext("/throttled", exchange -> {
             record("/throttled");
@@ -1147,27 +1153,34 @@ public final class RetrievalCoverageRegression {
                 "形状只跟在落空那半句后面");
         fullTextEmpty = false;
 
-        /* 五、检索把 120 次额度花光了：剩下的候选照实写"没来得及下"，并写明是被什么挡的。 */
+        /* 五、检索把自己那一份额度花光了：下载那一份照旧在，不再与检索抢同一个 120 次。
+           改前这一轮是检索花满 120 次、下载一篇也没排上；现在检索只花 110 次，剩 10 次归下载。 */
         resetFixtures();
         responseSize = 12;
         PaperSources.Limits tight = limits(12, 24);
         tight.autoFullTexts = 10;
         DuplicateEngine.Report drained = scan(thesis(200), new TextCorpus(), nine(), tight);
-        check(drained.asksSent == DuplicateEngine.MAX_REQUESTS,
-                "这一轮检索先把请求额度花光：" + drained.asksSent + "/" + DuplicateEngine.MAX_REQUESTS);
+        check(drained.downloadReserve == 10, "设了 10 篇就留 10 次：" + drained.downloadReserve);
+        check(drained.asksSent == DuplicateEngine.MAX_REQUESTS - drained.downloadReserve,
+                "检索这一路只花自己那一份：" + drained.asksSent + "/" + DuplicateEngine.MAX_REQUESTS);
         check(drained.asksSent + drained.autoPdfTried <= DuplicateEngine.MAX_REQUESTS,
-                "顺手抓正文与检索抢的是同一个 120 次，合计不许越过去："
-                        + drained.asksSent + "+" + drained.autoPdfTried);
-        check(drained.autoPdfLeft > 0 && notes(drained, "没来得及下（检索请求额度已用完）"),
-                "还有 " + drained.autoPdfLeft + " 篇挂着 PDF 没排上，注记里要写明是额度用完");
-        check(drained.autoPdfTried == 0, "额度见底之后一篇也不许多抓：" + drained.autoPdfTried);
+                "两笔合起来不许越过整轮 120 次：" + drained.asksSent + "+" + drained.autoPdfTried);
+        check(drained.autoPdfTried > 0 && drained.autoPdfTried <= drained.downloadReserve
+                        && drained.autoPdfLeft == 0,
+                "检索花光自己那一份之后，下载照旧拿到自己那一份、一篇也不超：试 "
+                        + drained.autoPdfTried + " 篇 / 留 " + drained.downloadReserve
+                        + " 次，没来得及 " + drained.autoPdfLeft + " 篇");
+        check(notes(drained, "已为顺手抓正文留下 10 次检索请求（检索这一路最多用 110 次）"),
+                "注记要写明留了几次、检索这一路上限变成多少");
+        check(!notes(drained, "没来得及下（检索请求额度已用完）"),
+                "下载不再与检索抢同一份额度，这一轮不该再喊额度用完");
 
         /* 六、抓回的正文要落进自建库。用户要的是"顺手抓进自建库"，不是这一轮在内存里比完就丢：
            下一轮检索即使那几家不再回正文，自建库里也还留着那几篇可比正文。 */
         check(got.autoBodies.size() == 3,
                 "抓成正文的三篇都留着正文本身交给自建库：" + got.autoBodies.size());
-        check(shut.autoBodies.isEmpty() && drained.autoBodies.isEmpty(),
-                "关掉开关与额度见底这两轮一篇也不许多存："
+        check(shut.autoBodies.isEmpty() && drained.autoBodies.size() == drained.autoPdfFetched,
+                "关掉开关的那轮一篇也不许多存；检索花光额度那轮存的就是抓成的那几篇："
                         + shut.autoBodies.size() + "/" + drained.autoBodies.size());
         LocalLibrary library = new LocalLibrary(freshLibraryDir("auto-fetch"));
         String stored = DuplicateEngine.fileAutoBodies(library, got);
@@ -1253,6 +1266,131 @@ public final class RetrievalCoverageRegression {
                 "source 给的 pdf 链接没后缀时仍换成下载口：" + ext.get(0).fullTextUrl);
         check(PaperSources.pdfLink(ext.get(0).fullTextUrl),
                 "换出来的那条走 PDF 那一路，不再走文本撞响应上限：" + ext.get(0).fullTextUrl);
+        resetFixtures();
+        crossrefSize = -1;
+    }
+
+    // ---- I 组：已知读不出正文层的链接不再花第二次请求 ----
+
+    /**
+     * 抓回来一个字段落都没有的链接，记在自建库那份索引里，往后每一轮先问这本账。
+     * 起因是真机 2.6.7-bucket5 那一轮 arxiv.org/2412.00155v2.pdf 被下了两遍（名次全文一遍、
+     * 顺手抓一遍），两次都是 pdf-unreadable，12 MB 与约 8 秒换回来一句"没字"。
+     * 这一组量三件事：哪些落空算链接本身的性质、账是不是真跨实例读得回、引擎那两条腿听不听这本账。
+     */
+    private static void deadLinkIsNotFetchedTwice() throws Exception {
+        /* 一、形状归类：文件拿到了却读不出字才算这条链接的死因；路不通不算——
+           429 与 403 下一轮换条路就通，把它们记进账里等于把整家源永久挡在门外。 */
+        check(PaperSources.unreadableShape("pdf-unreadable")
+                        && PaperSources.unreadableShape("pdf-no-text-layer")
+                        && PaperSources.unreadableShape("pdf-undecodable")
+                        && PaperSources.unreadableShape("pdf-no-text")
+                        && PaperSources.unreadableShape("not-a-pdf-capped"),
+                "文件本身读不出字的五种形状都算数（含 -capped 变体）");
+        check(!PaperSources.unreadableShape("fetch-failed")
+                        && !PaperSources.unreadableShape("throttled")
+                        && !PaperSources.unreadableShape("needs-entitlement")
+                        && !PaperSources.unreadableShape("pdf-body")
+                        && !PaperSources.unreadableShape(null),
+                "路不通与读得出字都不算这条链接的死因");
+
+        check(CorpusImport.Batch.shapeLabel("ledger-known-unreadable").contains("本机记着")
+                        && !CorpusImport.Batch.shapeLabel("ledger-known-unreadable").contains("没打通"),
+                "账本挡下来的那一次不许说成网络失败："
+                        + CorpusImport.Batch.shapeLabel("ledger-known-unreadable"));
+
+        /* 二、账落在自建库那份 index.json：换个实例读得回、形状读得回、同一家别的链接不被连坐，
+           清空自建库一起忘掉——不另开第二份存储文件。 */
+        resetFixtures();
+        String dead = base + "/dead-link.pdf";
+        File ledgerDir = freshLibraryDir("dead-link-ledger");
+        new LocalLibrary(ledgerDir).rememberUnreadable(dead, "not-a-pdf");
+        LocalLibrary reopened = new LocalLibrary(ledgerDir);
+        check(reopened.knownUnreadable(dead), "重新读一遍那份索引，这条链接还记着——跨轮有效");
+        check("not-a-pdf".equals(reopened.unreadableShapeOf(dead)),
+                "记下的形状读得回：" + reopened.unreadableShapeOf(dead));
+        check(!reopened.knownUnreadable(base + "/fulltext/tlp"), "别的链接不许被这一条连坐");
+        check(!reopened.knownUnreadable("") && !reopened.knownUnreadable(null), "空地址不算数");
+        check(reopened.unreadableCount() == 1, "同一条链接反复记也只占一格：" + reopened.unreadableCount());
+        reopened.rememberUnreadable(dead, "pdf-unreadable");
+        check(reopened.unreadableCount() == 1 && "pdf-unreadable".equals(reopened.unreadableShapeOf(dead)),
+                "同一链接换了落空形状是覆盖而不是记第二笔：" + reopened.unreadableShapeOf(dead));
+        reopened.clear();
+        check(!reopened.knownUnreadable(dead) && reopened.unreadableCount() == 0,
+                "清空自建库把这本账一起忘掉");
+
+        /* 三、抓到读不出字当场落账，第二次一个请求都不花。桩里那条 .pdf 回的是 HTML：
+           开头没有 %PDF-，形状是 not-a-pdf。 */
+        resetFixtures();
+        LocalLibrary live = new LocalLibrary(freshLibraryDir("dead-link-fetch"));
+        PaperSources.Limits once = limits(12, 4);
+        once.unreadable = live;
+        PaperSources.Candidate candidate = new PaperSources.Candidate();
+        candidate.source.engine = "crossref";
+        candidate.fullTextUrl = dead;
+        check(PaperSources.fullText(candidate, once, null).isEmpty(), "挂羊头卖狗肉的 .pdf 链接回空正文");
+        check(hits("/dead-link.pdf") == 1, "第一次照旧花一次请求：" + hits("/dead-link.pdf"));
+        check(live.unreadableCount() == 1 && "not-a-pdf".equals(live.unreadableShapeOf(dead)),
+                "读不出字当场落账：" + live.unreadableCount() + " " + live.unreadableShapeOf(dead));
+        check(PaperSources.fullText(candidate, once, null).isEmpty(), "第二次照旧回空正文");
+        check(hits("/dead-link.pdf") == 1,
+                "第二次一次请求也不许多花：" + hits("/dead-link.pdf"));
+        PaperSources.Limits blind = limits(12, 4);
+        int blindBefore = hits("/dead-link.pdf");
+        check(PaperSources.fullText(candidate, blind, null).isEmpty()
+                        && hits("/dead-link.pdf") == blindBefore + 1,
+                "没挂账本的调用路径照旧自己去抓一次，行为与改前一字不差");
+
+        /* 四、引擎那两条腿一起让路：记在账上那条既拿不到名次队那一次全文，也不占顺手抓的篇数；
+           省下来的篇数照旧给了别家候选，注记里说清跳了几篇。 */
+        resetFixtures();
+        crossrefSize = 1;
+        responseSize = 12;
+        LocalLibrary seeded = new LocalLibrary(freshLibraryDir("dead-link-engine"));
+        seeded.rememberUnreadable(base + "/fulltext/tlp", "pdf-unreadable");
+        PaperSources.Limits ledgered = limits(12, 4);
+        ledgered.fullTexts = 1;
+        ledgered.autoFullTexts = 3;
+        ledgered.unreadable = seeded;
+        DuplicateEngine.Report skipped = scan(thesis(3), new TextCorpus(),
+                engines("crossref", "openalex", "semantic-scholar", "europepmc"), ledgered);
+        check(skipped.autoPdfSkipped == 1,
+                "记在账上那一条被两条腿一起跳过：跳过 " + skipped.autoPdfSkipped + " 篇");
+        check(hits("/fulltext") == 0, "死链接那一条一次全文请求都没花：" + hits("/fulltext"));
+        check(hits("/europepmc/fulltext") == 3,
+                "省下来的三次篇数照旧给了别家的链接：" + hits("/europepmc/fulltext"));
+        check(skipped.autoPdfTried == 3 && skipped.autoPdfFetched == 3,
+                "顺手抓的篇数一篇没少：试 " + skipped.autoPdfTried + " 抓成 " + skipped.autoPdfFetched);
+        check(notes(skipped, "另有 1 篇本机记着读不出正文层，这一轮没再花请求"),
+                "注记里要说清跳了几篇、为什么没花请求");
+        check(notes(skipped, "已为顺手抓正文留下 3 次检索请求（检索这一路最多用 117 次）"),
+                "给下载留的那份份额要写在注记里，检索这一路实际能用几次当场读得出");
+
+        /* 五、自建库名额用满：入库回执带原因号，存库那一句改成"这一轮照样按正文比对过、只是没落盘"，
+           并给出下一步（删掉几篇就能继续存），不许静默丢。 */
+        resetFixtures();
+        LocalLibrary stuffed = new LocalLibrary(freshLibraryDir("library-quota"));
+        boolean quotaHit = false;
+        String quotaError = "";
+        for (int i = 0; i < 420 && !quotaHit; i++) {
+            LocalLibrary.AddResult filled = stuffed.addDocument("fill-" + i + ".txt",
+                    ("第 " + i + " 篇填充正文，讲多孔铜中间层钎焊界面组织演变，编号 " + i + "。")
+                            .getBytes(StandardCharsets.UTF_8), "", true);
+            quotaHit = LocalLibrary.REASON_QUOTA.equals(filled.reason);
+            if (quotaHit) quotaError = filled.error;
+        }
+        check(quotaHit && stuffed.capacityFull(),
+                "装满之后入库回执带 quota-full：" + stuffed.size() + " 篇 " + quotaError);
+        check(stuffed.capacityLine().contains("名额已满"),
+                "自建库那一屏那句额度说明要说满：" + stuffed.capacityLine());
+        DuplicateEngine.Report overflow = new DuplicateEngine.Report();
+        overflow.autoBodies.add(new DuplicateEngine.AutoBody("装满之后的下一篇", "arxiv",
+                FULL_TEXT_PROBE + "库里没有的这一篇讲保温时间对厚度的影响，用来验额度满时怎么说。"));
+        String overflowLine = DuplicateEngine.fileAutoBodies(stuffed, overflow);
+        check(overflowLine.contains("自建库额度已满") && overflowLine.contains("已按正文比对过"),
+                "库满那一句要说清这一轮照样比对过、只是没落盘，并给出下一步：" + overflowLine);
+        check(!DuplicateEngine.autoStoreLine(0, 0, 2, "入库时出错", 3, false).contains("额度已满"),
+                "普通落空不许冒充额度满");
         resetFixtures();
         crossrefSize = -1;
     }
@@ -1496,6 +1634,7 @@ public final class RetrievalCoverageRegression {
             timeCeiling();
             rankedIntake();
             autoFullTextFetch();
+            deadLinkIsNotFetchedTwice();
             midWindowHitEntersCorpus();
             corpusCeiling();
             throttleCountsBySource();

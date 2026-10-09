@@ -24,6 +24,12 @@ public final class DuplicateEngine {
      * 6 次额度期望只有 2 篇可比正文，10 次才够 3-4 篇。代价是流量：一轮实测见 docs/retrieval-recall.md。
      */
     static final int MAX_REQUESTS = 120, MAX_FULL_TEXTS = 10, MAX_CORPUS_PAPERS = 120, MAX_NOTES = 40;
+    /**
+     * 给"顺手抓正文"留份额之后，检索这一路至少要留多少次提问。
+     * 49 扇窗每扇至少问一次只要 49 次，这条线留的是余量：就算有人把篇数上限拉到 10，
+     * 也不可能把检索挤到"每扇窗都问不到一家"那一步。
+     */
+    static final int MIN_SEARCH_REQUESTS = 80;
     /** 分档命中那一格的名字。它不是第四个比率，只是把分子按材料档拆开说一遍。 */
     public static final String MATERIAL_SPLIT_LABEL = "命中材料分档";
     /** 报告里列几条"可以下进自建库"的候选：再多那一屏就没人看了。 */
@@ -179,6 +185,8 @@ public final class DuplicateEngine {
         public int asksPlanned;
         /** 本轮可用的请求额度，与"每家最多问几扇"的上限（取自设置里的窗口数）。 */
         public int windowsBudget, perSourceWindowCap;
+        /** 本轮从请求额度里划给正文下载的次数（0 = 没开那一档），注记与报告共用这一个数。 */
+        public int downloadReserve;
         /** 真问出去的提问次数，与排期打算发的次数排在一起看：撞了挂钟时前者小于后者。 */
         public int asksSent;
         /** 停问的源退回来的提问格子数，与其中真被别家补问掉的那些：报告里那句补问读这两个数。 */
@@ -255,6 +263,11 @@ public final class DuplicateEngine {
          * autoPdfTried 与 autoPdfLeft 都是零，说明这一轮没开这个开关。
          */
         public int autoPdfTried, autoPdfFetched, autoPdfFailed, autoPdfLeft;
+        /**
+         * 这一轮跳过的"本机已经知道读不出正文层"的链接有几篇。跨轮记在自建库那份索引里，
+         * 一次请求也不花——同一条 6 MB 的死链接不再一轮下两遍。
+         */
+        public int autoPdfSkipped;
         /** autoPdfLeft 那几个字到底是被什么挡住的："检索请求额度已用完"或"检索时间已用满"。 */
         public String autoPdfReason = "";
         /** 落空那几篇的形状（"扫描版无文字层 2 篇、回来的不是 PDF 1 篇"）：同一句注记的补充。 */
@@ -409,7 +422,17 @@ public final class DuplicateEngine {
 
     public static String autoFetchLine(int tried, int got, int failed, int left, String reason,
                                        String shapes) {
-        if (tried <= 0 && left <= 0) return "";
+        return autoFetchLine(tried, got, failed, left, reason, shapes, 0);
+    }
+
+    /** 加上"跳过几篇已知读不出字的链接"那一笔：只有真跳过才多这一句。 */
+    public static String autoFetchLine(int tried, int got, int failed, int left, String reason,
+                                       String shapes, int skipped) {
+        if (tried <= 0 && left <= 0 && skipped <= 0) return "";
+        if (tried <= 0 && left <= 0) {
+            return "本轮顺手抓正文跳过了 " + skipped
+                    + " 篇此前读不出正文层的链接（自建库索引里记着，清空自建库就忘掉）";
+        }
         StringBuilder out = new StringBuilder(AUTO_FETCH_PREFIX).append(tried)
                 .append(" 篇开放获取全文，").append(got).append(" 篇已按正文比对");
         if (failed > 0) {
@@ -420,6 +443,8 @@ public final class DuplicateEngine {
             out.append("，还有 ").append(left).append(" 篇没来得及下");
             if (reason != null && !reason.isEmpty()) out.append("（").append(reason).append("）");
         }
+        if (skipped > 0)
+            out.append("；另有 ").append(skipped).append(" 篇本机记着读不出正文层，这一轮没再花请求");
         return out.toString();
     }
 
@@ -432,6 +457,7 @@ public final class DuplicateEngine {
         if (library == null || report == null || report.autoBodies.isEmpty()) return "";
         int stored = 0, duplicates = 0, failed = 0;
         String firstError = "";
+        boolean quotaFull = false;
         for (int i = 0; i < report.autoBodies.size(); i++) {
             AutoBody body = report.autoBodies.get(i);
             String title = body.title.trim();
@@ -448,19 +474,38 @@ public final class DuplicateEngine {
             else if (added != null && !added.duplicateOf.isEmpty()) duplicates++;
             else {
                 failed++;
+                quotaFull = quotaFull || LocalLibrary.REASON_QUOTA.equals(added == null ? "" : added.reason)
+                        || LocalLibrary.REASON_BYTES.equals(added == null ? "" : added.reason);
                 if (firstError.isEmpty())
                     firstError = added == null ? "入库时出错" : added.error;
             }
         }
-        String line = autoStoreLine(stored, duplicates, failed, firstError, library.size());
+        String line = autoStoreLine(stored, duplicates, failed, firstError, library.size(), quotaFull);
         if (!line.isEmpty()) noteAfter(report, AUTO_FETCH_PREFIX, line);
         return line;
     }
 
     /** 存库那一句的唯一写法：一篇没存、一篇没挡就不开口，报告里不留一句空话。 */
     static String autoStoreLine(int stored, int duplicates, int failed, String firstError, int librarySize) {
+        return autoStoreLine(stored, duplicates, failed, firstError, librarySize, false);
+    }
+
+    /**
+     * 存库那一句的写法。自建库额度用满单独一句：那几篇**这一轮照样按正文比对过了**，只是没存进库——
+     * 两件事不许并成一句"没存进去"。用户要看的是下一步做什么（删掉几篇就能继续存）。
+     */
+    static String autoStoreLine(int stored, int duplicates, int failed, String firstError, int librarySize,
+                                boolean quotaFull) {
         if (stored <= 0 && duplicates <= 0 && failed <= 0) return "";
         StringBuilder out = new StringBuilder();
+        if (quotaFull && failed > 0) {
+            noteTail(out, failed + " 篇没存进自建库——自建库额度已满（" + firstError
+                    + "）：这一轮它们已按正文比对过，只是没落盘，删掉几篇就能存进来");
+            if (stored > 0)
+                noteTail(out, stored + " 篇已存进自建库（现在 " + librarySize + " 篇，可在自建库里删掉）");
+            if (duplicates > 0) noteTail(out, "另有 " + duplicates + " 篇库里已有同一正文，没有重复入库");
+            return out.toString();
+        }
         if (stored > 0) noteTail(out, "顺手抓回的正文已存进自建库 " + stored
                 + " 篇（自建库现在 " + librarySize + " 篇，可在自建库里删掉）");
         if (duplicates > 0) noteTail(out, "另有 " + duplicates + " 篇库里已有同一正文，没有重复入库");
@@ -1115,11 +1160,20 @@ public final class DuplicateEngine {
         /* 每源上限仍然取自设置里那个数，并且像以前一样截到 MAX_WINDOWS：超出去的那一截花的是同一份 120 次额度，
            而报告里那句"把窗口数调到 24 可扩大覆盖"也只有在这里真的截了才不至于说假话。 */
         int windowCap = Math.min(MAX_WINDOWS, Math.max(1, limits.windows));
-        Allocation budget = allocate(plan.chinese, plan.chars, probeCounts, engines, windowCap, MAX_REQUESTS,
+        /* 顺手抓正文的份额：先从 120 次里给它留下几篇的量，检索用剩下的排窗口。
+           这一档不改变"排得上几扇窗"——同一份稿子在 tools/coverage-budget-probe.ps1 的 plan 档量过：
+           九个源、每源上限 12、额度 120 排满 49/49 扇（19967 字，每窗 2-3 家），
+           额度压到 60 仍是 49/49 扇（每窗 1-2 家），所以留 6-10 次买不回窗口，只是把
+           "每窗多问一家"那一层削薄一点，换回来的是几篇真能读字的正文。 */
+        int downloadReserve = limits.autoFullTexts > 0
+                ? Math.min(MAX_AUTO_FULL_TEXTS, Math.max(0, limits.autoFullTexts)) : 0;
+        int searchBudget = Math.max(MIN_SEARCH_REQUESTS, MAX_REQUESTS - downloadReserve);
+        report.downloadReserve = downloadReserve;
+        Allocation budget = allocate(plan.chinese, plan.chars, probeCounts, engines, windowCap, searchBudget,
                 orphanLayer);
         report.windowsPlanned = budget.windowsPlanned;
         report.asksPlanned = budget.asks.size();
-        report.windowsBudget = MAX_REQUESTS;
+        report.windowsBudget = searchBudget;
         report.perSourceWindowCap = windowCap;
         report.windowsUnstaffed = budget.unstaffed;
         report.budgetCapped = budget.cappedByRequests;
@@ -1221,6 +1275,13 @@ public final class DuplicateEngine {
      * 自己落了几行"——落过就不再补一行 error，没落过（连接压根没建成那一类）才补，
      * 一档一次请求一行，不多不少。
      */
+    /** 这条候选的全文链接是不是本机已经知道读不出正文层（账在自建库那份 index.json 里）。 */
+    private static boolean knownUnreadable(PaperSources.Limits limits, PaperSources.Candidate candidate) {
+        if (limits == null || limits.unreadable == null || candidate == null) return false;
+        String url = candidate.fullTextUrl == null ? "" : candidate.fullTextUrl.trim();
+        return !url.isEmpty() && limits.unreadable.knownUnreadable(url);
+    }
+
     private static final class ShapeLedger implements PaperSources.ShapeSink {
         private final Report report; private final Object lock = new Object();
         private final LinkedHashMap<Long, Integer> byThread = new LinkedHashMap<Long, Integer>();
@@ -1722,7 +1783,7 @@ public final class DuplicateEngine {
            它每次抓之前要从 sweep 那份请求额度里领一次——领不到就是与检索抢同一个 120 次抢输了，
            照实写"还有几篇没来得及下"，不许假装这一轮没这事。 */
         int autoCap = sweep == null ? 0 : Math.min(MAX_AUTO_FULL_TEXTS, Math.max(0, limits.autoFullTexts));
-        int autoTried = 0, autoGot = 0, autoFailed = 0, autoLeft = 0;
+        int autoTried = 0, autoGot = 0, autoFailed = 0, autoLeft = 0, autoSkipped = 0;
         String autoOut = "";
         LinkedHashMap<String, Integer> autoShapes = new LinkedHashMap<String, Integer>();
         /** 逐家记落空：哪一家的链接这一轮已经连着读不出正文层，它的剩下的篇数就不再问。 */
@@ -1743,14 +1804,19 @@ public final class DuplicateEngine {
             String body = candidate.abstractText == null ? "" : candidate.abstractText;
             boolean fetched = false;
             /* 全文抓取是整轮里最贵的一步：每次抓之前都要重新看一眼取消与挂钟。 */
-            if (pick.fetchFullText && !cancelled(cancellation)
+            /* 本机记过"这条链接读到过文件、一个字都出不来"的，两条腿都不再花请求。
+               真机 2.6.7-bucket5 那一轮 arxiv.org/2412.00155v2.pdf 被下了两遍（名次那一档一遍、
+               顺手抓那一档一遍），两次都是 pdf-unreadable，12 MB 与约 8 秒换来的是一句"没字"。 */
+            boolean knownDead = knownUnreadable(limits, candidate);
+            if (knownDead) autoSkipped++;
+            if (pick.fetchFullText && !knownDead && !cancelled(cancellation)
                     && deadline - System.currentTimeMillis() > limits.timeoutSeconds * 1000L + 1000L) {
                 try {
                     String got = PaperSources.fullText(candidate, limits, cancellation);
                     if (got != null && !got.trim().isEmpty()) { body = body.isEmpty() ? got : body + "\n" + got; fetched = true; }
                 } catch (IOException error) { note(report, "全文抓取失败，改用摘要比对：" + message(error)); }
             }
-            if (autoCap > 0 && !fetched && !cancelled(cancellation)
+            if (autoCap > 0 && !fetched && !knownDead && !cancelled(cancellation)
                     && PaperSources.pdfUrlRank(candidate.fullTextUrl) <= 2) {
                 if (autoTried >= autoCap) {
                     /* 用户自己设的篇数到了：这一篇照旧进"可下进自建库"那张表，不算没来得及。 */
@@ -1774,7 +1840,11 @@ public final class DuplicateEngine {
                            是两回事，前者是这一轮的运气，后者是这一路的链接本身就不对。 */
                         String engine = autoEngine(candidate);
                         autoMisses.put(engine, Integer.valueOf(count(autoMisses, engine) + 1));
-                        String shape = CorpusImport.Batch.shapeLabel(sweep.shapes.lastShapeSince(shapeRow));
+                        /* 名次那一档已经把这条链接记进账里的，这一次连一个字节都没走：形状不能再用网络那一把尺量，
+                           否则屏上会出现一句"没说原因"的落空，而它根本没有发生过。 */
+                        String shape = knownUnreadable(limits, candidate)
+                                ? CorpusImport.Batch.shapeLabel("ledger-known-unreadable")
+                                : CorpusImport.Batch.shapeLabel(sweep.shapes.lastShapeSince(shapeRow));
                         autoShapes.put(shape, Integer.valueOf(count(autoShapes, shape) + 1));
                     }
                     if (got != null && !got.trim().isEmpty()) {
@@ -1808,6 +1878,7 @@ public final class DuplicateEngine {
                 report.downloadables.add(new Downloadable(candidate.source.title,
                         candidate.source.engine, pick.candidate.fullTextUrl.trim()));
         }
+        report.autoPdfSkipped = autoSkipped;
         report.autoPdfTried = autoTried;
         report.autoPdfFetched = autoGot;
         report.autoPdfFailed = autoFailed;
@@ -1857,6 +1928,9 @@ public final class DuplicateEngine {
             note(report, "检索中途有 " + report.asksSpilled + " 次提问被停问的检索源退回，其中 "
                     + report.asksRefilled + " 次改由其他检索源补问"
                     + (report.asksRefilled == report.asksSpilled ? "" : "，剩下的没问上"));
+        if (report.downloadReserve > 0)
+            note(report, "已为顺手抓正文留下 " + report.downloadReserve + " 次检索请求（检索这一路最多用 "
+                    + (MAX_REQUESTS - report.downloadReserve) + " 次）");
         String gate = "";
         if (requestCap) {
             note(report, "检索请求已达上限 " + MAX_REQUESTS + " 次，剩余 " + left + " 个检索窗口未检索");
@@ -1919,10 +1993,10 @@ public final class DuplicateEngine {
             if (count(report.candidateCount, engine) > 0) chinese++;
         if (chinese > 0 && report.fullTextCandidates == 0)
             note(report, "知网、万方、维普只回摘要，正文与图表无法比对，相似率是下限");
-        if (report.autoPdfTried > 0 || report.autoPdfLeft > 0)
+        if (report.autoPdfTried > 0 || report.autoPdfLeft > 0 || report.autoPdfSkipped > 0)
             note(report, autoFetchLine(report.autoPdfTried, report.autoPdfFetched,
                     report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason,
-                    report.autoPdfShapes));
+                    report.autoPdfShapes, report.autoPdfSkipped));
         if (!report.downloadables.isEmpty())
             note(report, "另有 " + report.downloadables.size() + " 篇候选挂着可直接下载的开放获取 PDF，"
                     + "结果页可一键下进自建库（自建库按正文比对，不按摘要）");

@@ -190,6 +190,8 @@ public final class CorpusImport {
             if (value.equals("binary-body") || value.startsWith("text-binary")) return "回来的是二进制";
             if (value.equals("no-response")) return "没等到回话";
             if (value.equals("pdf-encrypted")) return "PDF 已加密";
+            // 账本挡下来的那一次连一个字节都没走，不许说成网络上的失败。
+            if (value.equals("ledger-known-unreadable")) return "本机记着这条读不出字";
             return "没说原因";
         }
 

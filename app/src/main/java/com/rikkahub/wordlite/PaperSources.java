@@ -41,6 +41,13 @@ public final class PaperSources {
          * 回调在发请求的那条泳道线程上原地发生，实现方自己负责同步。
          */
         public ShapeSink shapes;
+        /**
+         * "已知读不出正文层的链接"账本（LocalLibrary 实现）。null = 不记也不跳过。
+         * 抓之前先问一句、抓到读不出字的形状就记一笔，省得同一条 6 MB 的死链接在一轮里下两遍
+         * ——真机 2.6.7-bucket5 那一轮 arxiv.org/2412.00155v2.pdf 就被下了两次，
+         * 两次都是 pdf-unreadable，白烧 12 MB 与约 8 秒。
+         */
+        public UnreadableLedger unreadable;
 
         /**
          * 复制一份本轮要用的额度与出口。检索这一轮不想往调用方递进来的 Limits 上挂本轮的留档出口
@@ -58,9 +65,23 @@ public final class PaperSources {
             out.coreKey = coreKey;
             out.proxy = proxy;
             out.shapes = shapes;
+            out.unreadable = unreadable;
             return out;
         }
     }
+    /**
+     * "这条链接以前抓到过文件、可是一个字都读不出"的账本。引擎只认这一个接口，落盘归 LocalLibrary
+     * （跟着自建库那份 index.json 走，不开第二份存储）。
+     * <p>记的是**这一条链接**而不是"这一家又坏了"：真机那一轮 arXiv 的 11 条链接里 8 条解出
+     * 7,664-56,179 字，坏的是个别链接，按家停手会把好的那 8 条一起挡在门外。
+     */
+    public interface UnreadableLedger {
+        /** 这条链接是不是已经知道读不出字。 */
+        boolean knownUnreadable(String url);
+        /** 这一条又读不出字，把形状号一起记下（pdf-unreadable / pdf-no-text-layer / not-a-pdf ...）。 */
+        void rememberUnreadable(String url, String shape);
+    }
+
     static final int MAX_TEXT = 64 * 1024, MAX_AUTHORS = 6;
     /**
      * 一次检索请求的响应留档（A4）。三个数各说一件事，谁也不许替谁下结论：
@@ -617,9 +638,14 @@ public final class PaperSources {
         String engine = candidate.source == null || candidate.source.engine == null ? "" : candidate.source.engine;
         /* .pdf 结尾的链接以前是直接丢掉的，而 app 自己有 PDF 解析：开放获取源给的正文十有七八就是 .pdf，
            丢掉它等于把唯一能拿到中文正文的一路堵死。现在交给 PdfFile 解，解不出才回空。 */
+        UnreadableLedger ledger = limits == null ? null : limits.unreadable;
         if (pdfLink(url)) {
+            /* 已经知道这条读不出字的，一次请求也不花：这类链接不是"这会儿不通"，是文件本身
+               没有文字层 / 字体映射不出 / 挂羊头卖狗肉不是 PDF，重试一百次回的还是那 6 MB。 */
+            if (ledger != null && ledger.knownUnreadable(url)) return "";
             PdfFetch got = fetchPdf(url, limits, cancellation);
             recordFetch(limits, engine, url, got);
+            if (ledger != null && unreadableShape(got.shape)) ledger.rememberUnreadable(url, got.shape);
             return got.text;
         }
         try {
@@ -763,6 +789,20 @@ public final class PaperSources {
      * 这个链接是不是真给 PDF。除了 .pdf 结尾，还认期刊 CMS 那几个下载口
      * （机械工程学报的 downloadArticleFile.do?attachType=PDF&id=27657 就是这一类）。
      */
+    /**
+     * 哪些形状算"这条链接读不出正文层"：文件是拿到了，可字出不来。只认这五种（含 -capped 变体）——
+     * 网络层的 fetch-failed / throttled / needs-entitlement 一律不算，那些是"这会儿这条路不通"，
+     * 下一轮换条路就通；而这五种是文件本身的性质，同一个链接重试多少次都是它。
+     */
+    static boolean unreadableShape(String shape) {
+        String value = shape == null ? "" : shape.trim();
+        int cut = value.indexOf("-capped");
+        if (cut >= 0) value = value.substring(0, cut);
+        return value.equals("pdf-unreadable") || value.equals("pdf-no-text-layer")
+                || value.equals("pdf-no-text") || value.equals("pdf-undecodable")
+                || value.equals("not-a-pdf");
+    }
+
     static boolean pdfLink(String url) {
         String value = url == null ? "" : url.trim().toLowerCase(Locale.ROOT);
         if (value.isEmpty()) return false;
