@@ -108,7 +108,9 @@ function Ensure-Reverse([int]$number) {
         Invoke-Adb @("reverse", "tcp:8191", "tcp:8191") | Out-Null
         Write-Host "  手机 127.0.0.1:8191 -> 电脑 127.0.0.1:8191（过验证服务）" -ForegroundColor Cyan
     } else {
-        Write-Host "  电脑 127.0.0.1:8191 没在监听：没开 FlareSolverr。应用里那一格留空即可，撞到人机验证就按摘要比" -ForegroundColor Yellow
+        Write-Host "  电脑 127.0.0.1:8191 没在监听：应用里那一格留空也找不到过验证服务，撞到人机验证就按摘要比" -ForegroundColor Yellow
+        Write-Host "  用 Docker 跑的话端口要发出来才有监听（docker port flaresolverr 空着就是没发）：" -ForegroundColor Yellow
+        Write-Host "    docker run -d --name flaresolverr --restart unless-stopped -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest" -ForegroundColor DarkGray
     }
 }
 
