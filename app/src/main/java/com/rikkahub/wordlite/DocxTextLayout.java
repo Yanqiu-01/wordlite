@@ -772,6 +772,7 @@ public final class DocxTextLayout {
         if (cursor < value.length()) apply(text, cursor, value.length(), paragraph.baseRunStyle, pxPerPoint);
         for (DocxDocument.RangeStyle rs : paragraph.editedStyles)
             if (rs.end > rs.start && rs.start >= 0 && rs.end <= text.length()) apply(text, rs.start, rs.end, rs.style, pxPerPoint);
+        mergeScriptsIntoTokens(text);
         applyTabLeaders(text, paragraph, pxPerPoint);
         return text;
     }
@@ -800,6 +801,7 @@ public final class DocxTextLayout {
                 start = i;
             }
         }
+        mergeScriptsIntoTokens(text);
         applyTabLeaders(text, paragraph, PageGeometry.points(1f));
         return text;
     }
@@ -986,8 +988,14 @@ public final class DocxTextLayout {
                         : Math.max(1, Math.round(span.getSize() / pxPerPoint * 2));
         }
         for (WordScriptSpan span : text.getSpans(offset, end, WordScriptSpan.class)) {
+            // A token container covers the base characters of the word as well; they keep the style
+            // their own run carries, and only the offsets inside the script part answer as a script.
+            if (span instanceof ScriptTokenSpan && !((ScriptTokenSpan) span).isScriptAt(text, offset))
+                continue;
             if (!span.isUnicode()) {
-                s.superscript = span.isSuperscript(); s.subscript = span.isSubscript();
+                s.superscript = span instanceof ScriptTokenSpan
+                        ? ((ScriptTokenSpan) span).isSuperscriptAt(text, offset) : span.isSuperscript();
+                s.subscript = !s.superscript;
                 s.superscriptSet = s.subscriptSet = true;
                 if (sizes.length == 0) s.fontSizeHalfPoints = span.baseHalfPoints();
             }
@@ -1046,6 +1054,7 @@ public final class DocxTextLayout {
         }
         for (int i = 0; i < styles.size(); i++)
             apply(text, starts.get(i), ends.get(i), styles.get(i), pxPerPoint);
+        mergeScriptsIntoTokens(text);
     }
 
     private static boolean isComplexScript(char c) {
@@ -1103,7 +1112,7 @@ public final class DocxTextLayout {
     }
 
     /** Script width, size and baseline use the selected font's OS/2 metrics. */
-    public static final class WordScriptSpan extends ReplacementSpan {
+    public static class WordScriptSpan extends ReplacementSpan {
         private final boolean superscript;
         private final int baseHalfPoints;
         private final float pxPerPoint;
@@ -1168,6 +1177,454 @@ public final class DocxTextLayout {
         }
     }
 
+    /**
+     * One span for a whole Latin or digit token that carries a script inside it.
+     *
+     * Word ends no line in the middle of such a token, while the platform hands its line breaker
+     * every ReplacementSpan edge as a break opportunity. A w:vertAlign run inside a token therefore
+     * put two forbidden edges inside one word: measured on the phone, "Ag3Sn" with a span over the
+     * "3" broke at a 32 px and again at a 33 px column, the same five characters under ONE span
+     * broke at no width at all, and a container that left the script span attached broke as well
+     * (tools/breakiterator-probe.ps1 -Probe ScriptBreakProbe). Page 19 of input-liu.docx read
+     * "、孔洞率、Ag3" | "Sn分布" while Word's own exported PDF cuts a run on none of its 803 lines.
+     * So the script spans move INTO this container and the breaker keeps only the two edges Word
+     * itself may break at.
+     *
+     * Both of Word's accountings survive the merge: the row is still billed for the base face only
+     * -- a vertAlign run never lifts the line, and getSize hands back the base font metrics -- and
+     * the token is measured once, with a single ceil over its whole width instead of one ceil per
+     * script run. Those extra ceils cost a fifth of a pixel per citation on top of Word's own
+     * advance (tools/superscript-attribution.py over the 35 usable script lines of the thesis).
+     */
+    public static final class ScriptTokenSpan extends WordScriptSpan {
+        /** End of every part relative to the token's first character; the last is its length. */
+        private final int[] partEnd;
+        /** A w:vertAlign part: measured and drawn at the OS/2 script size, off the baseline. */
+        private final boolean[] script;
+        private final boolean[] superscript;
+        /** The face each script part takes its OS/2 numbers from; unused on a plain part. */
+        private final String[] partFamily;
+        private final int tokenLength;
+
+        ScriptTokenSpan(int[] partEnd, boolean[] script, boolean[] superscript, String[] partFamily,
+                        String baseFamily, int baseHalfPoints, float pxPerPoint, boolean unicodeOnly) {
+            super(firstScriptIsSuper(script, superscript), baseHalfPoints, pxPerPoint,
+                    baseFamily, unicodeOnly, 0);
+            this.partEnd = partEnd;
+            this.script = script;
+            this.superscript = superscript;
+            this.partFamily = partFamily;
+            this.tokenLength = partEnd[partEnd.length - 1];
+        }
+
+        private static boolean firstScriptIsSuper(boolean[] script, boolean[] superscript) {
+            for (int i = 0; i < script.length; i++) if (script[i]) return superscript[i];
+            return false;
+        }
+
+        /** How many characters this one container owns. */
+        public int tokenLength() { return tokenLength; }
+
+        /**
+         * Is this offset the script part of the token? The plain characters of the token answer
+         * false, so styleAt keeps answering for them from the RunStyleMarker the way it did while
+         * the script span covered only the middle of the word.
+         */
+        public boolean isScriptAt(CharSequence text, int offset) {
+            int part = partAt(offset - tokenStart(text));
+            return part >= 0 && script[part];
+        }
+
+        /** Which way the script part at this offset runs; only meaningful under isScriptAt. */
+        public boolean isSuperscriptAt(CharSequence text, int offset) {
+            int part = partAt(offset - tokenStart(text));
+            return part >= 0 && superscript[part];
+        }
+
+        private int partAt(int relative) {
+            if (relative < 0) return -1;
+            for (int i = 0; i < partEnd.length; i++) if (relative < partEnd[i]) return i;
+            return -1;
+        }
+
+        /**
+         * Where the container sits in this text. A container that is not attached to it falls back
+         * to index 0, which is the one thing a hand-built call that passes the token from its first
+         * character can mean.
+         */
+        private int tokenStart(CharSequence text) {
+            if (!(text instanceof Spanned)) return 0;
+            int at = ((Spanned) text).getSpanStart(this);
+            return at < 0 ? 0 : at;
+        }
+
+        /** The advance one part costs, at the size Word sets that part: base face or script face. */
+        private float partWidth(Paint paint, CharSequence text, int shift, int from, int to, int part) {
+            if (!script[part]) return paint.measureText(text, shift + from, shift + to);
+            Paint copy = new Paint(paint);
+            copy.setTextSize(paint.getTextSize() * metricsFor(partFamily[part]).scale(superscript[part]));
+            return copy.measureText(FontScriptMetrics.plainDigits(text, shift + from, shift + to));
+        }
+
+        @Override public int getSize(Paint paint, CharSequence text, int start, int end,
+                                     Paint.FontMetricsInt fm) {
+            // The base face's own metrics: the raised glyphs inside the token buy the row nothing,
+            // exactly as the script span billed it before the merge (ScriptGeometry.declared).
+            if (fm != null) paint.getFontMetricsInt(fm);
+            int shift = tokenStart(text);
+            int from = Math.max(0, start - shift), to = Math.min(tokenLength, end - shift);
+            float[] widths = new float[partEnd.length];
+            int cursor = 0;
+            for (int i = 0; i < partEnd.length; i++) {
+                int a = Math.max(cursor, from), b = Math.min(partEnd[i], to);
+                widths[i] = b > a ? partWidth(paint, text, shift, a, b, i) : 0f;
+                cursor = partEnd[i];
+            }
+            return billedAsOneToken(widths);
+        }
+
+
+        /**
+         * How the token is billed: ONE ceil over the whole advance, because Word sets a line on
+         * fractional glyph advances and the only rounding it does is at the break test. Ceil every
+         * part instead -- which is what one span per script run did -- and each citation hands the
+         * line a fraction of a pixel it never asked for: median half a pixel over the 35 usable
+         * script lines of the thesis (tools/superscript-attribution.py), enough on its own to be
+         * visible in a column that Word filled to the last twelfth of a pixel.
+         */
+        static int billedAsOneToken(float[] partWidths) {
+            float total = 0f;
+            for (float width : partWidths) total += width;
+            return Math.max(1, (int) Math.ceil(total));
+        }
+
+        /** The old accounting, kept so an assertion can show what one ceil per part costs. */
+        static int billedPerPart(float[] partWidths) {
+            int total = 0;
+            for (float width : partWidths) total += Math.max(1, (int) Math.ceil(width));
+            return total;
+        }
+
+        @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
+                                   float x, int top, int y, int bottom, Paint paint) {
+            int shift = tokenStart(text);
+            int from = Math.max(0, start - shift), to = Math.min(tokenLength, end - shift);
+            float pen = x;
+            int cursor = 0;
+            for (int i = 0; i < partEnd.length; i++) {
+                int a = Math.max(cursor, from), b = Math.min(partEnd[i], to);
+                cursor = partEnd[i];
+                if (b <= a) continue;
+                if (!script[i]) {
+                    float width = paint.measureText(text, shift + a, shift + b);
+                    canvas.drawText(text, shift + a, shift + b, pen, y, paint);
+                    pen += width;
+                    continue;
+                }
+                FontScriptMetrics m = metricsFor(partFamily[i]);
+                Paint copy = new Paint(paint);
+                copy.setTextSize(paint.getTextSize() * m.scale(superscript[i]));
+                String value = FontScriptMetrics.plainDigits(text, shift + a, shift + b);
+                float width = copy.measureText(value);
+                canvas.drawText(value, pen, y + paint.getTextSize() * m.offset(superscript[i]), copy);
+                pen += width;
+            }
+        }
+    }
+
+    /** One token a container has to cover: [start,end) plus its parts, ends relative to start. */
+    static final class ScriptToken {
+        /** What one part is: base text, a w:vertAlign script, or a Unicode script glyph. */
+        static final int BASE = 0, SUPERSCRIPT = 1, SUBSCRIPT = 2, UNICODE_GLYPH = 3;
+
+        final int start, end;
+        final int[] partEnd;
+        final int[] kind;
+        /** A part the script face sizes and lifts off the baseline, i.e. a w:vertAlign run. */
+        final boolean[] script;
+        final boolean[] superscript;
+        /** Only Unicode script glyphs inside, no w:vertAlign run: everything draws at full size. */
+        final boolean unicodeOnly;
+
+        ScriptToken(int start, int end, int[] partEnd, int[] kind) {
+            this.start = start; this.end = end;
+            this.partEnd = partEnd; this.kind = kind;
+            this.script = new boolean[kind.length];
+            this.superscript = new boolean[kind.length];
+            boolean onlyGlyphs = true;
+            for (int i = 0; i < kind.length; i++) {
+                script[i] = kind[i] == SUPERSCRIPT || kind[i] == SUBSCRIPT;
+                superscript[i] = kind[i] == SUPERSCRIPT;
+                if (script[i]) onlyGlyphs = false;
+            }
+            this.unicodeOnly = onlyGlyphs;
+        }
+    }
+
+    /**
+     * The grouping rule, in characters and script marks only: no android.text, so the host
+     * assertions and the phone go through this one function.
+     *
+     * A token is the run of characters Word glues, grown left and right from every character that
+     * belongs to a script; a part is a stretch of the same role inside it. A token that turns out
+     * to be one single part needs no container -- the citation brackets are the case: "[12]" is
+     * already one span over the whole token, so it has no inner edge to hide and keeps today's
+     * WordScriptSpan.
+     */
+    static ScriptToken[] scriptTokens(CharSequence text, boolean[] vertAlign, boolean[] vertAlignSup) {
+        int n = text == null ? 0 : text.length();
+        ArrayList<ScriptToken> out = new ArrayList<ScriptToken>();
+        int i = 0;
+        while (i < n) {
+            if (partKind(text, i, vertAlign, vertAlignSup) == 0 || !gluedToToken(text.charAt(i))) {
+                i++;
+                continue;
+            }
+            int from = i, to = i;
+            while (from > 0 && gluedToToken(text.charAt(from - 1))) from--;
+            while (to < n && gluedToToken(text.charAt(to))) to++;
+            ArrayList<Integer> ends = new ArrayList<Integer>();
+            ArrayList<Integer> kinds = new ArrayList<Integer>();
+            int cursor = from;
+            while (cursor < to) {
+                int kind = partKind(text, cursor, vertAlign, vertAlignSup);
+                int next = cursor + 1;
+                while (next < to && partKind(text, next, vertAlign, vertAlignSup) == kind) next++;
+                ends.add(Integer.valueOf(next - from));
+                kinds.add(Integer.valueOf(kind));
+                cursor = next;
+            }
+            if (ends.size() > 1) {        // one single part has no inner edge to hide
+                int[] partEnd = new int[ends.size()];
+                int[] kind = new int[ends.size()];
+                for (int p = 0; p < partEnd.length; p++) {
+                    partEnd[p] = ends.get(p).intValue();
+                    kind[p] = kinds.get(p).intValue();
+                }
+                out.add(new ScriptToken(from, to, partEnd, kind));
+            }
+            i = to;
+        }
+        return out.toArray(new ScriptToken[out.size()]);
+    }
+
+    /** 0 base text, 1 superscript, 2 subscript, 3 a Unicode script glyph, which Word draws full size. */
+    private static int partKind(CharSequence text, int at, boolean[] vertAlign, boolean[] vertAlignSup) {
+        if (vertAlign != null && at < vertAlign.length && vertAlign[at])
+            return vertAlignSup != null && at < vertAlignSup.length && vertAlignSup[at] ? 1 : 2;
+        return FontScriptMetrics.unicodeScript(text.charAt(at)) != 0 ? 3 : 0;
+    }
+
+    /**
+     * What Word keeps glued inside one unbreakable token: Latin and digits of any alphabet plus the
+     * Unicode super/subscript glyphs that sit inside a formula. Hyphen, slash, dot and brackets are
+     * deliberately out -- the thesis PDF ends lines on a hyphen and on a slash, so those stay legal
+     * break edges and a container must not swallow them.
+     */
+    private static boolean gluedToToken(char c) {
+        if (Character.isWhitespace(c) || isCjk(c)) return false;
+        return Character.isLetterOrDigit(c) || FontScriptMetrics.unicodeScript(c) != 0;
+    }
+
+    /**
+     * Replace the script spans inside a token by one container over the whole token. Every build
+     * path calls it -- styledTextScaled, the field-display styledText, and applyStyle after it has
+     * rebuilt a range -- so no route hands StaticLayout a span edge in the middle of a word.
+     */
+    static void mergeScriptsIntoTokens(Spannable text) {
+        if (!(text instanceof Spanned) || text.length() == 0) return;
+        Spanned spanned = (Spanned) text;
+        WordScriptSpan[] scripts = spanned.getSpans(0, text.length(), WordScriptSpan.class);
+        if (scripts.length == 0) return;
+        boolean[] vertAlign = new boolean[text.length()];
+        boolean[] superscript = new boolean[text.length()];
+        for (WordScriptSpan span : scripts) {
+            if (span.isUnicode() || span.positionHalfPoints != 0) continue;
+            int from = Math.max(0, spanned.getSpanStart(span));
+            int to = Math.min(text.length(), spanned.getSpanEnd(span));
+            for (int i = from; i < to; i++) {
+                vertAlign[i] = true;
+                superscript[i] = span.isSuperscript();
+            }
+        }
+        for (ScriptToken token : scriptTokens(text, vertAlign, superscript)) {
+            attachScriptToken(text, spanned, token, scripts);
+        }
+    }
+
+    /**
+     * Merge one token, or leave it exactly as it is. A container measures and draws its parts with
+     * the paint it is handed, so it may only cover characters that share one face, one declared
+     * size, one weight and one colour; and every part has to coincide with a script span, or
+     * removing that span would drop formatting nothing else remembers. A script span that reaches
+     * past the token -- a superscript run that ends with a blank, say -- is left alone too.
+     */
+    private static boolean attachScriptToken(Spannable text, Spanned spanned, ScriptToken token,
+                                             WordScriptSpan[] scripts) {
+        ArrayList<WordScriptSpan> taken = new ArrayList<WordScriptSpan>();
+        float pxPerPoint = 0f;
+        for (WordScriptSpan span : scripts) {
+            int a = spanned.getSpanStart(span), b = spanned.getSpanEnd(span);
+            if (b <= token.start || a >= token.end) continue;
+            // A Unicode script glyph is drawn full size but its span still cuts the token in two,
+            // so it joins the container as a plain part instead of leaving its edge behind.
+            if (span instanceof ScriptTokenSpan || span.positionHalfPoints != 0
+                    || a < token.start || b > token.end) return false;
+            if (span.isUnicode() && !hasUnicodePart(token)) continue;
+            if (taken.isEmpty()) pxPerPoint = span.pxPerPoint;
+            else if (pxPerPoint != span.pxPerPoint) return false;
+            taken.add(span);
+        }
+        if (taken.isEmpty()) return false;
+        String style = null;
+        int baseHalfPoints = -1;
+        for (int i = token.start; i < token.end; i++) {
+            String key = tokenStyleAt(spanned, i, pxPerPoint);
+            if (key == null) return false;
+            if (style == null) {
+                style = key;
+                baseHalfPoints = tokenHalfAt(spanned, i, pxPerPoint);
+            } else if (!style.equals(key)) return false;
+        }
+        if (baseHalfPoints < 0) baseHalfPoints = taken.get(0).baseHalfPoints();
+        String[] partFamily = new String[token.partEnd.length];
+        int cursor = token.start;
+        for (int p = 0; p < partFamily.length; p++) {
+            int end = token.start + token.partEnd[p];
+            if (token.kind[p] == ScriptToken.BASE) {
+                for (WordScriptSpan span : taken)
+                    if (spanned.getSpanStart(span) < end && spanned.getSpanEnd(span) > cursor)
+                        return false;   // a span of another role sits in the plain part: leave the word alone
+            } else {
+                WordScriptSpan match = null;
+                for (WordScriptSpan span : taken)
+                    if (spanned.getSpanStart(span) == cursor && spanned.getSpanEnd(span) == end
+                            && span.isSuperscript() == token.superscript[p]
+                            && span.isUnicode() == (token.kind[p] == ScriptToken.UNICODE_GLYPH))
+                        match = span;
+                // 节与 span 边界不同源就撤手：容器只装它量得准、画得出的东西。
+                if (match == null) return false;
+                partFamily[p] = match.family();
+            }
+            cursor = end;
+        }
+        // 先并度量 span：并不成（缺引擎自己挂的那三条）就整串不动，保持 2.6.5 的排法。
+        if (!unifyTokenMetrics(text, spanned, token, pxPerPoint)) return false;
+        for (WordScriptSpan span : taken) text.removeSpan(span);
+        text.setSpan(new ScriptTokenSpan(token.partEnd, token.script, token.superscript, partFamily,
+                        familyAt(spanned, token.start), baseHalfPoints, pxPerPoint, token.unicodeOnly),
+                token.start, token.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return true;
+    }
+
+    /** Does this token hold a Unicode script glyph at all? Those spans merge only when it does. */
+    private static boolean hasUnicodePart(ScriptToken token) {
+        for (int kind : token.kind) if (kind == ScriptToken.UNICODE_GLYPH) return true;
+        return false;
+    }
+
+    /**
+     * One character's style fingerprint inside a token, or null when the character may not join a
+     * container: another replaced range sizes that character itself, and the platform draws no
+     * underline, strike or highlight inside a ReplacementSpan, so merging would silently lose it.
+     *
+     * The three metric spans apply() hangs on every run have to be there too -- the merge replaces
+     * them with one set over the whole token (see unifyTokenMetrics), and it can only do that with
+     * something equivalent to copy.
+     */
+    private static String tokenStyleAt(Spanned text, int at, float pxPerPoint) {
+        for (ReplacementSpan span : text.getSpans(at, at + 1, ReplacementSpan.class))
+            if (!(span instanceof WordScriptSpan)) return null;
+        if (text.getSpans(at, at + 1, UnderlineSpan.class).length > 0) return null;
+        if (text.getSpans(at, at + 1, StrikethroughSpan.class).length > 0) return null;
+        if (text.getSpans(at, at + 1, BackgroundColorSpan.class).length > 0) return null;
+        MeasuredFontSpan[] measured = text.getSpans(at, at + 1, MeasuredFontSpan.class);
+        FontSpan[] fonts = text.getSpans(at, at + 1, FontSpan.class);
+        PointSizeSpan[] sizes = text.getSpans(at, at + 1, PointSizeSpan.class);
+        if (measured.length == 0 || fonts.length == 0 || sizes.length == 0) return null;
+        int typefaceStyle = 0;
+        for (StyleSpan span : text.getSpans(at, at + 1, StyleSpan.class)) typefaceStyle |= span.getStyle();
+        ForegroundColorSpan[] colors = text.getSpans(at, at + 1, ForegroundColorSpan.class);
+        return measured[measured.length - 1].family() + '|' + measured[measured.length - 1].cjk + '|'
+                + fonts[fonts.length - 1].getFamily() + '|' + sizes[sizes.length - 1].halfPoints + '|'
+                + typefaceStyle + '|'
+                + (colors.length == 0 ? 0 : colors[colors.length - 1].getForegroundColor());
+    }
+
+    /**
+     * One set of metric spans for the whole token.
+     *
+     * StaticLayout picks its fallback break from the last measurement-run boundary when a line runs
+     * out inside a word it cannot break, and apply() gives every OOXML run its own
+     * MeasuredFontSpan/FontSpan/PointSizeSpan -- so with only the container merged, the phone still
+     * cut "Ag3" | "Sn分布" on page 19 at the run boundary between "Ag" and the subscript "3"
+     * (sup-fix capture: 67 forbidden span edges became 2, that line did not move). The token's
+     * characters are one face, one declared size and one weight -- tokenStyleAt just proved it --
+     * so those spans move to the token's two edges and nothing inside the word is a boundary any
+     * more. A span that reaches past the token keeps the part outside it.
+     *
+     * RunStyleMarker is deliberately left alone: it is what styleAt() reads back as the run's own
+     * style, and covering the token with it would answer "superscript" for the base characters.
+     */
+    private static boolean unifyTokenMetrics(Spannable text, Spanned spanned, ScriptToken token,
+                                             float pxPerPoint) {
+        MeasuredFontSpan[] measured = spanned.getSpans(token.start, token.start + 1, MeasuredFontSpan.class);
+        FontSpan[] fonts = spanned.getSpans(token.start, token.start + 1, FontSpan.class);
+        PointSizeSpan[] sizes = spanned.getSpans(token.start, token.start + 1, PointSizeSpan.class);
+        if (measured.length == 0 || fonts.length == 0 || sizes.length == 0) return false;
+        String family = measured[measured.length - 1].family();
+        boolean cjk = measured[measured.length - 1].cjk;
+        int halfPoints = sizes[sizes.length - 1].halfPoints;
+        int typefaceStyle = 0;
+        for (StyleSpan span : spanned.getSpans(token.start, token.end, StyleSpan.class))
+            typefaceStyle |= span.getStyle();
+        int flags = Spanned.SPAN_EXCLUSIVE_EXCLUSIVE;
+        for (Object span : spanned.getSpans(token.start, token.end, Object.class)) {
+            if (!(span instanceof MetricAffectingSpan) || span instanceof ReplacementSpan) continue;
+            int a = spanned.getSpanStart(span), b = spanned.getSpanEnd(span);
+            int action = metricSpanAction(token.start, token.end, a, b);
+            if (action == METRIC_KEEP) continue;
+            if (action == METRIC_REMOVE) text.removeSpan(span);
+            else if (action == METRIC_CUT_RIGHT) text.setSpan(span, a, token.start, flags);
+            else text.setSpan(span, token.end, b, flags);
+        }
+        text.setSpan(new MeasuredFontSpan(family, cjk), token.start, token.end, flags);
+        text.setSpan(new FontSpan(family, cjk), token.start, token.end, flags);
+        text.setSpan(new PointSizeSpan(halfPoints, pxPerPoint), token.start, token.end, flags);
+        if (typefaceStyle != Typeface.NORMAL)
+            text.setSpan(new StyleSpan(typefaceStyle), token.start, token.end, flags);
+        return true;
+    }
+
+    /** Leave the span alone, drop it, or keep only the part left / right of the token. */
+    static final int METRIC_KEEP = 0, METRIC_REMOVE = 1, METRIC_CUT_RIGHT = 2, METRIC_CUT_LEFT = 3;
+
+    /**
+     * The rule one metric span follows at a token's two edges, in offsets only, so the host
+     * assertions can reach it without android.text.
+     *
+     * The case that has to come first is the span that already covers the token: apply() hangs one
+     * PointSizeSpan over a whole OOXML run, so it reaches the word from outside. Testing the left
+     * edge first cut that span off at the token's start, which left every character behind the
+     * token without a declared size: the next word in the same run lost its container, the phone
+     * measured that Latin in the fallback face, and para 82 of input-liu.docx went from 8 break
+     * points agreed with Word to 0 (parity tag sup-fix2 read 220/359 where sup-fix read 227/353).
+     */
+    static int metricSpanAction(int tokenStart, int tokenEnd, int spanStart, int spanEnd) {
+        if (spanStart <= tokenStart && spanEnd >= tokenEnd) return METRIC_KEEP;
+        if (spanStart >= tokenStart && spanEnd <= tokenEnd) return METRIC_REMOVE;
+        if (spanStart < tokenStart) return METRIC_CUT_RIGHT;   // reaches in over the token's left edge
+        return METRIC_CUT_LEFT;                                // reaches out past its right edge
+    }
+
+    /** The size the run declares, in half points: the size the row box competes at. */
+    private static int tokenHalfAt(Spanned text, int at, float pxPerPoint) {
+        AbsoluteSizeSpan[] sizes = text.getSpans(at, at + 1, AbsoluteSizeSpan.class);
+        if (sizes.length == 0) return -1;
+        AbsoluteSizeSpan size = sizes[sizes.length - 1];
+        return size instanceof PointSizeSpan ? ((PointSizeSpan) size).halfPoints
+                : Math.max(1, Math.round(size.getSize() / pxPerPoint * 2));
+    }
     /**
      * Widths of the bundled Times/宋体 files. Android's StaticLayout otherwise
      * measures with a generic face, so Latin looks and wraps unlike Word.

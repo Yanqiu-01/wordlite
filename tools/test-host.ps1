@@ -51,6 +51,9 @@ function Add-Suite([string]$name, $argv) { [void]$suites.Add([pscustomobject]@{ 
 Add-Suite "Regression"             @("tests/fixture.docx", "$out/roundtrip")
 Add-Suite "ScriptRegression"       @()
 Add-Suite "WordLineHeightRegression" @()
+# 上下标不许把拉丁/数字串切成可断点：容器分节、整串一次取整、行高不抬、并度量 span 的边界规则四组。
+# 真机那一侧的换行点在 tools/midword-audit.py（token_cut）与采样的 span-edges.tsv（串内 span 边）。
+Add-Suite "SuperscriptPaginationRegression" @()
 # Word 悬挂末行标点的落点算术：真值是 Word 导出 PDF 里那 22 行越界的行（tools/hang-truth.py）。
 Add-Suite "HangPunctuationRegression" @()
 # 斜不断行：Word 在 Cu/SB/P-Cu/SB/Cu 这种串上从不切在斜杠后（真值 tools/slash-break-truth.py 量死），
