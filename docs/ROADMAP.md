@@ -247,7 +247,7 @@ git cat-file -t <那个号>
 
 ## 版本账（2.4.0 这轮对一次总数，免得各说各话）
 
-GitHub 上现在 39 个 release（`gh api repos/Yanqiu-01/wordlite/releases` 实数，不是凭印象）：`v0.3.4` 到 `v2.6.3`。**38 个带可直接安装的 APK**，`v0.3.4` 那一个只挂了源码包（`wordlite-source-0.3.4.tar.gz`）——它是第一个 release，当时还没把出包挂上去，别把它算进"可安装"里。"至少迭代 20 个版本"这一条按 38 这个数已经过了；`v2.6.4` 出包后是 40 个 release / 39 个可安装。
+GitHub 上现在 39 个 release（`gh api repos/Yanqiu-01/wordlite/releases` 实数，不是凭印象）：`v0.3.4` 到 `v2.6.5`。**40 个带可直接安装的 APK**，`v0.3.4` 那一个只挂了源码包（`wordlite-source-0.3.4.tar.gz`）——它是第一个 release，当时还没把出包挂上去，别把它算进"可安装"里。"至少迭代 20 个版本"这一条按 38 这个数已经过了；到 `v2.6.5` 是 41 个 release / 40 个可安装（`v0.3.4` 那一个只有源码包）。
 
 "包括 4 个大版本"这一条有两种数法，都摆在这里：
 
