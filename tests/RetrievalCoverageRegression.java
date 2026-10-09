@@ -3,6 +3,7 @@ package com.rikkahub.wordlite;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -1139,8 +1140,72 @@ public final class RetrievalCoverageRegression {
         check(drained.autoPdfLeft > 0 && notes(drained, "没来得及下（检索请求额度已用完）"),
                 "还有 " + drained.autoPdfLeft + " 篇挂着 PDF 没排上，注记里要写明是额度用完");
         check(drained.autoPdfTried == 0, "额度见底之后一篇也不许多抓：" + drained.autoPdfTried);
+
+        /* 六、抓回的正文要落进自建库。用户要的是"顺手抓进自建库"，不是这一轮在内存里比完就丢：
+           下一轮检索即使那几家不再回正文，自建库里也还留着那几篇可比正文。 */
+        check(got.autoBodies.size() == 3,
+                "抓成正文的三篇都留着正文本身交给自建库：" + got.autoBodies.size());
+        check(shut.autoBodies.isEmpty() && drained.autoBodies.isEmpty(),
+                "关掉开关与额度见底这两轮一篇也不许多存："
+                        + shut.autoBodies.size() + "/" + drained.autoBodies.size());
+        LocalLibrary library = new LocalLibrary(freshLibraryDir("auto-fetch"));
+        String stored = DuplicateEngine.fileAutoBodies(library, got);
+        /* 桩对三次全文请求回的是同一份 PDF 文本，入库那一条哈希判重的规矩就该把它们挡成一篇。
+           断言按规矩写，不按"抓了三篇就该有三篇"写：那是测愿望。 */
+        check(library.size() == 1, "同一份正文抓三次也只进一篇：" + library.size());
+        check(stored.contains("顺手抓回的正文已存进自建库 1 篇（自建库现在 1 篇")
+                && stored.contains("另有 2 篇库里已有同一正文，没有重复入库"),
+                "存库那一句把存了几篇、几篇是同一正文都说明白：" + stored);
+        int storeAt = got.notes.indexOf(stored), fetchAt = -1;
+        for (int i = 0; i < got.notes.size(); i++) {
+            if (got.notes.get(i).startsWith("本轮顺手抓了")) fetchAt = i;
+        }
+        check(fetchAt >= 0 && storeAt == fetchAt + 1,
+                "存库那一句紧跟在顺手抓正文那一句后面，不被注记上限挤掉：" + storeAt + "/" + fetchAt);
+        check(CheckReport.html("thesis.docx", got).contains("顺手抓回的正文已存进自建库"),
+                "报告那张表/注记里读得到存库这一句");
+        TextCorpus reread = new TextCorpus();
+        library.index(reread);
+        check(corpusContains(reread, FULL_TEXT_PROBE),
+                "重开这个库再 index，抓回的正文仍在比对语料里——下一轮不必再花请求重抓");
+
+        /* 正文各不相同的三篇：三篇都该进库，库里的篇数要跟着涨，第二遍重跑不许翻倍。 */
+        LocalLibrary distinct = new LocalLibrary(freshLibraryDir("auto-fetch-distinct"));
+        DuplicateEngine.Report three = new DuplicateEngine.Report();
+        three.autoBodies.add(new DuplicateEngine.AutoBody("钎焊界面扩散层研究", "openalex",
+                FULL_TEXT_PROBE + "第一篇的其余段落，讲保温时间与硬度分布。"));
+        three.autoBodies.add(new DuplicateEngine.AutoBody("互连层的可靠性评估", "europepmc",
+                FULL_TEXT_PROBE + "第二篇的其余段落，讲热循环下的失效判据。"));
+        three.autoBodies.add(new DuplicateEngine.AutoBody("多孔铜的制备参数", "cnki",
+                FULL_TEXT_PROBE + "第三篇的其余段落，讲孔隙率与电流密度的关系。"));
+        String threeLine = DuplicateEngine.fileAutoBodies(distinct, three);
+        check(distinct.size() == 3 && threeLine.startsWith("顺手抓回的正文已存进自建库 3 篇（自建库现在 3 篇"),
+                "三份不同的正文三篇都进库：" + distinct.size() + " " + threeLine);
+        String twice = DuplicateEngine.fileAutoBodies(distinct, three);
+        check(distinct.size() == 3 && twice.contains("另有 3 篇库里已有同一正文"),
+                "同一轮重跑一遍不许多存一篇：" + distinct.size() + " " + twice);
+
+        /* 空正文与"没开开关"都不该在库里留东西，也不该在报告里留一句空话。 */
+        LocalLibrary dryRun = new LocalLibrary(freshLibraryDir("auto-fetch-dry"));
+        check(DuplicateEngine.fileAutoBodies(dryRun, shut).isEmpty() && dryRun.size() == 0,
+                "关掉开关的那一轮：自建库一个字都不许多，报告里也不多一句");
+        check(DuplicateEngine.autoStoreLine(0, 0, 0, "", 0).isEmpty(),
+                "一篇没存、一篇没挡就不开口");
+        DuplicateEngine.Report blank = new DuplicateEngine.Report();
+        blank.autoBodies.add(new DuplicateEngine.AutoBody("抓回来是空的", "crossref", "   "));
+        String blankLine = DuplicateEngine.fileAutoBodies(new LocalLibrary(freshLibraryDir("auto-fetch-blank")), blank);
+        check(blankLine.contains("1 篇没存进自建库："), "空正文按落空算并写明原因：" + blankLine);
         resetFixtures();
         crossrefSize = -1;
+    }
+
+    /** 每次都给一个空的库目录：篇数断言只有从零开始数才算数。 */
+    private static File freshLibraryDir(String name) {
+        File directory = new File("artifacts/build/host-auto-library/" + name);
+        File[] children = directory.listFiles();
+        if (children != null) for (int i = 0; i < children.length; i++) children[i].delete();
+        directory.mkdirs();
+        return directory;
     }
 
     // ---- D 组：按名次入库，零分候选不进语料 ----

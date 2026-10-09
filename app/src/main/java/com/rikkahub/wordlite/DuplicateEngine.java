@@ -30,6 +30,8 @@ public final class DuplicateEngine {
     static final int MAX_DOWNLOADABLES = 10;
     /** 一轮里"顺手抓正文"的篇数天花板：设置里的数最高也只能到这里，剩下的额度得留给检索。 */
     static final int MAX_AUTO_FULL_TEXTS = 10;
+    /** "本轮顺手抓了 N 篇……"那句的开头。注记要按它找到紧跟其后的"存进自建库"那一句。 */
+    static final String AUTO_FETCH_PREFIX = "本轮顺手抓了 ";
     /* 挂钟闸门与限速：实测一轮 9 个源约 10 秒（维普最慢 4062ms），但 Routes 的多路尝试能把单个
        请求拖到 20 秒以上，所以只设请求数上限挡不住慢网络，两个闸必须同时存在。 */
     static final long MAX_SEARCH_MILLIS = 180000L, MIN_ENGINE_GAP_MILLIS = 400L;
@@ -247,6 +249,11 @@ public final class DuplicateEngine {
         public int autoPdfTried, autoPdfFetched, autoPdfFailed, autoPdfLeft;
         /** autoPdfLeft 那几个字到底是被什么挡住的："检索请求额度已用完"或"检索时间已用满"。 */
         public String autoPdfReason = "";
+        /**
+         * 顺手抓成正文的那几篇的正文本身：引擎不碰磁盘，这一份交给 app 落进自建库
+         * （fileAutoBodies）。空列表 = 这一轮没开开关，或一篇都没抓成。
+         */
+        public final ArrayList<AutoBody> autoBodies = new ArrayList<AutoBody>();
         public final ArrayList<Downloadable> downloadables = new ArrayList<Downloadable>();
         /** 留档被 MAX_SHAPE_ROWS 裁过的行数：档里没这一行才说明真的问了几次就是几行。 */
         public int shapesDropped;
@@ -259,6 +266,16 @@ public final class DuplicateEngine {
             this.title = title == null ? "" : title;
             this.engine = engine == null ? "" : engine;
             this.url = url == null ? "" : url;
+        }
+    }
+
+    /** 顺手抓成正文的一篇：题名、哪个检索源给的、抓回的正文。app 按这份落自建库。 */
+    public static final class AutoBody {
+        public final String title, engine, text;
+        AutoBody(String title, String engine, String text) {
+            this.title = title == null ? "" : title;
+            this.engine = engine == null ? "" : engine;
+            this.text = text == null ? "" : text;
         }
     }
 
@@ -378,7 +395,7 @@ public final class DuplicateEngine {
      */
     public static String autoFetchLine(int tried, int got, int failed, int left, String reason) {
         if (tried <= 0 && left <= 0) return "";
-        StringBuilder out = new StringBuilder("本轮顺手抓了 ").append(tried)
+        StringBuilder out = new StringBuilder(AUTO_FETCH_PREFIX).append(tried)
                 .append(" 篇开放获取全文，").append(got).append(" 篇已按正文比对");
         if (failed > 0) out.append("，").append(failed).append(" 篇抓回来没有正文层，仍按摘要比对");
         if (left > 0) {
@@ -386,6 +403,71 @@ public final class DuplicateEngine {
             if (reason != null && !reason.isEmpty()) out.append("（").append(reason).append("）");
         }
         return out.toString();
+    }
+
+    /**
+     * 顺手抓回的正文落进自建库：走 LocalLibrary.addDocument 那三条规矩（同一正文哈希判重、
+     * 名额与容量都算），引擎自己一个字都不写盘。存了几篇、几篇库里已有、几篇没存进去是三笔
+     * 分开的账——"抓回来比过了"和"存下来了"不许混着说，注记与结果页读同一句。
+     */
+    public static String fileAutoBodies(LocalLibrary library, Report report) {
+        if (library == null || report == null || report.autoBodies.isEmpty()) return "";
+        int stored = 0, duplicates = 0, failed = 0;
+        String firstError = "";
+        for (int i = 0; i < report.autoBodies.size(); i++) {
+            AutoBody body = report.autoBodies.get(i);
+            String title = body.title.trim();
+            if (title.isEmpty()) title = "开放获取全文";
+            LocalLibrary.AddResult added;
+            try {
+                added = library.addDocument(title + ".txt",
+                        body.text.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                        null, true, MATERIAL_FULL);
+            } catch (RuntimeException error) {
+                added = null;
+            }
+            if (added != null && added.ok) stored++;
+            else if (added != null && !added.duplicateOf.isEmpty()) duplicates++;
+            else {
+                failed++;
+                if (firstError.isEmpty())
+                    firstError = added == null ? "入库时出错" : added.error;
+            }
+        }
+        String line = autoStoreLine(stored, duplicates, failed, firstError, library.size());
+        if (!line.isEmpty()) noteAfter(report, AUTO_FETCH_PREFIX, line);
+        return line;
+    }
+
+    /** 存库那一句的唯一写法：一篇没存、一篇没挡就不开口，报告里不留一句空话。 */
+    static String autoStoreLine(int stored, int duplicates, int failed, String firstError, int librarySize) {
+        if (stored <= 0 && duplicates <= 0 && failed <= 0) return "";
+        StringBuilder out = new StringBuilder();
+        if (stored > 0) noteTail(out, "顺手抓回的正文已存进自建库 " + stored
+                + " 篇（自建库现在 " + librarySize + " 篇，可在自建库里删掉）");
+        if (duplicates > 0) noteTail(out, "另有 " + duplicates + " 篇库里已有同一正文，没有重复入库");
+        if (failed > 0) noteTail(out, failed + " 篇没存进自建库"
+                + (firstError == null || firstError.isEmpty() ? "" : "：" + firstError));
+        return out.toString();
+    }
+    private static void noteTail(StringBuilder out, String sentence) {
+        if (out.length() > 0) out.append('，');
+        out.append(sentence);
+    }
+
+    /**
+     * 插在同一组账的那句后面。注记有 MAX_NOTES 上限且按顺序挤位，排在最后一位的
+     * "存进自建库"最容易被挤掉——它必须跟着"顺手抓了 N 篇"那一行走。
+     */
+    private static void noteAfter(Report report, String anchor, String value) {
+        if (value == null || value.isEmpty() || report.notes.contains(value)) return;
+        for (int i = 0; i < report.notes.size(); i++) {
+            if (report.notes.get(i).startsWith(anchor)) {
+                if (report.notes.size() < MAX_NOTES) report.notes.add(i + 1, value);
+                return;
+            }
+        }
+        note(report, value);
     }
 
     /** 摘要层的注记：报告中心与面板的注记列表都要能查到这一层做了、做了什么口径。 */
@@ -1650,6 +1732,10 @@ public final class DuplicateEngine {
                     if (got != null && !got.trim().isEmpty()) {
                         body = body.isEmpty() ? got : body + "\n" + got;
                         fetched = true; autoGot++;
+                        /* 正文留着给 app 落自建库：下一轮不必再花一次请求重抓同一篇。 */
+                        report.autoBodies.add(new AutoBody(
+                                candidate.source == null ? "" : candidate.source.title,
+                                candidate.source == null ? "" : candidate.source.engine, got));
                     } else autoFailed++;
                 }
             }

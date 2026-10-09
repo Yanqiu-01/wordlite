@@ -267,7 +267,7 @@ public final class ApiWorkflow {
                 limits.windows = options.windows;
                 limits.fullTexts = DuplicateEngine.MAX_FULL_TEXTS;
                 /* 检索设置里那个开关到得了检索循环：开着就用剩下的请求额度顺手抓几篇开放获取正文，
-                   关掉（或设成 0）就还是只在名次队那几篇上花全文额度。 */
+                   并按正文比对、落进自建库；关掉（或设成 0）就还是只在名次队那几篇上花全文额度。 */
                 limits.autoFullTexts = options.autoPdf ? options.autoPdfs : 0;
                 limits.coreKey = options.coreKey;
                 limits.proxy = options.proxy;
@@ -279,6 +279,10 @@ public final class ApiWorkflow {
                                 progress(total > 0 ? label + " " + done + "/" + total : label);
                             }
                         });
+                /* 顺手抓回的开放获取正文此刻才落进自建库：这一轮的比对已经用内存里那份正文跑完，
+                   入库是为了下一轮不必再花一次请求重抓同一篇。存了几篇、几篇库里已有、几篇没存进去
+                   都写进注记，再落报告中心——顺序反了，回看的那份报告里就没有这一句。 */
+                DuplicateEngine.fileAutoBodies(library, result);
                 /* 报告中心（1.0.0）：先落一条记录再回界面。写盘留在 worker 线程里做——
                    几十万字节的 JSON 压在 UI 线程上，取消按钮会先卡住。 */
                 final ReportStore.Record saved = reports.save(ReportStore.recordFor(result, host.fileName()));
@@ -851,8 +855,8 @@ public final class ApiWorkflow {
            后者是 2.6.2 之前的实际行为，那会儿 12 意味着第 9 扇之后一个字都没查。 */
         final EditText windows = field(String.valueOf(engine.windows),
                 "每源检索窗口数（1-24，每家最多问几扇）");
-        final CheckBox autoPdf = check("扫描时顺手抓开放获取全文进比对（用剩下的检索请求额度）",
-                engine.autoPdf);
+        final CheckBox autoPdf = check("扫描时顺手抓开放获取全文：存进自建库并按正文比对"
+                + "（用剩下的检索请求额度）", engine.autoPdf);
         box.addView(autoPdf);
         final EditText autoPdfs = field(String.valueOf(engine.autoPdfs), "顺手抓正文最多几篇（0-10，0 为关掉）");
         box.addView(autoPdfs);
