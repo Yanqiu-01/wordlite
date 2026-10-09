@@ -59,7 +59,7 @@ XINCHECK 的连续字数那一层用的就是它的 `PayloadTrie`。换成它：
 - MOSS：按指纹频率截断 + look-alike 库（"本来就该重复"的串预先登记），即我们的套话抑制与白名单。
 - rank_bm25 / Lucene BM25 常数：候选排序。
 - 公开 API 取正文：OpenAlex、Crossref、Europe PMC（OA 全文 XML）、CORE、arXiv；中文正文免费主力是国家哲社。
-- 带标注语料（<20 MB）：HC3-zh、DBMD、T9-Tolerant、WeirdAI、RAID——拿真语料把 AUC 量一次，≥0.85 才允许出分。
+- 带标注语料：`docs/aigc-offline-model.md` 那张表已经把可用的中文集与它们的真实体积、许可、人/机条数记全了，照它取，别再另立一份清单。装机资源一个字节都不许多：`app/src/main/assets/aigc` 现在是 928,936 字节，语料只在电脑侧的实测台上用，取到临时目录，只留学术域那一段，量完就删。拿真语料把 AUC 重量一次，≥0.85 才允许出分。
 - 明确不采用：DetectGPT / Fast-DetectGPT / Binoculars / GLTR（要 token logprob，手机上没有）、sentence-transformers / WMD / MoverScore（要模型）。APK 里不塞语料、不塞模型。
 
 ## 5 这一轮的动作，按顺序，每条带验收
@@ -70,7 +70,7 @@ XINCHECK 的连续字数那一层用的就是它的 `PayloadTrie`。换成它：
 4. 参考文献题名检索：稿子自己的参考文献表逐条题名去问那 9 家，命中即成比对材料。验收：一份 40 条书目的稿子，比对材料从现在的几十句涨到 ≥200 篇摘要或 ≥20 篇正文。
 5. 检索页解析：万方/知网/维普一页 7 条只吃回 1 条，改成 ≥6 条，且新文献号能喂详情页。
 6. 排版三件：`WordLineHeights` 进排版（带开关，六个队列逐个量）、`ScriptTokenSpan` 宽度准入、`docGrid` 采样与实现。每合一条都要有 7 条验收线的数字。
-7. AIGC：拉 <20 MB 标注语料量 AUC；不过 0.85 继续只给倾向。
+7. AIGC：先用 `docs/aigc-offline-model.md` 里已经记过的那几档中文学术域语料重量 AUC（现在 0.312，留出 0.271，方向是反的）；不过 0.85 继续只给倾向。APK 不因此多一个字节。
 
 ## 6 不做
 
