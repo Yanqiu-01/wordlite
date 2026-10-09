@@ -56,6 +56,11 @@ public final class CorpusImport {
         public int spans;
         /** PDF 才有意义；其它类型恒为 0。 */
         public int pages;
+        /**
+         * 失败时的形状号（needs-entitlement / link-not-found / not-a-pdf / redirect-not-followed / ...）。
+         * 只有"下进自建库"那一路填得出（PaperSources.FetchFailure 带出来的），普通文件导入留空。
+         */
+        public String shape = "";
 
         public boolean imported() {
             return status == Status.IMPORTED;
@@ -138,12 +143,56 @@ public final class CorpusImport {
             return out.toString();
         }
 
+        /**
+         * 失败按形状分堆，一行读完："要权限/登录 5、回来的不是 PDF 1、没打通 2"。
+         * 只有"失败 8 个"的时候用户没法决定下一步——403 要去挂机构账号，404 只能换一篇。
+         */
+        public String shapeTally() {
+            ArrayList<String> shapes = new ArrayList<String>();
+            ArrayList<Integer> counts = new ArrayList<Integer>();
+            for (int i = 0; i < receipts.size(); i++) {
+                Receipt receipt = receipts.get(i);
+                if (receipt.imported() || receipt.status == Status.DUPLICATE) continue;
+                String key = shapeLabel(receipt.shape);
+                int at = shapes.indexOf(key);
+                if (at < 0) { shapes.add(key); counts.add(Integer.valueOf(1)); continue; }
+                counts.set(at, Integer.valueOf(counts.get(at).intValue() + 1));
+            }
+            StringBuilder out = new StringBuilder();
+            for (int i = 0; i < shapes.size(); i++) {
+                if (i > 0) out.append("、");
+                out.append(shapes.get(i)).append(' ').append(counts.get(i).intValue()).append(" 个");
+            }
+            return out.toString();
+        }
+
+        /** 形状号说人话。空号说"没说原因"，不替它编一个。 */
+        private static String shapeLabel(String shape) {
+            String value = shape == null ? "" : shape.trim();
+            if (value.startsWith("not-a-pdf")) return "回来的不是 PDF";
+            if (value.equals("needs-entitlement")) return "要机构权限或登录";
+            if (value.equals("link-not-found")) return "链接已失效";
+            if (value.equals("paywalled")) return "在付费墙后面";
+            if (value.equals("throttled")) return "被限流";
+            if (value.equals("source-unavailable")) return "源自己出错";
+            if (value.equals("redirect-not-followed")) return "跳转跟不过去";
+            if (value.equals("fetch-failed")) return "没打通";
+            if (value.equals("no-link")) return "没有全文链接";
+            if (value.equals("pdf-no-text-layer")) return "扫描版无文字层";
+            if (value.equals("pdf-unreadable") || value.equals("pdf-undecodable")) return "PDF 解不出字";
+            return "没说原因";
+        }
+
         public String summary() {
             StringBuilder out = new StringBuilder("导入 ").append(imported()).append(" 篇");
             if (duplicates() > 0) out.append("，重复跳过 ").append(duplicates()).append(" 篇");
             if (noTextLayer() > 0) out.append("，无文字层 ").append(noTextLayer()).append(" 篇");
             if (unsupported() > 0) out.append("，不支持 ").append(unsupported()).append(" 个");
-            if (failed() > 0) out.append("，失败 ").append(failed()).append(" 个");
+            if (failed() > 0) {
+                out.append("，失败 ").append(failed()).append(" 个");
+                String tally = shapeTally();
+                if (tally.length() > 0) out.append("（").append(tally).append("）");
+            }
             if (cancelled) out.append("（已取消，剩余未处理）");
             return out.toString();
         }
@@ -336,9 +385,15 @@ public final class CorpusImport {
                 } else {
                     importOne(library, new Source(receipt.name, bytes), receipt, seen);
                 }
+            } catch (PaperSources.FetchFailure error) {
+                receipt.status = Status.FAILED;
+                receipt.message = describe(error);
+                receipt.shape = error.shape;
             } catch (Exception error) {
                 receipt.status = Status.FAILED;
                 receipt.message = describe(error);
+                /* 没带形状号的失败也有一句"链接没给来文件"，但不能假装知道是哪一种：
+                   形状留空，分堆时落进"没说原因"那一档，宁可少说也不猜。 */
             }
             batch.receipts.add(receipt);
             if (progress == null) continue;

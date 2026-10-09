@@ -82,10 +82,40 @@ public class FullTextYieldRegression {
                 "{\"error\":\"Not Found\",\"message\":\"no full text\",\"status\":404}"));
         server.createContext("/pdf/gone.pdf", exchange -> respond(exchange, 404,
                 "{\"error\":\"Not Found\"}"));
+        /* 下载口的常见形状：先 302，文件在别处。实测 ritsumei.repo.nii.ac.jp 那条就是这么把
+           一份 2,051,962 B 的 %PDF-1.6 交给 oraclecloud 对象存储的，不跟跳转就是"下载 0 篇"。 */
         server.createContext("/pdf/jump.pdf", exchange -> {
-            exchange.getResponseHeaders().set("Location", "https://elsewhere.example.org/file.pdf");
-            exchange.sendResponseHeaders(301, -1);
+            exchange.getResponseHeaders().set("Location", "http://127.0.0.1:"
+                    + server.getAddress().getPort() + "/pdf/final.pdf");
+            exchange.sendResponseHeaders(302, -1);
             exchange.close();
+        });
+        server.createContext("/pdf/final.pdf", exchange -> {
+            byte[] pdf = java.nio.file.Files.readAllBytes(
+                    java.nio.file.Paths.get("tests/fixture-oa-body.pdf"));
+            exchange.getResponseHeaders().set("Content-Type", "application/pdf");
+            exchange.sendResponseHeaders(200, pdf.length);
+            OutputStream out = exchange.getResponseBody();
+            out.write(pdf);
+            out.close();
+        });
+        server.createContext("/pdf/loop.pdf", exchange -> {
+            exchange.getResponseHeaders().set("Location", "http://127.0.0.1:"
+                    + server.getAddress().getPort() + "/pdf/loop.pdf");
+            exchange.sendResponseHeaders(302, -1);
+            exchange.close();
+        });
+        server.createContext("/pdf/denied.pdf", exchange -> {
+            exchange.sendResponseHeaders(403, -1);
+            exchange.close();
+        });
+        server.createContext("/pdf/lie.pdf", exchange -> {
+            exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
+            byte[] html = "<html><body>登录页</body></html>".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, html.length);
+            OutputStream out = exchange.getResponseBody();
+            out.write(html);
+            out.close();
         });
         server.createContext("/epmc/jump", exchange -> {
             exchange.getResponseHeaders().set("Location", "https://elsewhere.example.org/file");
@@ -164,23 +194,49 @@ public class FullTextYieldRegression {
             rows.clear();
             PaperSources.fullText(pdfGone, limits, null);
             check(lastShape(rows, "link-not-found") != null, "PDF 直链 404 也记 link-not-found，不再压成 fetch-failed");
-            PaperSources.Candidate pdfJump = new PaperSources.Candidate();
-            pdfJump.source.engine = "semantic-scholar";
-            pdfJump.fullTextUrl = base + "/pdf/jump.pdf";
-            rows.clear();
-            PaperSources.fullText(pdfJump, limits, null);
-            check(lastShape(rows, "redirect-not-followed") != null,
-                    "PDF 直链要跳转就记 redirect-not-followed：\u201c它跳转了我们不追\u201d和\u201c这篇真的没字\u201d是两种下一步");
+            /* 4c) 取文件这一路要跟着跳转走。检索那一路（上面 /epmc/jump）照旧一跳不追。 */
+            PaperSources.PdfFetch followed = PaperSources.fetchPdf(base + "/pdf/jump.pdf", limits, null);
+            check(followed.hops == 1 && followed.bytes.length > 0
+                            && new String(followed.bytes, StandardCharsets.ISO_8859_1).startsWith("%PDF-"),
+                    "PDF 下载口跟着 302 走一跳就拿到文件（hops=" + followed.hops + "，"
+                            + followed.bytes.length + " B，开头 %PDF-）：机构库把文件放在对象存储上是常态");
+            check(followed.chars > 0, "跟到的那份 PDF 真的解得出字：" + followed.chars + " 字");
+            check(PaperSources.downloadPdf(base + "/pdf/jump.pdf", limits, null).length == followed.bytes.length,
+                    "一键下载那一步拿到的就是同一份文件，跳转没把字节弄丢");
+            PaperSources.PdfFetch looping = PaperSources.fetchPdf(base + "/pdf/loop.pdf", limits, null);
+            check(looping.shape.equals("redirect-not-followed"),
+                    "跟满三跳还在跳才认 redirect-not-followed（实测形状 " + looping.shape + "），不无限跟");
+            check(thrownShape(base + "/pdf/loop.pdf", limits).equals("redirect-not-followed")
+                            && thrownMessage(base + "/pdf/loop.pdf", limits).contains("往别处跳"),
+                    "跳不完的那条，回执说的是\u201c这个链接一直往别处跳，跟不过去\u201d，不是\u201c没下载到内容\u201d");
+            check(thrownShape(base + "/pdf/denied.pdf", limits).equals("needs-entitlement")
+                            && thrownMessage(base + "/pdf/denied.pdf", limits).contains("要机构权限"),
+                    "403 的下载口回执说\u201c要机构权限或登录才能下（HTTP 403）\u201d——实测 europepmc 的 ?pdf=render 五次全 403");
+            check(thrownShape(base + "/pdf/lie.pdf", limits).startsWith("not-a-pdf")
+                            && thrownMessage(base + "/pdf/lie.pdf", limits).contains("不是 PDF"),
+                    "挂着 .pdf 却回 HTML 的那条说\u201c回来的不是 PDF\u201d，登录页不会被当正文入库");
+            check(thrownShape(base + "/pdf/gone.pdf", limits).equals("link-not-found")
+                            && thrownMessage(base + "/pdf/gone.pdf", limits).contains("打不开"),
+                    "404 的下载口说\u201c这个链接已经打不开了\u201d，和\u201c要权限\u201d是两种下一步");
 
             /* 5) 格式不符不许和 PDF 同价：以前 hanspub 的 PDF 和 Europe PMC 的 fullTextXML 同为 1。 */
             check(PaperSources.pdfUrlRank("https://pdf.hanspub.org/MS20170300000_52023950.pdf") == 0
-                            && PaperSources.pdfUrlRank("https://some-journal.example.org/a.pdf") == 1
-                            && PaperSources.pdfUrlRank("http://some-journal.example.org/a.pdf") == 2,
-                    "PDF 直链照旧按站点与协议分档（白名单 0、https 1、http 2）");
+                            && PaperSources.pdfUrlRank("https://some-journal.example.org/a.pdf") == 1,
+                    "PDF 直链照旧按站点与协议分档（白名单 0、其它 https 1）");
             check(PaperSources.pdfUrlRank(base + "/epmc/PMC13522914/fullTextXML") == 4
                             && PaperSources.pdfUrlRank("https://x.example.org/article/abs/123.html") == 4,
                     "路径明写 XML/HTML 的\u201c全文\u201d端点单独一档 4，不再与 PDF 直链同为 1");
-            check(PaperSources.pdfUrlRank(base + "/epmc/file") == 2, "路径没说格式的那条不被误降级（还是按协议给 2）");
+            check(PaperSources.pdfUrlRank(base + "/epmc/file") == 2,
+                    "回环上路径没说格式的那条不被误降级（回环 http 传输层放行，所以还是按协议给 2）");
+            check(PaperSources.pdfUrlRank("https://europepmc.org/articles/PMC12801124?pdf=render") == 4
+                            && PaperSources.pdfUrlRank("https://europepmc.org/backend/ptpmcrender.fcgi"
+                            + "?accid=PMC12801124&blobtype=pdf") == 4,
+                    "Europe PMC 的渲染口单独一档 4：2026-10-09 经 127.0.0.1:7897 实测五条全 403（0 B，换浏览器 UA 与 Referer 照旧）");
+            check(PaperSources.pdfUrlRank("http://sioc-journal.cn/Jwk_hxxb/CN/article/"
+                            + "downloadArticleFile.do?attachType=PDF&id=347556") == 4
+                            && PaperSources.pdfUrlRank("http://jos.org.cn/jos/article/download/27657") == 0,
+                    "白名单之外的 http 直链也降到 4：传输层按规矩不下它（实测挡下后同一条 https 是 403），"
+                            + "而白名单里的 http 照旧优先");
 
             /* 6) 额度排队：同一条检索式下，真 PDF 先上，XML 端点不占额度。 */
             PaperSources.Candidate pdf = new PaperSources.Candidate();
@@ -208,10 +264,56 @@ public class FullTextYieldRegression {
             check(queue.size() == 1 && queue.get(0) == pdf,
                     "六个全文额度里排进去的是那条 PDF，XML 端点一条也不占（排到 " + queue.size() + " 条）");
 
+            /* 7) 屏幕上那句汇总要能自己说清失败是几种原因：2.6.x 真机那一屏只有"失败 4 个"。 */
+            CorpusImport.Batch batch = new CorpusImport.Batch();
+            batch.total = 4;
+            batch.receipts.add(receipt(1, CorpusImport.Status.IMPORTED, "", 8120));
+            batch.receipts.add(receipt(2, CorpusImport.Status.FAILED, "needs-entitlement", 0));
+            batch.receipts.add(receipt(3, CorpusImport.Status.FAILED, "needs-entitlement", 0));
+            batch.receipts.add(receipt(4, CorpusImport.Status.FAILED, "not-a-pdf", 0));
+            check(batch.shapeTally().equals("要机构权限或登录 2 个、回来的不是 PDF 1 个"),
+                    "失败按形状分堆：" + batch.shapeTally());
+            check(batch.summary().contains("导入 1 篇") && batch.summary().contains("失败 3 个")
+                            && batch.summary().contains("要机构权限或登录 2 个"),
+                    "标题行一句话带齐：" + batch.summary());
+
             System.out.println("SUMMARY " + checks + " assertions passed; loopback-only network");
         } finally {
             server.stop(0);
         }
+    }
+
+    /** 一键下载这一步为什么没下来：拿形状号说话，界面就按它分堆。 */
+    private static String thrownShape(String url, PaperSources.Limits limits) {
+        try {
+            PaperSources.downloadPdf(url, limits, null);
+            return "no-throw";
+        } catch (PaperSources.FetchFailure error) {
+            return error.shape;
+        } catch (java.io.IOException error) {
+            return "other:" + error.getMessage();
+        }
+    }
+
+    private static String thrownMessage(String url, PaperSources.Limits limits) {
+        try {
+            PaperSources.downloadPdf(url, limits, null);
+            return "";
+        } catch (java.io.IOException error) {
+            return String.valueOf(error.getMessage());
+        }
+    }
+
+    private static CorpusImport.Receipt receipt(int number, CorpusImport.Status status,
+                                                String shape, int chars) {
+        CorpusImport.Receipt receipt = new CorpusImport.Receipt();
+        receipt.number = number;
+        receipt.name = "第 " + number + " 篇.pdf";
+        receipt.status = status;
+        receipt.shape = shape;
+        receipt.chars = chars;
+        if (status == CorpusImport.Status.IMPORTED) receipt.storedName = receipt.name;
+        return receipt;
     }
 
     private static PaperSources.ShapeRow lastShape(ArrayList<PaperSources.ShapeRow> rows, String shape) {

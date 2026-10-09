@@ -598,6 +598,8 @@ public final class PaperSources {
         int status = -1, pages, glyphs, chars;
         boolean capped;
         long millis;
+        /** 取回来之前跟了几跳跳转（下载口常常 302 到对象存储）。 */
+        int hops;
     }
 
     /** Open-access full text, fetched only when the candidate really advertises it; failures yield "". */
@@ -662,15 +664,19 @@ public final class PaperSources {
             /* PDF 这一路以前把所有答复都压成 fetch-failed：实测 sioc-journal.cn 那个下载口回的是
                301（跳到 https 的同一条地址，跟过去是 500 / 3,134 B 的 HTML 错误页），账上却和
                "网断了"长一个样。状态能说明的地方就用状态。 */
-            out.shape = fetchFailureShape(error instanceof ApiClient.Failure
-                    ? ((ApiClient.Failure) error).status : -1);
+            int status = error instanceof ApiClient.Failure ? ((ApiClient.Failure) error).status : -1;
+            out.shape = fetchFailureShape(status);
+            /* 状态也要留下：回执那句"要机构权限或登录才能下（HTTP 403）"全靠它。 */
+            out.status = status;
             out.error = clipLine(error.getMessage(), 60);
             out.millis = System.currentTimeMillis() - began;
             return out;
         } catch (RuntimeException error) {
             /* 这一路接不住 ApiClient.Failure（它是 IOException），状态只可能藏在 cause 里。 */
-            out.shape = fetchFailureShape(error.getCause() instanceof ApiClient.Failure
-                    ? ((ApiClient.Failure) error.getCause()).status : -1);
+            int status = error.getCause() instanceof ApiClient.Failure
+                    ? ((ApiClient.Failure) error.getCause()).status : -1;
+            out.shape = fetchFailureShape(status);
+            out.status = status;
             out.error = clipLine(error.getMessage(), 60);
             out.millis = System.currentTimeMillis() - began;
             return out;
@@ -678,6 +684,7 @@ public final class PaperSources {
         out.status = got.status;
         out.bytes = got.bytes == null ? new byte[0] : got.bytes;
         out.capped = got.capped;
+        out.hops = got.hops;
         out.millis = got.millis > 0L ? got.millis : System.currentTimeMillis() - began;
         if (!isPdf(out.bytes)) {
             out.shape = out.capped ? "not-a-pdf-capped" : "not-a-pdf";
@@ -706,12 +713,25 @@ public final class PaperSources {
     public static byte[] downloadPdf(String url, Limits limits, ApiClient.Cancellation cancellation)
             throws IOException {
         String link = url == null ? "" : url.trim();
-        if (link.isEmpty()) throw new IOException("这条候选没有全文链接");
+        if (link.isEmpty()) throw new FetchFailure("这条候选没有全文链接", "no-link");
         PdfFetch got = fetchPdf(link, limits, cancellation);
-        if (got.text.trim().isEmpty() && (got.shape.equals("pdf-no-text-layer") || got.shape.equals("fetch-failed")
-                || got.shape.startsWith("not-a-pdf") || got.shape.equals("pdf-unreadable")))
-            throw new IOException(describeFetch(got));
+        /* 只有真是 PDF 的东西才配往下进自建库。以前这里点名四个形状才抛，
+           新加进来的 needs-entitlement / link-not-found / redirect-not-followed 全从缝里漏过去，
+           把 0 字节当成"下载成功"交给 CorpusImport，回执就只剩一句"没下载到内容"——
+           2026-10-09 真机那一屏"导入 0 篇，失败 4 个"就是这么来的：链接是 403 还是失效，
+           屏幕上分辨不出来，用户没法决定下一步。是 PDF 但没文字层的不在这里拦，
+           那种交给 CorpusImport 判成"无文字层"，档位说法归它。 */
+        if (got.bytes.length == 0 || !isPdf(got.bytes)) throw new FetchFailure(describeFetch(got), got.shape);
         return got.bytes;
+    }
+
+    /** 下载口为什么没给来文件，带形状号：回执要能按形状分堆，不能只剩一句"没下载到内容"。 */
+    public static final class FetchFailure extends IOException {
+        public final String shape;
+        public FetchFailure(String message, String shape) {
+            super(message);
+            this.shape = shape == null ? "" : shape;
+        }
     }
 
     /** 抓回来这一份为什么没有字，一句能说清的话。 */
@@ -722,6 +742,13 @@ public final class PaperSources {
         if (got.shape.equals("pdf-no-text-layer")) return "这份 PDF 是扫描版，没有文字层";
         if (got.shape.equals("pdf-unreadable")) return "这份 PDF 解不出页面结构" + (got.error.isEmpty() ? "" : "：" + got.error);
         if (got.shape.equals("pdf-undecodable")) return "这份 PDF 的字形映射读不出" + (got.fonts.isEmpty() ? "" : "：" + got.fonts);
+        String status = got.status > 0 ? "（HTTP " + got.status + "）" : "";
+        if (got.shape.equals("needs-entitlement")) return "要机构权限或登录才能下" + status;
+        if (got.shape.equals("link-not-found")) return "这个链接已经打不开了" + status;
+        if (got.shape.equals("paywalled")) return "这篇在付费墙后面" + status;
+        if (got.shape.equals("throttled")) return "这个源在限流，过一会儿再下" + status;
+        if (got.shape.equals("source-unavailable")) return "这个源自己答不上来" + status;
+        if (got.shape.equals("redirect-not-followed")) return "这个链接一直往别处跳，跟不过去";
         return "这篇没抓到正文";
     }
 
@@ -748,20 +775,45 @@ public final class PaperSources {
     }
     /**
      * 这条全文链接值不值得先花额度：0 白名单站点、1 其它 HTTPS 直链、2 其它 http 直链、
-     * 3 doi.org 跳转壳、4 路径自己明写是 XML/HTML 的"全文"端点、9 没链接。
+     * 3 doi.org 跳转壳、4 量实拿不到文件的链接（XML/HTML 端点、渲染口、我们按规矩不下的 http）、9 没链接。
      * <p>4 这一档是 2026-10-09 量出来的，不是猜的：<code>https://pdf.hanspub.org/....pdf</code> 带回
      * 12,853 字，而 Europe PMC 的 <code>.../PMC<id>/fullTextXML</code> 六次全 404（143 B JSON 报错），
      * 以前这两条同为 1，只能靠 BM25 分胜负——fullTexts=6 的额度就是被六个这样的平手决定的。
-     * 路径都说了自己是 XML 的，就不是 PDF 的同级，别拿它抢额度（CandidateRanker.fetchWeight 对 >=3 给 0）。
+     * <p>同一把尺还量了另外两条必死的：<code>europepmc.org/articles/PMC<id>?pdf=render</code> 五次全
+     * 403（0 B，换浏览器 UA 与 Referer 照旧，另一条 ptpmcrender.fcgi 也 403），
+     * <code>http://sioc-journal.cn/...attachType=PDF...</code> 被"检索源必须使用 HTTPS"挡下、
+     * 同一句地址改 https 是 403。这三类都排到 4：既不占全文额度，也不该出现在
+     * "挂着可直接下载的开放获取 PDF"那一屏里（DuplicateEngine 的门槛是 rank &lt;= 2）。
      */
     static int pdfUrlRank(String url) {
         String value = url == null ? "" : url.trim();
         if (value.isEmpty()) return 9;
         String host = hostOf(value);
         if (host.endsWith("doi.org") || host.endsWith("dx.doi.org")) return 3;
+        if (deadDocLink(value)) return 4;
         if (hostedBy(host, OA_PDF_HOSTS)) return 0;
         if (!pdfLink(value) && markupPath(value)) return 4;
         return value.toLowerCase(Locale.ROOT).startsWith("https://") ? 1 : 2;
+    }
+
+    /**
+     * 量实拿不到文件的两种链接。只收"实测过、有次数、有响应尺寸"的，不收看起来不像的。
+     */
+    static boolean deadDocLink(String url) {
+        String value = url == null ? "" : url.trim();
+        String flat = value.toLowerCase(Locale.ROOT);
+        /* Europe PMC 文章页的"渲染"开关：那是给浏览器看的口子，对匿名程序一律 403。 */
+        int query = flat.indexOf('?');
+        if (query >= 0 && flat.substring(query).contains("pdf=render")) return true;
+        if (flat.contains("ptpmcrender.fcgi")) return true;
+        /* http 直链只有白名单站点放行（期刊自建站那几条）；白名单之外的我们根本不会去下，
+           所以不能把它当成"可以下进自建库"的承诺。回环不算——回归测试就跑在回环 http 上。 */
+        if (flat.startsWith("http://") && !plainHttpAllowed(value) && !loopbackHost(hostOf(value))) return true;
+        return false;
+    }
+
+    private static boolean loopbackHost(String host) {
+        return host.equals("localhost") || host.equals("127.0.0.1") || host.equals("::1");
     }
 
     /** 路径末段（查询串不算）明写 xml/html 的链接：Europe PMC 的 fullTextXML、期刊的 article.html 都在内。 */
