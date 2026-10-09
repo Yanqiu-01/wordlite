@@ -1,0 +1,176 @@
+{
+ "what": "holdout3：段落级真人侧扩量集（160~520 字/段，切段口径与 tools/aigc-para-probe.py 一致）。真人侧没有一个字是模型生成的；原文一律不进仓库。",
+ "built": "2026-10-09T13:33:01",
+ "builder": "tools/aigc-corpus3.py",
+ "text_location": "..\\aigc-corpus\\holdout3\\<族>\\units.jsonl（仓库外，含原文）",
+ "why_no_repo": "原文不进仓库；仓库里只有逐篇来源与许可清单 tests/corpus/aigc-holdout3-<族>.jsonl 与这一份计数",
+ "license_policy": {
+  "accepted": [
+   "CC BY",
+   "CC BY-SA",
+   "CC BY-NC",
+   "CC BY-NC-SA",
+   "CC BY-NC-ND",
+   "CC0",
+   "公有领域",
+   "官方文件",
+   "GFDL",
+   "CC 其他档"
+  ],
+  "rejected": "拿不到明确开放许可、或写明未经授权不得转引的，整篇丢弃",
+  "why_nc_nd_ok": "原文只在本地测量时读取，不随包、不训练、不对外散布"
+ },
+ "split_rule": "按篇：md5(family|pid) 稳定哈希，前 8%% 进 SPARE（备用样本位；原计划给机器改写，2026-10-09 那一路取消），其后 20%% 进 FIT（定阈值），余下进 HOLD（只量真人误报）",
+ "totals": {
+  "units": 22470,
+  "units_hold": 16092,
+  "fp_resolution_per_1000_at_2": 0.691,
+  "hold_articles": 5172,
+  "note": "真人误报 2/千段时的 95% 区间半宽（每千段），分母就是 units_hold"
+ },
+ "families": {
+  "pmc_zh": {
+   "family_doc": {
+    "name": "PMC 开放获取子集（已发表论文正文 XML）",
+    "license_source": "XML 的 permissions/license_ref 字段，逐篇核；读不到明确开放许可整篇丢"
+   },
+   "papers_seen": 7200,
+   "papers_with_units": 7103,
+   "units": 22470,
+   "units_by_lang": {
+    "zh": 22470
+   },
+   "papers_by_split": {
+    "FIT": 1467,
+    "HOLD": 5172,
+    "SPARE": 561
+   },
+   "units_by_split": {
+    "FIT": 4619,
+    "HOLD": 16092,
+    "SPARE": 1759
+   },
+   "bands": {
+    "120-199": 1441,
+    "200-319": 15361,
+    "320-479": 5641,
+    "480-656": 27
+   },
+   "licenses": {
+    "CC BY": 13457,
+    "CC BY-NC-ND": 3023,
+    "CC BY-NC": 2666,
+    "CC BY-NC-SA": 3324
+   },
+   "median_chars": 288,
+   "build_counts": {
+    "counts": {
+     "许可过的篇数": 7188,
+     "合用正文段（去重前）": 78380,
+     "许可不过，整篇丢弃": 12,
+     "去重后剩余段": 22470,
+     "去重账本新增": "22470 条精确 / 504172 条长串"
+    },
+    "licenses": {
+     "CC BY": 4146,
+     "NONE": 7,
+     "CC BY-NC-ND": 821,
+     "CC BY-NC": 688,
+     "CLOSED": 5,
+     "CC BY-NC-SA": 1533
+    },
+    "dropped": {
+     "不足两句": 3568,
+     "同一篇封顶后丢掉": 55457,
+     "汉字占比低于 45%": 10655,
+     "数字占比过高": 1217,
+     "含链接": 652,
+     "像条目堆叠": 44,
+     "题注/题录/声明开头": 19,
+     "版权或利益冲突声明": 7,
+     "近重复（24 字长串撞 2 处）": 362,
+     "近重复（24 字长串撞 4 处）": 15,
+     "近重复（24 字长串撞 7 处）": 3,
+     "近重复（24 字长串撞 3 处）": 50,
+     "近重复（24 字长串撞 15 处）": 2,
+     "近重复（24 字长串撞 5 处）": 5,
+     "近重复（24 字长串撞 6 处）": 6,
+     "近重复（24 字长串撞 12 处）": 1,
+     "近重复（24 字长串撞 13 处）": 2,
+     "近重复（24 字长串撞 9 处）": 3,
+     "近重复（24 字长串撞 14 处）": 3,
+     "近重复（24 字长串撞 8 处）": 1
+    }
+   },
+   "license_excerpts": {
+    "L0001": "2023年版权归中华医学会所有 ;; Copyright © 2023 by Chinese Medical Association ;; https://creativecommons.org/licenses/by/3.0/ ;; This work is licensed under a Cr",
+    "L0002": "Copyright © 2023 Editorial office of Chinese Journal of Chromatography ;; https://creativecommons.org/licenses/by/4.0/ ;; 本文是开放获取文章，遵循CC BY 4.0协议 ;; h",
+    "L0003": "https://creativecommons.org/licenses/by/3.0/ ;; This is an open access article distributed in accordance with the terms of the Creative Commons Attrib",
+    "L0004": "© Zhejiang University Press 2023",
+    "L0005": "https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; This is an open access article under the CC BY-NC-ND 4.0 License ( https://creativecommons.org/l",
+    "L0006": "Copyright © 2023《中国肺癌杂志》编辑部 ;; Copyright © 2023 Editorial office of Chinese Journal of Lung Cancer ;; https://creativecommons.org/licenses/by/3.0/ ;; ",
+    "L0007": "版权所有 © 2023《中国肺癌杂志》编辑部 ;; Copyright © 2023, Chinese Journal of Lung Cancer. ;; https://creativecommons.org/licenses/by/3.0/ ;; This is an open access ",
+    "L0008": "2022年版权归中华医学会所有 ;; Copyright © 2022 by Chinese Medical Association ;; https://creativecommons.org/licenses/by/3.0/ ;; This work is licensed under a Cr",
+    "L0009": "© 2023《四川大学学报（医学版）》编辑部 版权所有 ;; Copyright ©2023 Editorial Board of Journal of Sichuan University (Medical Sciences) ;; https://creativecommons.org/lice",
+    "L0010": "Copyright © 2024 Editorial office of Chinese Journal of Chromatography ;; https://creativecommons.org/licenses/by/4.0/ ;; 本文是开放获取文章，遵循CC BY 4.0协议 ;; h",
+    "L0011": "© 2024《四川大学学报（医学版）》编辑部 版权所有 ;; Copyright ©2024 Editorial Board of Journal of Sichuan University (Medical Sciences) ;; https://creativecommons.org/lice",
+    "L0012": "版权所有 © 2024《中国肺癌杂志》编辑部 ;; Copyright © 2024, Chinese Journal of Lung Cancer. ;; https://creativecommons.org/licenses/by/3.0/ ;; This is an open access ",
+    "L0013": "2024年版权归中华医学会所有 ;; Copyright © 2024 by Chinese Medical Association ;; https://creativecommons.org/licenses/by/3.0/ ;; This work is licensed under a Cr",
+    "L0014": "©Journal of Central South University (Medical Science). All rights reserved. ;; https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; 开放获取 (Open acces",
+    "L0015": "©Journal of Central South University (Medical Science). All rights reserved. ;; https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; (Open access) ：O",
+    "L0016": "© 2024《四川大学学报（医学版）》编辑部 版权所有 ;; Copyright ©2024 Editorial Office of Journal of Sichuan University (Medical Sciences) ;; https://creativecommons.org/lic",
+    "L0017": "©Journal of Central South University (Medical Science). All rights reserved. ;; https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; (Open access) ：T",
+    "L0018": "©Journal of Central South University (Medical Science). All rights reserved. ;; https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; (Open access) : ",
+    "L0019": "©Journal of Central South University (Medical Science). All rights reserved. ;; https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; 开放获取(Open access",
+    "L0020": "©Journal of Central South University (Medical Science). All rights reserved. ;; https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; (Open access):Th",
+    "L0021": "Copyright © 2025 Editorial office of Chinese Journal of Chromatography ;; https://creativecommons.org/licenses/by/4.0/ ;; 本文是开放获取文章，遵循CC BY 4.0协议 ;; h",
+    "L0022": "?Journal of Central South University (Medical Science). All rights reserved. ;; https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; 开放获取 (Open acces",
+    "L0023": "© 2024《四川大学学报（医学版）》编辑部 ;; Copyright ©2024 Editorial Office of Journal of Sichuan University (Medical Sciences) ;; https://creativecommons.org/licenses",
+    "L0024": "2025年版权归中华医学会所有 ;; Copyright © 2025 by Chinese Medical Association ;; https://creativecommons.org/licenses/by/3.0/ ;; This work is licensed under a Cr",
+    "L0025": "版权所有 © 2025《中国肺癌杂志》编辑部 ;; Copyright © 2025, Chinese Journal of Lung Cancer. ;; https://creativecommons.org/licenses/by/3.0/ ;; This is an open access ",
+    "L0026": "© 2025《四川大学学报（医学版）》编辑部 ;; Copyright ©2025 Editorial Office of Journal of Sichuan University (Medical Sciences) ;; https://creativecommons.org/licenses",
+    "L0027": "© 2025《四川大学学报（医学版）》编辑部 ;; Copyright ©2025 Journal of Sichuan University (Medical Science Edition) ;; https://creativecommons.org/licenses/by-nc/4.0/ ;",
+    "L0028": "©Journal of Central South University (Medical Science). All rights reserved. ;; https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; Open access: Thi",
+    "L0029": "© 2025《四川大学学报（医学版）》编辑部 ;; Copyright © 2025 Editorial Office of Journal of Sichuan University (Medical Sciences) ;; https://creativecommons.org/license",
+    "L0030": "https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; 开放获取(Open access)：本文遵循知识共享许可协议，允许第三方用户按照署名-非商业性使用-禁止演绎4.0(CC BY-NC-ND 4.0)的方式，在任何媒介以任何形式复制、传播本作品",
+    "L0031": "Copyright © 2026 Editorial office of Chinese Journal of Chromatography ;; https://creativecommons.org/licenses/by/4.0/ ;; 本文是开放获取文章，遵循CC BY 4.0协议 ;; h",
+    "L0032": "© 2026《四川大学学报（医学版）》编辑部 ;; Copyright © 2026 Editorial Office of Journal of Sichuan University (Medical Sciences) ;; https://creativecommons.org/license",
+    "L0033": "©Journal of Central South University (Medical Science). All rights reserved. ;; https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; 本文遵循知识共享许可协议，允许第",
+    "L0034": "2026年版权归中华医学会所有 ;; Copyright © 2026 by Chinese Medical Association ;; https://creativecommons.org/licenses/by/3.0/ ;; This work is licensed under a Cr",
+    "L0035": "版权所有 © 2026《中国肺癌杂志》编辑部 ;; Copyright © 2026, Chinese Journal of Lung Cancer. ;; https://creativecommons.org/licenses/by/3.0/ ;; This is an open access ",
+    "L0036": "©Journal of Central South University (Medical Science). All rights reserved. ;; https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; 开放获取：本文遵循知识共享许可协",
+    "L0037": "Journal of Central South University (Medical Science). All rights reserved. ;; https://creativecommons.org/licenses/by-nc-nd/4.0/ ;; 开放获取(Open access)",
+    "L0038": "版权所有©《中国肺癌杂志》编辑部2017 ;; Copyright ©2017 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0039": "版权所有©《中国肺癌杂志》编辑部2016 ;; Copyright ©2016 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0040": "版权所有©《中国肺癌杂志》编辑部2018 ;; Copyright ©2018 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0041": "版权所有©《中国肺癌杂志》编辑部2018 ;; Copyright ©2018 Chinese Journal of Lung Cancer.All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This is",
+    "L0042": "版权所有©《中国肺癌杂志》编辑部2011 ;; Copyright ©2011 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0043": "版权所有©《中国肺癌杂志》编辑部2015 ;; Copyright ©2015 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0044": "版权所有©《中国肺癌杂志》编辑部2012 ;; Copyright ©2012 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0045": "版权所有©《中国肺癌杂志》编辑部2014 ;; Copyright ©2014 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0046": "版权所有©《中国肺癌杂志》编辑部2012 ;; Copyright ©2012 Chinese Journal of Lung Cancer.All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This is",
+    "L0047": "版权所有©《中国肺癌杂志》编辑部2010 ;; Copyright ©2010 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0048": "版权所有©《中国肺癌杂志》编辑部2013 ;; Copyright ©2013 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0049": "版权所有© 《中华急诊医学杂志》编辑部2017 ;; Copyright © 2017 CHINESE JOURNAL OF EMERGENCY MEDICINE. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0",
+    "L0050": "版权所有©《中国肺癌杂志》编辑部2008 ;; Copyright ©2008 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0051": "版权所有©《中国肺癌杂志》编辑部2019 ;; Copyright ©2019 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0052": "Copyright © 2008 Institute of Microbiology, Chinese Academy of Sciences and Chinese Society for Microbiology. Published by Elsevier B.V. All rights re",
+    "L0053": "版权所有©《中国肺癌杂志》编辑部2020 ;; Copyright ©2020 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0054": "© 2016 Traditional Chinese Medicine Periodical Press ;; Since January 2020 Elsevier has created a COVID-19 resource centre with free information in En",
+    "L0055": "Copyright © 2006 Institute of Microbiology, Chinese Academy of Sciences and Chinese Society for Microbiology. Published by Elsevier B.V. All rights re",
+    "L0056": "2020年版权归中华医学会所有 ;; Copyright © 2020 by Chinese Medical Association ;; https://creativecommons.org/licenses/by-nc-sa/3.0/ ;; This work is licensed unde",
+    "L0057": "2018年版权归中华医学会所有 ;; Copyright © 2018 by Chinese Medical Association ;; https://creativecommons.org/licenses/by-nc-sa/3.0/ ;; This work is licensed unde",
+    "L0058": "2016年版权归中华医学会所有 ;; Copyright © 2016 by Chinese Medical Association ;; https://creativecommons.org/licenses/by-nc-sa/3.0/ ;; This work is licensed unde",
+    "L0059": "2015年版权归中华医学会所有 ;; Copyright © 2015 by Chinese Medical Association ;; https://creativecommons.org/licenses/by-nc-sa/3.0/ ;; This work is licensed unde",
+    "L0060": "2017年版权归中华医学会所有 ;; Copyright © 2017 by Chinese Medical Association ;; https://creativecommons.org/licenses/by-nc-sa/3.0/ ;; This work is licensed unde",
+    "L0061": "2019年版权归中华医学会所有 ;; Copyright © 2019 by Chinese Medical Association ;; https://creativecommons.org/licenses/by-nc-sa/3.0/ ;; This work is licensed unde",
+    "L0062": "版权所有©《中国肺癌杂志》编辑部2021 ;; Copyright ©2021 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0063": "2021年版权归中华医学会所有 ;; Copyright © 2021 by Chinese Medical Association ;; https://creativecommons.org/licenses/by-nc-sa/3.0/ ;; This work is licensed unde",
+    "L0064": "2021年版权归中华医学会所有 ;; Copyright © 2021 by Chinese Medical Association ;; https://creativecommons.org/licenses/by/3.0/ ;; This work is licensed under a Cr",
+    "L0065": "版权所有©《中国肺癌杂志》编辑部2022 ;; Copyright ©2022 Chinese Journal of Lung Cancer. All rights reserved. ;; https://creativecommons.org/licenses/by/3.0/ ;; This i",
+    "L0066": "https://creativecommons.org/licenses/by/4.0/ ;; 本文是开放获取文章，遵循CC BY 4.0协议 ;; https://creativecommons.org/licenses/by/4.0/ ;; This is an open access arti",
+    "L0067": "Copyright © Zhejiang University and Springer-Verlag GmbH Germany, part of Springer Nature 2023"
+   }
+  }
+ }
+}
