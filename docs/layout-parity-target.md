@@ -40,6 +40,17 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 （`tools/build-metrics-probe.ps1`、`tools/device-probe/MetricsActivity.java`、`MetricsManifest.xml`）留在版本库里，
 下一版和"西文行的宽度多收"放在同一轮改。六个数因此仍是上表那一列。
 
+本轮（第 33 节）也没有改引擎，量的是"换行留在行末的那个空格到底占不占宽"这一件事，七个数因此仍是上表那一列。
+真机两个新 tag：`tailfit1` 与合并 main（`9e1fc6a`，2.6.8）之后的 `postmerge1`（engine head_sha `1fb8c4e`，
+两次都是 28 页 14460 字，第 7 项同为 231/366 = 63.3%）。量到的东西：para 94（手机 block 95）第 2 行行末那个
+空格确实收了 4.00 px 的行宽（`lineTailChars=1`、`lineTailFree=0`），把"行末空格不计宽"这一改放到 33 个受影响
+段落上和 Word 断点对账是 55 处对上变成 46 处对上，所以否掉；Word 那一行真正多出来的是把收尾的全角逗号整张脸
+（16.0 px）画在版心外（696.5 px 对版心 680.3 px），我们的悬挂提行只认下一行第 1、2 个字，提不动 `MPa，` 里的
+逗号。另外两件事按实测纠正：`431933f` 在这台仓库查不到对象，能查到的 main（`9e1fc6a`）引擎在手机上跑出来
+para 94 第 2 行仍是 39 字 / 断点 70；`Cu-Sn/TLP/10 min` 这一串在样稿与真值 PDF 里都搜不到，而真值 PDF 810 行
+正文里没有一行以 `/` 结尾，所以"斜杠不是断点"与真值一致，不动。数字与命令在第 33 节。
+
+
 再后一轮（第 26 节）先把"引擎到底收到了什么"量死：全篇只有封面第 0 段写了 w:lineRule="exact" w:line="380"（19 磅），没有任何 20 磅 / 16 磅的行距声明；Word 自己的读数是 Exactly 0 段、AtLeast 0 段、相邻基线正好 20.0pt 的段落 0 个。该改的还是改了：exact 当一把绝对长度算（真机量到 1pt=1.333333px、12pt 的 em=16.0000px，比例 1.000，不是 1.0741），画整像素行盒、小数那一截走 lineCarry。六条一个没动（两边 `lines-all.tsv` 同一个 sha `5F714EE762A78345`），页数 28=28，7 段错页全是 -1，见第 26.4 节。
 
 最近一轮（第 28 节，改后 tag `hang2`，改前基线 tag `hangbase2`）把 Word 的 `w:overflowPunct` 按它自己导出
@@ -1816,3 +1827,139 @@ para 86 六行的断点与 Word 的断点分别是 `34|50`、`78|88`、`121|132`
 
 **七项前后**（同一台 CDY-AN90，手机上跑的是各自那棵树的引擎采样，不是手机上装的发布包）：页数 28 对 28；段落页归属 7 段错页/206；行高误差中位 -0.767 px；p90 2.533 px；每页累计 0.79 行；右边界超 1 px 的行 1/33；逐行换行点 115/165 → 116/165；第 7 项 227/353 = 64.3% → 228/352 = 64.8%（多断 63 → 62，少断 63 → 62）。两合一（本改动 + 第 30 节斜杠）的读数由发布包另采，记在 `tools/parity-six.ps1` 的 tag 里。
 
+## 33. 行末那个空格占不占宽：量到 px，否掉"行末空格不计宽"，并把 Word 真正多出来的那 16 px 定位到悬挂（改前 tag `tailfit1`，合并 main 后 `postmerge1`）
+
+一句话：那个空格收 4.00 px，是真的；但把"行末空格不计宽"改下去，第 7 项从对上 55 处掉到对上 46 处，
+所以不改。para 94 那一行 Word 真正多出来的是把收尾全角逗号整张脸画到版心外（+16.0 px），我们的悬挂
+只认下一行头两个字，提不动 `MPa，` 里的逗号。
+
+### 33.1 采样台加的两列与一台对照（都进了版本库）
+
+`tools/device-probe/DeviceCapture.java` 在 `lines-all.tsv` 末尾追加两列（老列位置一字不动）：
+
+- `lineTailChars`：这一行的行范围内、被换行留在行末的空白字符个数（数原始字符，不看 `clean()` 之后的文本）。
+- `lineTailFree`：这些空白有没有被 `DocxTextLayout.BlankTail` 盖住。1 = 不计宽（引擎的本意），0 = 仍算在行宽里。
+
+为什么非要在真机量：`BlankTail` 只在两端对齐那一趟里挂上文本，而那一趟在整段一行都拉不开时会把整份结果丢掉
+（`DocxTextLayout` 的 `spreadText`：`if (widened == 0) return laidOut;`）——于是一整段的行末空白都还在计费。
+block 95 正是这种段：9 行 `lineStretchPx` 全是 0.00。
+
+另两台：
+
+- `chars-tail.tsv`：每行末尾 9 个码元逐条列出码位、x、advance、以及盖在它身上的 span 名字（`AutoGap(before,after)`
+  / `WidenGap(extra)` / `BlankTail` / `AtomicRunSpan`）。"行末那 4 px 是空格还是 autoSpace 缝"这种问题只有这一张表能答。
+- `tail-fit.tsv` + `tools/tail-fit.py`：把每个"换行在行末留了空格"的段落重排一遍（`which=relay`：两端对齐的拉伸去掉、
+  行末空格改计 0 宽，glue 保留），与 `which=live` 并列输出，再用 Word 导出 PDF 的断点给两版打分。
+  用法：`py tools/tail-fit.py -Capture artifacts/agent-layout-verify/tailfit1 -Tsv <out.tsv>`。
+
+`lineInkPx` / `lineTailPx` 这两列同时改成不再把平台的拒绝当成宽度：`getPrimaryHorizontal` 在被我们自己的 span
+拉伸过的行上有时回答 -1、有时回答 0，原来这两种回答都被当成坐标减出过"墨迹 0 px"。现在改成单调行走、拿不到就报 -1。
+
+### 33.2 para 94 第 2 行（手机 block 95 第 1 行，第 10 页）的全部数字
+
+| 量 | 数 | 命令 |
+| --- | --- | --- |
+| 我们这一行的拉伸前行宽 | 524.00 px（版心 566.93 px，剩余 43.00 px） | 读 `postmerge1/new/lines-all.tsv` 里 paragraph=95、line=1 那一行（`py tools/line-room.py -Capture artifacts/agent-layout-verify/tailfit1` 的 para 94 行同源） |
+| 行内墨迹终点 | 520.00 px | 同上，`lineInkPx` |
+| 行末空格 | `lineTailChars=1`、`lineTailFree=0`、`lineTailPx=4.00` | 同上 |
+| 那 4 px 是空格还是 autoSpace 缝 | 是空格：`chars-tail.tsv` 里 block 95 line 1 最后一个码元是 `U+0020`，x=520.00，身上没有 `AutoGap` | 读 `tailfit1/new/chars-tail.tsv` |
+| 下一行开头那一串 | `M`（14.00 px），未粘成整串；`MPa，` 单价 14+9+7+16 = 46.00 px | `nextRunChars` / `chars-at-punct.tsv` block 95 line 2 |
+| Word 这一行 | `…剪切强度为37.68 MPa，`，43 字，断点在偏移 74（我们在 70，早 4 字） | `py tools/break-agreement.py -Capture artifacts/agent-layout-verify/postmerge1` |
+| Word 这一行的墨迹右端 | 696.5 px，最后一张 `，` 的 bbox 宽 16.00 px、x1=696.5 | pymupdf rawdict，`artifacts/agent-typeset/pdf-truth/input-liu.pdf` 第 10 页 |
+| 版心右边界 | 680.32 px（510.26 pt） | 同上 |
+
+两个假设都能把这一行修好，但只有一个能全篇用：
+
+1. 行末空格不计宽：520.00 + 46.00 = 566.00 ≤ 566.93，正好塞进（真机 `relay` 重排实测这一行 566.00 px、剩 1.00 px、
+   断点 74 = Word 的断点）。
+2. 收尾全角标点允许悬挂：524.00 + 30.00 + 16.00 = 570.00，超出 566.93 只有 3.07 px，而 Word 自己在这行让逗号挂出
+   16.06 px。
+
+### 33.3 否掉"行末空格不计宽"（数字与命令）
+
+`py tools/tail-fit.py -Capture artifacts/agent-layout-verify/tailfit1`：
+
+- 全文 600 行里换行在行末留了空白的 68 行，**68 行全部在计费**（`lineTailFree=0`）。
+- 逐行判"若空格不计宽，被拒的那一串就塞得下"：14 行。
+- 段落级对账（只算能配上 Word 段落的 33 段，共 75 个 Word 断点）：**改前对上 55 处，改后对上 46 处**。
+  变好的 1 段是 block 95（= para 94，1/8 → 2/8）；变坏的 7 段全在第 26~28 页的参考文献里
+  （block 344 2/2 → 0/2、349 3/3 → 2/3、360 3/3 → 2/3、362 2/2 → 0/2、363 2/2 → 0/2、369 1/1 → 0/1、374 1/2 → 0/2），
+  另外 24 段不变。
+- 原因很直白：那 7 段是纯西文条目，Word 的断点正好落在"这个空格收钱"的位置上；空格一免费，我们每行多吃一个词。
+
+所以这一改不动，结论写在这里免得下一轮再量一遍。
+
+### 33.4 Word 真正多出来的那 16 px：我们的悬挂提行只走到下一行第 2 个字
+
+`DocxTextLayout.hangTrailingPunctuation`（`DocxTextLayout.java:266-309`）只看下一行的第 1 个字（若是可悬挂标点）
+或第 1、2 个字（第 1 个是普通汉字、第 2 个是可悬挂标点），且要求普通字本身仍在版心里。`MPa，` 的逗号在下一行
+第 4 个字上，所以提不上来。全文 600 行我们的 `hangOverPx` 只有 8 行非零；Word 导出 PDF 里越界 11.42~12.44 pt 的
+正文行有 20 行（`，×9 、×5 。×4 ；×2`，另有 `℃×3` 不是我们挂的那类）。也就是说差的那一小步是：把"拉丁/数字整串
++ 收尾标点"当成一个可提单元，整串塞进版心、只让标点越界。改之前先把第 6 条的判法记住：`tools/edge-parity.ps1`
+比的是"我们挂出不超过 Word 自己那一行的挂出"，不是"谁都不许越界"。
+
+### 33.5 两处与主控件说法对不上的地方（都给命令）
+
+1. `431933f` 在这台仓库里查不到对象：`git cat-file -t 431933f` → `Not a valid object name`。能查到的 `main`
+   是 `9e1fc6a`（含 2.6.8，`70d4d26`），把它并进 `agent-parity2`（`1fb8c4e`）后在手机上跑一遍：
+   para 94 第 2 行仍是 **39 字、断点 70**，不是 44 字（`postmerge1`，engine head_sha `1fb8c4e8486485…`，
+   与 `tailfit1` 的 `lines-all.tsv` 是同一份字节（两边 sha256 前 16 位都是 `EEE155468C638083`，`Get-FileHash -Algorithm SHA256`），说明 2.6.8 没有动这份稿子的排版）。
+2. `Cu-Sn/TLP/10 min` 这一串：样稿与真值 PDF 里都搜不到——
+   `py -c "…re.findall(w:t) …"` 全文 373 段没有 `TLP/10` 或 `Cu-Sn/TLP`；真值 PDF `get_text()` 28 页里也没有。
+   真值 PDF 810 行正文里以 `/` 结尾的行 = **0**（只有第 22 页表格里三个只含 `/` 的单元格），
+   我们 600 行里也是 0。也就是说"斜杠不是断点"（`e16b236`）与真值一致，这一条不动。
+
+### 33.6 这一族真正剩下的那一处：block 87（para 86）整串挪走，空位还有 156 px
+
+`postmerge1/new/run-fit.tsv` 第 1 行：粘住的串 `Cu/SB/P-Cu/SB/Cu` 自然宽 127.00 px，我们那一行末尾还剩
+156.00 px（`run_would_fit=1`），glue 自己的报价 128.00 px 与普通 `measureText` 的 128.00 px 相同（不贵）；
+把 glue 去掉重排，落点正是 Word 的 50 字那一行（`ctrl_line_end=50`、552.00 px、还剩 15.00 px），
+而带 glue 的真机布局把这串整串挪到了下一行，本段第一个断点因此早 16 字，后面 2 行跟着错
+（`py tools/line-room.py -Capture artifacts/agent-layout-verify/tailfit1` 里 para 86 那三行：1 行早断 + 2 行 knock-on）。
+128 px 的东西在 156 px 空位前被挪走，原因还没量到；下一轮拿这一段文本做单段实验室，一次改一个开关。
+其余 4 条 run-fit 行都是合理拒绝（run_px > room_px：block 95 92>86、114 93>75、361 64>7、364 79>53）。
+
+### 33.7 七项
+
+本轮未改引擎（三次采样的 `lines-all.tsv` 都是同一份字节 `EEE155468C638083`），七项在合并 main 之后的树上
+重跑一遍（`pwsh tools/parity-six.ps1 -Tag merged268`，engine head_sha `03c6afd`、`layout_dirty=False`，
+`pages.tsv` sha `C4C5DBA577EF336D`，字体表指纹 `AB3B592E304F`，28 页 / 14460 字）：
+
+| # | 本轮读数 | 与第 30 节那一列 |
+| --- | --- | --- |
+| 1 | 段落页归属 7 段错页 / 206（exact 96.6%，页差直方图 -1=>7、0=>199，首个错页 para 121） | 一字不差 |
+| 2 | 逐行行高误差中位 -0.767 px（n=91，Word 26.267 px） | 一字不差 |
+| 3 | 逐行行高误差 p90 2.533 px（max 3.467） | 一字不差 |
+| 4 | 每页累计高度误差 0.79 行（最差队列 sz12 line300 snap=false 2.55 行） | 一字不差 |
+| 5 | 逐行换行点一致率 118/165 = 71.5% | 一字不差 |
+| 6 | 右边界超出 1 px 的行数 1 / 35（还是 para 160 那一行，少 1.53 px） | 一字不差 |
+| 7 | 断点一致率（Word 导出 PDF 尺子）231/365 = 63.3%（103 段，多断 67、少断 67；同一份真值算出错页 6 段） | 与 `postmerge1`、`tailfit1` 同一个数 |
+
+也就是说这一轮的所有结论都是量出来的，没有任何一项指标因为量台改动而动过。
+
+### 33.8 粘串的真实价格量出来了：block 87 那一串平台按 235 px 收，而 span 自己报 128 px
+
+新量台 `glue-price.tsv`（`tools/device-probe/DeviceCapture.java` 的 `gluePrice`）：把粘住的串所在段一遍遍
+重排，列宽从 500 px 加到 660 px，记下"这一串终于留在上一行"的最小列宽 `threshold_px`；这个门槛减掉上一行的
+拉伸前行宽就是断行器真正用的价格。同时记下盖在串首字上的 `AtomicRunSpan` 个数、它的 `getSize` 报价、以及它的范围。
+
+真机（tag `glue3`，engine head_sha `369085d`，与 postmerge1 的 `lines-all.tsv` 同一份字节
+`eee155468c638083`，也就是本轮没改排版）：
+
+| 页 | block | 串 | 串的自然宽 | 上一行还剩 | span 报价 | 覆盖数 | 门槛列宽 | 平台实收 | 判定 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 8 | 87 | `Cu/SB/P-Cu/SB/Cu` | 127.00 | 156.00 | 128.00 | 1 | 646 | **235.00** | 串该留在原行却被挪走 |
+| 10 | 95 | `NPC/SAC305` | 92.00 | 86.00 | 80.00 | 1 | 573 | 92.00 | 合理拒绝（92 > 86） |
+| 13 | 114 | `CuO/NaCl/Ag` | 93.00 | 75.00 | 88.00 | 1 | 660 | 168.00 | 拒绝本身合理（93 > 75），但价也虚高 |
+| 27 | 361 | `Cu/Sn/Ag` | 64.00 | 7.00 | 64.00 | 1 | 624 | 64.00 | 报价与实收一致，合理拒绝 |
+| 27 | 364 | `SAC305/Cu` | 79.00 | 53.00 | 72.00 | 1 | 580 | 66.00 | 合理拒绝 |
+
+三条结论：
+
+1. block 87 的拒绝是错的。串自己报 128.00 px、上一行还剩 156.00 px，去掉粘串重排的落点正是 Word 的 50 字行
+   （`run-fit.tsv`：552.00 px、剩 15.00 px），可平台一直要列宽加到 646 px 才肯把这一串留在原行，等于按
+   235.00 px 收。覆盖在串首字上的 `AtomicRunSpan` 只有 1 张，所以不是重复粘。
+2. block 95 / 361 / 364 三处平台按串自己的报价收（92 / 64 / 66），拒得对，说明机制本身没错，错的是价格。
+3. 下一轮的改法已经有靶子：布局之后做一次自检——某一行的行首是粘住的串、而它上一行的剩余宽度足够放下
+   这串（按不粘时的实测宽算），就把那一张粘串去掉重排，且只有"其他行的断点一个都没动"才接受这次重排。
+   本轮没有动引擎：这条改动要配 `tools/test-host.ps1` 全绿与七项复采，留给下一轮一次做完。
