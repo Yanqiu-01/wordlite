@@ -96,13 +96,53 @@ public final class HttpTransport {
      * allowPlainHttp 放行 http 由调用方负责——期刊官网自建站只有 http 的 PDF，白名单在检索侧管着，
      * 白名单之外一律照旧必须 HTTPS。
      */
+    static final int MAX_PDF_REDIRECTS = 5;
+    /** 301/302/303/307/308 都是"东西在别处"。 */
+    static boolean isRedirect(int status) {
+        return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+    }
+    /**
+     * 把 Location 接成下一条地址：相对写法按当前地址解析，只放行 http/https，
+     * 调用方没放行时不许从加密掉进不加密——白名单那件事不能换个地方被绕开。
+     */
+    static String follow(String from, String location, boolean allowPlainHttp) throws ApiClient.Failure {
+        if (location == null || location.trim().isEmpty())
+            throw new ApiClient.Failure("检索源发生重定向", 302);
+        String target;
+        try {
+            target = new java.net.URL(new java.net.URL(from), location.trim()).toString();
+        } catch (java.net.MalformedURLException error) {
+            throw new ApiClient.Failure("重定向地址无效", 0);
+        }
+        String lower = target.toLowerCase(java.util.Locale.ROOT);
+        if (lower.startsWith("https://")) return target;
+        if (lower.startsWith("http://")) {
+            if (!allowPlainHttp) throw new ApiClient.Failure("重定向要转到不加密的地址，没放行", 0);
+            return target;
+        }
+        throw new ApiClient.Failure("重定向地址不是网页或 PDF", 0);
+    }
+
     public static Fetched getPdf(String url, Map<String, String> headers, int timeoutSeconds, int maxBytes,
                                  ApiClient.Cancellation cancellation, java.net.Proxy proxy,
                                  boolean allowPlainHttp) throws IOException {
         int limit = maxBytes <= 0 ? MAX_PDF_BODY : Math.min(maxBytes, MAX_PDF_BODY);
         boolean[] capped = new boolean[1];
-        ApiClient.Response response = send(url, headers, timeoutSeconds, limit, cancellation, proxy,
-                null, null, capped, allowPlainHttp);
+        /* 一份 PDF 的链接十有八九要跳一次：文献标识符跳到出版社、期刊官网从加密跳到不加密、
+           短链跳到真页。检索那一路把重定向当错误是对的（挡人页正靠这一跳认），可取全文时
+           它只是路上的一站——真机那十四篇待下的 PDF 全落在这类形状上。所以只有这一路跟跳。 */
+        String at = url;
+        ApiClient.Response response;
+        for (int hop = 0; ; hop++) {
+            try {
+                response = send(at, headers, timeoutSeconds, limit, cancellation, proxy,
+                        null, null, capped, allowPlainHttp);
+                break;
+            } catch (ApiClient.Failure error) {
+                if (!isRedirect(error.status) || hop >= MAX_PDF_REDIRECTS) throw error;
+                at = follow(at, error.location, allowPlainHttp);
+            }
+        }
         Fetched fetched = new Fetched();
         fetched.status = response.status;
         fetched.bytes = response.raw == null ? new byte[0] : response.raw;
@@ -248,7 +288,12 @@ public final class HttpTransport {
             }
             if (form != null) writeForm(connection, form, cancellation);
             int status = connection.getResponseCode();
-            if (status >= 300 && status < 400) throw new ApiClient.Failure("检索源发生重定向", status);
+            if (status >= 300 && status < 400) {
+                ApiClient.Failure redirect = new ApiClient.Failure("检索源发生重定向", status);
+                redirect.location = connection.getHeaderField("Location");
+                drain(connection, cancellation);
+                throw redirect;
+            }
             if (status < 200 || status >= 300) {
                 ApiClient.Failure failure = new ApiClient.Failure(statusMessage(status), status);
                 if (status == 429) failure.retryAfterSeconds = retryAfterSeconds(connection);

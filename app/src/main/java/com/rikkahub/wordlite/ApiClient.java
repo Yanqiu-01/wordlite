@@ -43,6 +43,8 @@ public final class ApiClient {
         /** 这条路是拨不上而不是对方答了话（连接被当场拒回）。回环上没人监听的端口和源站回的 403
          *  需要完全相反的补救，所以这个区别得留到选路那一层，不能淹在同一句"网络连接失败"里。 */
         public boolean refused;
+        /** 3xx 那一句里对面给的"东西在别处"给的是哪儿。取全文那一路要跟这一跳，所以得留在异常上。 */
+        public String location;
         public Failure(String message, int status) { super(message); this.status = status; }
     }
     private ApiClient() { }
