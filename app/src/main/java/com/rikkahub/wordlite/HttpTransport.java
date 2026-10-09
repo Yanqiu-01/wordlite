@@ -232,11 +232,15 @@ public final class HttpTransport {
            OpenAlex 送回来 60 篇候选），换直连被当场拒回，旧写法把整句改写成"试过的路都没通：直连
            拒绝连接"——屏幕上读起来像那条代理从没被试过。宿主同形状复现：status=0、reachOf=-1。 */
         StringBuilder walked = new StringBuilder();
-        if (answered != null)
-            walked.append(Routes.label(answeredVia)).append(" 答了 HTTP ").append(answered.status);
-        if (burned.length() > 0) {
-            if (walked.length() > 0) walked.append("；");
-            walked.append(burned);
+        /* 只有一条路时一个字都不改写：那时候"源答了什么"已经是全部信息，而下游按整句比对的判据
+           （DetectRegression 认 404/429 那两句原话）照旧要认它。"走过哪几条路"只在多条路之间说得通。 */
+        if (order.size() > 1) {
+            if (answered != null)
+                walked.append(Routes.label(answeredVia)).append(" 答了 HTTP ").append(answered.status);
+            if (burned.length() > 0) {
+                if (walked.length() > 0) walked.append("；");
+                walked.append(burned);
+            }
         }
         String roads = walked.length() > 0 ? "（这一轮走过的路：" + walked + "）" : "";
         if (answered != null) {

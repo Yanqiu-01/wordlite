@@ -342,6 +342,15 @@ public final class RoutesRegression {
             check(DuplicateEngine.reachOf(thrown) > 0,
                     "答过话的源不许被记成「这一轮没通」：它答了，只是匿名配额到顶");
             check(!Routes.anyPortDown(), "把包送出去的那条路不进冷却，429 不是「没人监听」");
+            ApiClient.Failure solo = null;
+            try {
+                HttpTransport.get("http://127.0.0.1:" + proxyPort + "/search", null, 2, 0, null);
+            } catch (ApiClient.Failure error) {
+                solo = error;
+            }
+            check(solo != null && "检索源限流（HTTP 429），本次跳过".equals(solo.getMessage()),
+                    "只有一条路时那句话一个字都不改写——走过的路只在多条路之间才说得通（实得："
+                            + (solo == null ? "(没抛)" : solo.getMessage()) + "）");
         } catch (java.io.IOException error) {
             throw new AssertionError("桩服务起不来：" + error);
         } finally {
