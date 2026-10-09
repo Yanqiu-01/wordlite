@@ -1116,20 +1116,29 @@ public final class RetrievalCoverageRegression {
         fullTextEmpty = true;
         PaperSources.Limits dry = limits(12, 4);
         dry.fullTexts = 1;
-        dry.autoFullTexts = 3;
+        /* 上限给到 10：这一档要量的是"同一家落空两次之后不再替它花钱"，
+           上限先到的话量到的就是上限本身，挡不住的那几篇根本轮不到说话。 */
+        dry.autoFullTexts = 10;
         DuplicateEngine.Report empty = scan(thesis(3), new TextCorpus(),
                 engines("crossref", "openalex", "semantic-scholar", "europepmc"), dry);
-        check(empty.autoPdfTried == DuplicateEngine.MAX_AUTO_MISS_STREAK
-                        && empty.autoPdfFetched == 0 && empty.autoPdfFailed == DuplicateEngine.MAX_AUTO_MISS_STREAK,
-                "连着两篇抓回来一个字都没有就收手，剩下的请求还给检索：试 "
-                        + empty.autoPdfTried + " 抓成 " + empty.autoPdfFetched
-                        + " 落空 " + empty.autoPdfFailed);
+        check(empty.autoPdfTried >= DuplicateEngine.MAX_AUTO_MISS_STREAK
+                        && empty.autoPdfFailed == empty.autoPdfTried && empty.autoPdfFetched == 0,
+                "抓回来一个字都没有的一篇也不许多抓：试 " + empty.autoPdfTried
+                        + " 抓成 " + empty.autoPdfFetched + " 落空 " + empty.autoPdfFailed);
+        check(hits("/europepmc/fulltext") == DuplicateEngine.MAX_AUTO_MISS_STREAK,
+                "落空按家计：同一家连着两篇读不出正文层就不许多花一次请求，"
+                        + "europepmc 全文请求 " + hits("/europepmc/fulltext") + " 次");
+        check(hits("/fulltext") >= 1,
+                "别家的链接不许被这一家的落空连坐：crossref 全文请求 " + hits("/fulltext") + " 次");
         check(empty.fullTextCandidates == 0,
                 "抓回空正文的一篇也不许标成正文可比：" + empty.fullTextCandidates);
-        check(notes(empty, "2 篇抓回来没有正文层，仍按摘要比对"), "落空那几篇要说清仍按摘要比");
-        check(notes(empty, "没来得及下（连着 2 篇都读不出正文层）"),
-                "收手之后剩下的篇数照实写成没来得及，并写明是被连着落空挡的：" + empty.autoPdfLeft);
-        check(notes(empty, "回来的页面几乎没字 " + DuplicateEngine.MAX_AUTO_MISS_STREAK + " 篇"),
+        check(notes(empty, empty.autoPdfFailed + " 篇抓回来没有正文层，仍按摘要比对"),
+                "落空那几篇要说清仍按摘要比：" + empty.autoPdfFailed);
+        check(empty.autoPdfLeft > 0
+                        && notes(empty, "没来得及下（Europe PMC 这一轮连着 2 篇都读不出正文层）"),
+                "剩下的篇数写成没来得及，并点名是哪一家的链接读不出：" + empty.autoPdfLeft
+                        + " " + empty.autoPdfReason);
+        check(notes(empty, "回来的页面几乎没字 " + empty.autoPdfFailed + " 篇"),
                 "落空按形状说人话，不许只写一句\u201c没抓到\u201d：" + empty.autoPdfShapes);
         check(CheckReport.html("thesis.docx", empty).contains("回来的页面几乎没字"),
                 "报告那张表里的顺手抓正文一行也带形状");

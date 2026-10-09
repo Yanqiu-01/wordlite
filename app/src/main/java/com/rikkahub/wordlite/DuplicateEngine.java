@@ -31,8 +31,11 @@ public final class DuplicateEngine {
     /** 一轮里"顺手抓正文"的篇数天花板：设置里的数最高也只能到这里，剩下的额度得留给检索。 */
     static final int MAX_AUTO_FULL_TEXTS = 10;
     /**
-     * 连着几篇抓回来读不出正文层就收手：2026-10-09 真机那一轮六次全落空（扫描版、挂羊头的链接），
-     * 白烧六次请求额度，一篇正文都没多出来。落空是有形状的，连着两次同一种落空就该把额度还给检索。
+     * 同一家连着几篇抓回来读不出正文层，就不再替它花额度（别家照抓）。
+     * <p>2026-10-09 真机先量了"整轮连着两篇就收手"那一版：Europe PMC 这一轮链接整批超时，
+     * 两条它的落空把后面 arXiv 三条实测能下成 5.6 万字正文的直链一起挡在门外
+     * （探针同一轮逐条实测：arXiv rank=0 五条全部 200，2.4-6.3 MB，1,645-65,535 字）。
+     * 落空是逐家的事，不是整轮的事。
      */
     static final int MAX_AUTO_MISS_STREAK = 2;
     /** "本轮顺手抓了 N 篇……"那句的开头。注记要按它找到紧跟其后的"存进自建库"那一句。 */
@@ -1719,9 +1722,11 @@ public final class DuplicateEngine {
            它每次抓之前要从 sweep 那份请求额度里领一次——领不到就是与检索抢同一个 120 次抢输了，
            照实写"还有几篇没来得及下"，不许假装这一轮没这事。 */
         int autoCap = sweep == null ? 0 : Math.min(MAX_AUTO_FULL_TEXTS, Math.max(0, limits.autoFullTexts));
-        int autoTried = 0, autoGot = 0, autoFailed = 0, autoLeft = 0, autoMissStreak = 0;
+        int autoTried = 0, autoGot = 0, autoFailed = 0, autoLeft = 0;
         String autoOut = "";
         LinkedHashMap<String, Integer> autoShapes = new LinkedHashMap<String, Integer>();
+        /** 逐家记落空：哪一家的链接这一轮已经连着读不出正文层，它的剩下的篇数就不再问。 */
+        LinkedHashMap<String, Integer> autoMisses = new LinkedHashMap<String, Integer>();
         for (int i = 0; i < plan.size(); i++) {
             CandidateRanker.Selection pick = plan.get(i);
             if (cancelled(cancellation)) { note(report, "检索已取消，结果只覆盖已完成的窗口"); break; }
@@ -1752,8 +1757,10 @@ public final class DuplicateEngine {
                 } else if (deadline - System.currentTimeMillis()
                         <= limits.timeoutSeconds * 1000L + 1000L) {
                     autoLeft++; autoOut = "检索时间已用满";
-                } else if (autoMissStreak >= MAX_AUTO_MISS_STREAK) {
-                    autoLeft++; autoOut = "连着 " + MAX_AUTO_MISS_STREAK + " 篇都读不出正文层";
+                } else if (count(autoMisses, autoEngine(candidate)) >= MAX_AUTO_MISS_STREAK) {
+                    autoLeft++;
+                    autoOut = PaperSources.label(autoEngine(candidate)) + " 这一轮连着 "
+                            + MAX_AUTO_MISS_STREAK + " 篇都读不出正文层";
                 } else if (!sweep.spendRequest()) {
                     autoLeft++; autoOut = "检索请求额度已用完";
                 } else {
@@ -1765,10 +1772,11 @@ public final class DuplicateEngine {
                     if (got == null || got.trim().isEmpty()) {
                         /* 落空要记下它到底是什么形状：六篇全是"扫描版无文字层"与"回来的不是 PDF"
                            是两回事，前者是这一轮的运气，后者是这一路的链接本身就不对。 */
-                        autoMissStreak++;
+                        String engine = autoEngine(candidate);
+                        autoMisses.put(engine, Integer.valueOf(count(autoMisses, engine) + 1));
                         String shape = CorpusImport.Batch.shapeLabel(sweep.shapes.lastShapeSince(shapeRow));
                         autoShapes.put(shape, Integer.valueOf(count(autoShapes, shape) + 1));
-                    } else autoMissStreak = 0;
+                    }
                     if (got != null && !got.trim().isEmpty()) {
                         body = body.isEmpty() ? got : body + "\n" + got;
                         fetched = true; autoGot++;
@@ -2333,6 +2341,12 @@ public final class DuplicateEngine {
     private static void note(Report report, String value) {
         if (report.notes.size() < MAX_NOTES && !report.notes.contains(value)) report.notes.add(value);
     }
+    /** 顺手抓正文按"哪一家给的这条链接"记账；认不出来源的归到 unknown 一堆，不充谁的名下。 */
+    private static String autoEngine(PaperSources.Candidate candidate) {
+        String engine = candidate == null || candidate.source == null ? null : candidate.source.engine;
+        return engine == null || engine.trim().isEmpty() ? "unknown" : engine.trim();
+    }
+
     /** "扫描版无文字层 4 篇、回来的不是 PDF 2 篇"：按篇数从多到少，最多三种，再多那一屏读不动。 */
     private static String tally(LinkedHashMap<String, Integer> shapes) {
         java.util.ArrayList<Map.Entry<String, Integer>> rows =
