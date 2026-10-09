@@ -656,9 +656,6 @@ public final class PaperSources {
         try {
             Map<String, String> headers = new LinkedHashMap<String, String>();
             headers.put("Accept", "application/pdf, application/octet-stream;q=0.8, */*;q=0.5");
-            /* 出版社的服务器对自带标识的抓取先挡一手，PDF 这一路换成人也在用的浏览器标识；
-               检索那几路仍用自带标识，那是给源站认出我们用的。 */
-            headers.put("User-Agent", PageText.USER_AGENT);
             got = HttpTransport.getPdf(url, headers, seconds(limits), HttpTransport.MAX_PDF_BODY, cancellation,
                     proxyFor(limits), plainHttpAllowed(url));
         } catch (IOException error) {
