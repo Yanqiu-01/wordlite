@@ -150,10 +150,12 @@ public final class LocalLibrary implements PaperSources.UnreadableLedger {
                 return fail(result, "库里已有同一篇正文：" + known);
             }
         }
-        if (entries.size() >= MAX_ENTRIES) return quotaFail(result, REASON_QUOTA, "自建库最多 " + MAX_ENTRIES + " 个文件");
+        if (entries.size() >= MAX_ENTRIES)
+            return quotaFail(result, REASON_QUOTA, fullReason() + "，这篇没进去，可以先删旧的");
         long total = 0L;
         for (int i = 0; i < entries.size(); i++) total += entries.get(i).bytes;
-        if (total + content.length > MAX_TOTAL_BYTES) return quotaFail(result, REASON_BYTES, "自建库容量已满（上限 96 MB）");
+        if (total + content.length > MAX_TOTAL_BYTES)
+            return quotaFail(result, REASON_BYTES, fullBytesReason() + "，这篇没进去，可以先删旧的");
         if (!directory.isDirectory() && !directory.mkdirs()) return fail(result, "无法创建自建库目录");
         File target = place(uniqueName(safe));
         if (target == null) return fail(result, "文件名越出自建库目录");
@@ -551,6 +553,24 @@ public final class LocalLibrary implements PaperSources.UnreadableLedger {
     }
 
     /** 名额是否用满：顺手抓正文要先问这一句才知道"抓回来存不存得下"。 */
+    /**
+     * 满库那句短句的唯一出处（"自建库已满 400 篇" / "自建库已满 96 MB"），没满返回空串。
+     * 批量回执、结果页注记、存库那一句都在它后面接自己的下半句，400 与 96 这两个数只在这里有一份。
+     */
+    public synchronized String fullReason() {
+        load();
+        return entries.size() >= MAX_ENTRIES ? fullQuotaReason()
+                : usedBytes() >= MAX_TOTAL_BYTES ? fullBytesReason() : "";
+    }
+
+    String fullQuotaReason() {
+        return "自建库已满 " + MAX_ENTRIES + " 篇";
+    }
+
+    String fullBytesReason() {
+        return "自建库已满 " + MAX_TOTAL_BYTES / (1024 * 1024) + " MB";
+    }
+
     public synchronized boolean capacityFull() {
         load();
         return entries.size() >= MAX_ENTRIES || usedBytes() >= MAX_TOTAL_BYTES;

@@ -1387,10 +1387,56 @@ public final class RetrievalCoverageRegression {
         overflow.autoBodies.add(new DuplicateEngine.AutoBody("装满之后的下一篇", "arxiv",
                 FULL_TEXT_PROBE + "库里没有的这一篇讲保温时间对厚度的影响，用来验额度满时怎么说。"));
         String overflowLine = DuplicateEngine.fileAutoBodies(stuffed, overflow);
-        check(overflowLine.contains("自建库额度已满") && overflowLine.contains("已按正文比对过"),
+        check(overflowLine.contains("自建库已满 400 篇") && overflowLine.contains("已按正文比对过")
+                        && overflowLine.contains("删"),
                 "库满那一句要说清这一轮照样比对过、只是没落盘，并给出下一步：" + overflowLine);
-        check(!DuplicateEngine.autoStoreLine(0, 0, 2, "入库时出错", 3, false).contains("额度已满"),
+        check(!DuplicateEngine.autoStoreLine(0, 0, 2, "入库时出错", 3, "").contains("自建库已满"),
                 "普通落空不许冒充额度满");
+
+        /* 六、结果页那一键下载（CorpusImport.download）也听这本账：同一条死链接第二次点下载
+           一个字节也不花，回执那句是"本机记着这条读不出字"，不是"没打通"。 */
+        resetFixtures();
+        LocalLibrary clicked = new LocalLibrary(freshLibraryDir("dead-link-click"));
+        PaperSources.Limits click = limits(12, 4);
+        click.unreadable = clicked;
+        CorpusImport.Fetch fetchPdf = url -> PaperSources.downloadPdf(url, click, null);
+        ArrayList<CorpusImport.Pick> one = new ArrayList<CorpusImport.Pick>();
+        one.add(new CorpusImport.Pick("挂羊头卖狗肉的那篇", dead));
+        int clickedBefore = hits("/dead-link.pdf");
+        CorpusImport.Batch firstClick = CorpusImport.download(clicked, one, fetchPdf, null, null);
+        check(hits("/dead-link.pdf") == clickedBefore + 1,
+                "一键下载第一次照旧花一次请求：" + hits("/dead-link.pdf"));
+        check("not-a-pdf".equals(firstClick.receipts.get(0).shape),
+                "第一次的回执按真形状报：" + firstClick.receipts.get(0).shape);
+        CorpusImport.Batch secondClick = CorpusImport.download(clicked, one, fetchPdf, null, null);
+        check(hits("/dead-link.pdf") == clickedBefore + 1,
+                "第二次点下载一次请求也不许多花：" + hits("/dead-link.pdf"));
+        check(secondClick.receipts.get(0).message.contains("本机记着这条读不出字")
+                        && "ledger-known-unreadable".equals(secondClick.receipts.get(0).shape),
+                "第二次那句要说本机记着，不许说成没打通：" + secondClick.receipts.get(0).describe());
+
+        /* 七、满库不许静默、也不许诱骗：下载那一步先问库，满了连一个字节都不花；
+           注记里那句"另有 N 篇可一键下进自建库"要改写成存不进来。 */
+        int stuffedBefore = hits("/dead-link.pdf");
+        CorpusImport.Batch fullBatch = CorpusImport.download(stuffed, one, fetchPdf, null, null);
+        check(hits("/dead-link.pdf") == stuffedBefore,
+                "满库那一次下载一个字节也不许多花：" + hits("/dead-link.pdf"));
+        check(fullBatch.receipts.get(0).message.contains("自建库已满 400 篇")
+                        && fullBatch.receipts.get(0).message.contains("这篇没进去")
+                        && "library-full".equals(fullBatch.receipts.get(0).shape),
+                "满库回执要说满了几篇、这篇没进去、下一步删旧的：" + fullBatch.receipts.get(0).describe());
+        check("自建库已满".equals(CorpusImport.Batch.shapeLabel("library-full")),
+                "失败按形状分堆那一句也跟着改：" + CorpusImport.Batch.shapeLabel("library-full"));
+        DuplicateEngine.Report blockedReport = new DuplicateEngine.Report();
+        blockedReport.downloadables.add(new DuplicateEngine.Downloadable("只有摘要可比的候选", "arxiv", dead));
+        blockedReport.notes.add(DuplicateEngine.downloadableLine(1));
+        check(DuplicateEngine.markDownloadablesBlocked(blockedReport, stuffed.fullReason())
+                        && blockedReport.notes.get(0).contains("自建库已满 400 篇")
+                        && blockedReport.notes.get(0).contains("存不进来")
+                        && !blockedReport.notes.get(0).contains("一键下进自建库"),
+                "满库时那一行不能再请用户点下载：" + blockedReport.notes.get(0));
+        check(!DuplicateEngine.markDownloadablesBlocked(blockedReport, ""),
+                "没满库那一句一个字都不许改");
         resetFixtures();
         crossrefSize = -1;
     }

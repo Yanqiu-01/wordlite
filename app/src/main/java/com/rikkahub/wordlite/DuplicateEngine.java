@@ -480,14 +480,15 @@ public final class DuplicateEngine {
                     firstError = added == null ? "入库时出错" : added.error;
             }
         }
-        String line = autoStoreLine(stored, duplicates, failed, firstError, library.size(), quotaFull);
+        String line = autoStoreLine(stored, duplicates, failed, firstError, library.size(),
+                quotaFull ? library.fullReason() : "");
         if (!line.isEmpty()) noteAfter(report, AUTO_FETCH_PREFIX, line);
         return line;
     }
 
     /** 存库那一句的唯一写法：一篇没存、一篇没挡就不开口，报告里不留一句空话。 */
     static String autoStoreLine(int stored, int duplicates, int failed, String firstError, int librarySize) {
-        return autoStoreLine(stored, duplicates, failed, firstError, librarySize, false);
+        return autoStoreLine(stored, duplicates, failed, firstError, librarySize, "");
     }
 
     /**
@@ -495,12 +496,15 @@ public final class DuplicateEngine {
      * 两件事不许并成一句"没存进去"。用户要看的是下一步做什么（删掉几篇就能继续存）。
      */
     static String autoStoreLine(int stored, int duplicates, int failed, String firstError, int librarySize,
-                                boolean quotaFull) {
+                                String quotaMessage) {
         if (stored <= 0 && duplicates <= 0 && failed <= 0) return "";
         StringBuilder out = new StringBuilder();
-        if (quotaFull && failed > 0) {
-            noteTail(out, failed + " 篇没存进自建库——自建库额度已满（" + firstError
-                    + "）：这一轮它们已按正文比对过，只是没落盘，删掉几篇就能存进来");
+        boolean full = quotaMessage != null && !quotaMessage.trim().isEmpty();
+        if (full && failed > 0) {
+            /* 满库单独一句：这几篇这一轮照样按正文比对过了，只是没落盘，
+               下一步写在同一句里（删旧的），不许只留一句"没存进去"。 */
+            noteTail(out, failed + " 篇没存进自建库——" + quotaMessage.trim()
+                    + "，这几篇没进去，可以先删旧的；这一轮它们已按正文比对过，只是没落盘");
             if (stored > 0)
                 noteTail(out, stored + " 篇已存进自建库（现在 " + librarySize + " 篇，可在自建库里删掉）");
             if (duplicates > 0) noteTail(out, "另有 " + duplicates + " 篇库里已有同一正文，没有重复入库");
@@ -516,6 +520,37 @@ public final class DuplicateEngine {
     private static void noteTail(StringBuilder out, String sentence) {
         if (out.length() > 0) out.append('，');
         out.append(sentence);
+    }
+
+    /** 那一行"可下载"的记号：整句里只有这一段这么写，改写时凭它认出自己写的那一行。 */
+    static final String DOWNLOADABLE_NOTE_MARK = "篇候选挂着可直接下载的开放获取 PDF";
+
+    /** 没满库时那一行的写法。 */
+    static String downloadableLine(int count) {
+        return "另有 " + count + " " + DOWNLOADABLE_NOTE_MARK
+                + "，结果页可一键下进自建库（自建库按正文比对，不按摘要）";
+    }
+
+    /**
+     * 自建库满了就把那一行"可下载"改写掉：存不进来的东西不许再请用户点。
+     * 检索那一轮还不知道库的状态（落库在检索之后），所以这一句由 app 在落库之后改写一次——
+     * 报告中心存的那份与屏上看到的那份才是同一句。满库原因取自 LocalLibrary.fullReason()，
+     * 空串表示没满，一个字都不改。
+     */
+    public static boolean markDownloadablesBlocked(Report report, String fullReason) {
+        if (report == null || report.downloadables.isEmpty()) return false;
+        String reason = fullReason == null ? "" : fullReason.trim();
+        if (reason.isEmpty()) return false;
+        boolean changed = false;
+        for (int i = 0; i < report.notes.size(); i++) {
+            String value = report.notes.get(i);
+            if (value == null || !value.contains(DOWNLOADABLE_NOTE_MARK)) continue;
+            report.notes.set(i, "另有 " + report.downloadables.size() + " " + DOWNLOADABLE_NOTE_MARK
+                    + "，但" + reason + "，这一轮存不进来：先在自建库删掉几篇再下，"
+                    + "它们此刻仍只按摘要比对");
+            changed = true;
+        }
+        return changed;
     }
 
     /**
@@ -1997,9 +2032,7 @@ public final class DuplicateEngine {
             note(report, autoFetchLine(report.autoPdfTried, report.autoPdfFetched,
                     report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason,
                     report.autoPdfShapes, report.autoPdfSkipped));
-        if (!report.downloadables.isEmpty())
-            note(report, "另有 " + report.downloadables.size() + " 篇候选挂着可直接下载的开放获取 PDF，"
-                    + "结果页可一键下进自建库（自建库按正文比对，不按摘要）");
+        if (!report.downloadables.isEmpty()) note(report, downloadableLine(report.downloadables.size()));
         if (!report.candidates.isEmpty()) {
             note(report, "共取回 " + report.candidates.size() + " 篇候选文献（跨源合并 " + report.mergedDuplicates
                     + " 篇），入库比对 " + report.comparableCandidates + " 篇");

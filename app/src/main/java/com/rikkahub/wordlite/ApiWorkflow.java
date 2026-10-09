@@ -290,6 +290,9 @@ public final class ApiWorkflow {
                    入库是为了下一轮不必再花一次请求重抓同一篇。存了几篇、几篇库里已有、几篇没存进去
                    都写进注记，再落报告中心——顺序反了，回看的那份报告里就没有这一句。 */
                 DuplicateEngine.fileAutoBodies(library, result);
+                /* 库满的话把"另有 N 篇可一键下进自建库"那一行改写掉：存不进来的东西不许再请用户点。
+                   落库这一步刚刚跑完才知道满没满，所以改写发生在报告落库之后、落报告中心之前。 */
+                DuplicateEngine.markDownloadablesBlocked(result, library.fullReason());
                 /* 报告中心（1.0.0）：先落一条记录再回界面。写盘留在 worker 线程里做——
                    几十万字节的 JSON 压在 UI 线程上，取消按钮会先卡住。 */
                 final ReportStore.Record saved = reports.save(ReportStore.recordFor(result, host.fileName()));
@@ -445,6 +448,18 @@ public final class ApiWorkflow {
         if (result == null || result.downloadables.isEmpty()) return;
         final ArrayList<DuplicateEngine.Downloadable> picks =
                 new ArrayList<DuplicateEngine.Downloadable>(result.downloadables);
+        /* 库满不许再诱骗用户点下载：题名照样列出来（信息不藏），但不挂点击——
+           点了也是花 6 MB 换一句"没进去"。下一句直接给下一步（删旧的）。 */
+        if (library.capacityFull()) {
+            TextView blocked = label(library.fullReason() + "：这 " + picks.size()
+                    + " 篇下进来也存不住。先在自建库删掉几篇，再回这一屏下载。", 14);
+            blocked.setTypeface(Typeface.DEFAULT_BOLD);
+            blocked.setPadding(0, dp(10), 0, dp(10));
+            box.addView(blocked);
+            for (DuplicateEngine.Downloadable pick : picks)
+                box.addView(label("· " + pick.title + "（" + engineTitle(pick.engine) + "）暂不下载", 12));
+            return;
+        }
         box.addView(label("可以下进自建库的开放获取全文 " + picks.size()
                 + " 篇（现在只有摘要可比；下进来后按正文比对）", 13));
         TextView every = label("全部下进自建库：" + picks.size() + " 篇（逐篇回执，一份下不成不拖垮其余）", 14);
@@ -465,6 +480,8 @@ public final class ApiWorkflow {
     /** 下载之前先说清要花多少流量：单份开放获取 PDF 实测 0.7-3.9 MB，一份的上限是 6 MB。 */
     private void confirmDownload(final ArrayList<DuplicateEngine.Downloadable> picks) {
         if (job != null) { toast("有任务在跑，稍后再试"); return; }
+        /* 结果页画出来之后库也可能刚被别的路子灌满（导入、上一轮顺手抓），点下载这一刻再问一遍。 */
+        if (library.capacityFull()) { toast(library.fullReason() + "，先删几篇再下"); return; }
         StringBuilder names = new StringBuilder();
         for (int i = 0; i < picks.size() && i < 4; i++) {
             if (names.length() > 0) names.append("\n");
@@ -495,6 +512,9 @@ public final class ApiWorkflow {
                 PaperSources.Limits limits = new PaperSources.Limits();
                 limits.timeoutSeconds = options.timeoutSeconds;
                 limits.proxy = options.proxy;
+                /* 一键下载也走同一本账：已经知道读不出字的那条链接一个字节也不花，
+                   新读不出字的当场记进去，下一轮检索与下一次点下载都不再花钱。 */
+                limits.unreadable = library;
                 ArrayList<CorpusImport.Pick> items = new ArrayList<CorpusImport.Pick>();
                 for (int i = 0; i < picks.size(); i++)
                     items.add(new CorpusImport.Pick(picks.get(i).title, picks.get(i).url));

@@ -181,7 +181,8 @@ public final class CorpusImport {
             if (value.equals("pdf-no-text-layer")) return "扫描版无文字层";
             if (value.equals("pdf-unreadable") || value.equals("pdf-undecodable")) return "PDF 解不出字";
             if (value.equals("import-failed")) return "读不出正文";
-            if (value.equals("library-full")) return "自建库名额已满";
+            // 满库按篇数与按字节是两件事，人话只有一句：那两个数在 LocalLibrary.fullReason() 那一份里。
+            if (value.equals("library-full")) return "自建库已满";
             if (value.equals("pdf-no-text")) return "PDF 里没读到字";
             if (value.equals("text-empty") || value.equals("empty-body")) return "页面里没读到字";
             if (value.startsWith("text-thin") || value.equals("thin")) return "回来的页面几乎没字";
@@ -291,9 +292,9 @@ public final class CorpusImport {
             receipt.message = "文件内容为空";
             return;
         }
-        if (library.capacityRemaining() <= 0) {
+        if (library.capacityFull()) {
             receipt.status = Status.FAILED;
-            receipt.message = "自建库名额已满（上限 " + library.capacity() + " 个文件）";
+            receipt.message = library.fullReason() + "，这篇没进去，可以先删旧的";
             receipt.shape = "library-full";
             return;
         }
@@ -370,7 +371,7 @@ public final class CorpusImport {
         if (text.indexOf("加密") >= 0) return "pdf-encrypted";
         if (text.indexOf("字体编码") >= 0) return "pdf-undecodable";
         if (text.indexOf("没有从文件里读到文本") >= 0) return "pdf-no-text";
-        if (text.indexOf("名额已满") >= 0) return "library-full";
+        if (text.indexOf("名额已满") >= 0 || text.indexOf("自建库已满") >= 0) return "library-full";
         if (error instanceof java.io.IOException) return "import-failed";
         return "";
     }
@@ -409,7 +410,13 @@ public final class CorpusImport {
             Receipt receipt = new Receipt();
             receipt.number = i + 1;
             receipt.name = pick == null ? "" : safeName(pick);
-            try {
+            if (library.capacityFull()) {
+                /* 满库一个字节也不花：先问库，再花钱。以前是先下回 6 MB 的 PDF 再在 importOne
+                   里撞满库——白烧一次下载，那句"满了"还排在下载之后，用户以为是网不好。 */
+                receipt.status = Status.FAILED;
+                receipt.message = library.fullReason() + "，这篇没进去，可以先删旧的";
+                receipt.shape = "library-full";
+            } else try {
                 byte[] bytes = pick == null || pick.url.trim().isEmpty()
                         ? null : fetch.get(pick.url.trim());
                 if (bytes == null || bytes.length == 0) {
