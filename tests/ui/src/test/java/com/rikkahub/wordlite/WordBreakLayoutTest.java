@@ -25,6 +25,17 @@ import static org.junit.Assert.assertTrue;
  * cannot provide on this host (native runtime is unsupported on Linux
  * aarch64), so they are kept as documented @Ignore targets below, while the
  * span-level rules they depend on are asserted directly.
+ *
+ * Who can actually run this file: nothing on this machine, and nothing in the release path.
+ * tools/test-host.ps1 compiles tests/*.java non-recursively (so never this directory), tools/test.sh
+ * runs only the classes tools/build.sh produced, the repo has no CI config, and tools/archive-release.sh
+ * merely tars tests/ui/src into the source archive. The single path that reaches these tests is
+ * sh tools/test-native.sh com.rikkahub.wordlite.WordBreakLayoutTest, which needs an x86_64 JRE plus a
+ * gradle distribution on the ARM build host and exits 2 (Native JRE unavailable; this test is skipped)
+ * without them, and whose default class is PdfNativeTest -- so nobody runs it by accident either.
+ * Read that as: the AutoGap swap in kimPunctuationEdgesCarryNoAutoGap (the Cu3Sn word sits under ONE
+ * ScriptTokenSpan now, which is the whole point of that container) has never been executed anywhere,
+ * 本机未跑 -- it is an unverified edit, not a passing test.
  */
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 28)

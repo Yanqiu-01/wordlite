@@ -73,11 +73,24 @@ foreach ($f in @("word-line-breaks.tsv", "word-para-index.tsv", "word-para-map.t
 }
 
 # ---------- 3. 第 1 条：段落页归属 ----------
-$parity = @(Run @("tools/word-parity.ps1", "-Impl", "new",
-        "-Device", (Join-Path $d "paragraphs-wordformat.tsv"),
-        "-Sup", (Join-Path $d "superscript-inventory.txt"),
-        "-Summary", (Join-Path $d "summary.txt"),
-        "-OutFile", (Join-Path $Out "parity.tsv"), "-MaxShifted", "999"))
+# -Tree 模式下引擎的章写的是快照那个提交（tools/capture-device.ps1 的 Get-EngineStamp），跟跑报表这棵树
+# 的 HEAD 本来就该不一样，所以这里带 -AllowStale：word-parity 仍旧把 capture_check=STALE 那一行连同两个
+# sha 一起打出来（在本脚本的日志里），只是不再因为"章不是当前 HEAD"直接拒出第 1 条。
+$parityArgs = @("tools/word-parity.ps1", "-Impl", "new",
+                 "-Device", (Join-Path $d "paragraphs-wordformat.tsv"),
+                 "-Sup", (Join-Path $d "superscript-inventory.txt"),
+                 "-Summary", (Join-Path $d "summary.txt"),
+                 "-OutFile", (Join-Path $Out "parity.tsv"), "-MaxShifted", "999")
+if ($Tree) { $parityArgs += "-AllowStale" }
+$parity = @(Run $parityArgs)
+# Run 把子进程的输出收进变量里，所以 word-parity 一旦拒（章与 HEAD 不一致、真值比采样旧……）
+# 这里就什么都抓不到，第 1 条会打成 "0 段错页 / 0 [过]" —— 一个理直气壮的假绿。宁可当场抛。
+if (-not (@($parity | Select-String -Pattern '^aligned=\d+ shifted') ).Count) {
+    $why = @($parity | Where-Object { "$_" -match "refused|STALE|MISSING|not under|missing" })
+    if ($why.Count -eq 0) { $why = @($parity | Select-Object -Last 8) }
+    throw ("item 1 produced no numbers; tools/word-parity.ps1 said: " +
+           ((@($why | Select-Object -First 3) -join " | ").Trim()))
+}
 $m1Shifted = [int](Grab $parity '^shifted_paragraphs=(\d+)$' 1)
 $m1Aligned = [int](Grab $parity '^aligned=(\d+) shifted' 1)
 $m1Exact = Grab $parity '^exact_page_match=(\S+)$' 1
@@ -174,10 +187,10 @@ $rows6 = @(
 foreach ($r in $rows6) {
     "{0} {1,-14} {2,-56} 验收线 {3}  [{4}]" -f $r.n, $r.metric, $r.value, $r.line, $(if ($r.pass) { "过" } else { "不过" })
 }
-"engine head_sha=$($engine['head_sha']) layout_dirty=$($engine['layout_dirty']) dex=$($engine['dex_sha256'])"
+"engine head_sha=$($engine['head_sha']) source=$($engine['source']) layout_dirty=$($engine['layout_dirty']) dex=$($engine['dex_sha256'])"
 "lines-all sha=$(& $sha (Join-Path $d 'lines-all.tsv'))  pages.tsv sha=$(& $sha (Join-Path $d 'pages.tsv'))  字体表指纹=$fontTag"
 $rows6 | Export-Csv -NoTypeInformation -Delimiter "`t" -LiteralPath (Join-Path $Out "six.tsv")
-@("tag=$Tag", "head_sha=$($engine['head_sha'])", "layout_dirty=$($engine['layout_dirty'])",
+@("tag=$Tag", "head_sha=$($engine['head_sha'])", "source=$($engine['source'])", "layout_dirty=$($engine['layout_dirty'])",
   "lines_all_sha=$(& $sha (Join-Path $d 'lines-all.tsv'))", "fonts_fingerprint=$fontTag",
   "word_page_lines=$WordPageLines") + @($rows6 | ForEach-Object { "$($_.n)`t$($_.metric)`t$($_.value)`t$($_.line)`t$(if ($_.pass) { '过' } else { '不过' })`t$($_.file)" }) |
     Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $Out "six.txt")
