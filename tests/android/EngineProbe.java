@@ -78,8 +78,9 @@ public final class EngineProbe {
                 + " 段数=" + index + " 参数 per=" + limits.perEngine + " windows=" + limits.windows
                 + " fullTexts=" + limits.fullTexts + " timeout=" + limits.timeoutSeconds
                 + "s proxy=" + (limits.proxy.isEmpty() ? "(none)" : limits.proxy));
+        TextCorpus corpus = new TextCorpus();
         long began = System.currentTimeMillis();
-        DuplicateEngine.Report report = DuplicateEngine.scan(selection, new TextCorpus(), true,
+        DuplicateEngine.Report report = DuplicateEngine.scan(selection, corpus, true,
                 PaperSources.engines(), limits, null, new DuplicateEngine.Progress() {
                     public void step(String label, int done, int total) {
                         System.out.println("  [" + done + "/" + total + "] " + label);
@@ -89,10 +90,20 @@ public final class EngineProbe {
                 + " 可比正文(抓到开放获取全文)=" + report.fullTextCandidates
                 + " 只有摘要=" + report.abstractOnlyCandidates
                 + " 只有题录=" + report.recordOnlyCandidates
+                + " 顺手抓正文=试" + report.autoPdfTried + "/成" + report.autoPdfFetched
+                + "/空" + report.autoPdfFailed + "/没排上" + report.autoPdfLeft
+                + "（上限 " + limits.autoFullTexts + "）"
                 + " 窗口=" + report.windowsRetrieved + "/" + report.windowsAvailable
                 + " 覆盖=" + report.coveredChars + "/" + report.comparableChars + " 字"
                 + " 总相似度比=" + String.format(Locale.ROOT, "%.2f%%", report.overallRate)
                 + " 用时=" + (System.currentTimeMillis() - began) + "ms");
+        /* 屏上那两句原话：比对材料清单（CorpusLedger）与顺手抓正文（autoFetchLine）。
+           自建库这一档探针里没有——它不读手机上的自建库，所以正文可比篇数比 app 少一篇属正常。 */
+        CorpusLedger ledger = CorpusLedger.aggregate(corpus);
+        System.out.println("屏上比对材料行: " + ledger.summaryLine());
+        String auto = DuplicateEngine.autoFetchLine(report.autoPdfTried, report.autoPdfFetched,
+                report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason);
+        if (!auto.isEmpty()) System.out.println("屏上顺手抓正文行: " + auto);
         for (String note : report.notes) System.out.println("note: " + note);
 
         /* "可以下进自建库"那一屏：逐篇按 app 的取法取一遍，形状留给回执，再拼屏上那句汇总。 */
@@ -132,7 +143,7 @@ public final class EngineProbe {
     public static void main(String[] argv) throws Exception {
         String query = "深度学习 图像分割 综述";
         String only = "", proxy = "", coreKey = trim(System.getenv("WORDLITE_CORE_KEY")), file = "";
-        int per = 5, timeout = 25, repeat = 1, fetch = 3, budget = 6, windows = 0;
+        int per = 5, timeout = 25, repeat = 1, fetch = 3, budget = 6, windows = 0, auto = 0;
         String doc = "";
         boolean tcp = true, tcpOnly = false;
         ArrayList<String> words = new ArrayList<String>();
@@ -148,6 +159,8 @@ public final class EngineProbe {
             else if (arg.startsWith("--core-key=")) coreKey = arg.substring(11).trim();
             else if (arg.startsWith("--query-file=")) file = arg.substring(13).trim();
             else if (arg.startsWith("--windows=")) windows = number(arg.substring(10), windows);
+            /* 顺手抓正文的篇数上限：0 = 关掉这一档，>0 与手机上"检索设置"里那个数同一条口径。 */
+            else if (arg.startsWith("--auto=")) auto = number(arg.substring(7), auto);
             else if (arg.startsWith("--doc=")) doc = arg.substring(6).trim();
             else if (arg.equals("--no-tcp")) tcp = false;
             else if (arg.equals("--tcp-only")) { tcp = true; tcpOnly = true; }
@@ -177,6 +190,7 @@ public final class EngineProbe {
         System.out.println("java=" + System.getProperty("java.vm.name", "?") + " " + System.getProperty("java.version", "?")
                 + " android=" + System.getProperty("java.vm.version", "?"));
         if (windows > 0) limits.windows = windows;
+        limits.autoFullTexts = Math.max(0, auto);
         if (tcp) tcpPrecheck(limits);
         if (tcpOnly) {
             System.out.println("SUMMARY tcp-only");
@@ -513,3 +527,4 @@ public final class EngineProbe {
         return flat.length() <= max ? flat : flat.substring(0, max) + "...";
     }
 }
+
