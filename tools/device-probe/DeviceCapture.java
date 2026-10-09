@@ -82,6 +82,8 @@ public final class DeviceCapture {
         write(new File(out, "paragraphs-wordformat.tsv"), paragraphPages(result, doc));
         write(new File(out, "span-edges.tsv"), spanEdges(result));
         write(new File(out, "run-fit.tsv"), runFit(result));
+        write(new File(out, "chars-tail.tsv"), charsTail(result));
+        write(new File(out, "tail-fit.tsv"), tailFit(result));
         System.out.println("DONE tag=" + tag + " pages=" + result.totalPages()
                 + " words=" + words + " parseMs=" + parseMs + " totalMs=" + totalMs);
     }
@@ -248,6 +250,233 @@ public final class DeviceCapture {
         return sb.toString();
     }
 
+    // ---------- what the tail of a line costs ----------
+
+    private static final char TAB = (char) 9;
+    private static final char NL = (char) 10;
+
+    private static float r2(float v) {
+        return Math.round(v * 100) / 100f;
+    }
+
+    /**
+     * Two horizontal positions off the platform in one call, without letting a refusal pass as a width.
+     * getPrimaryHorizontal answers -1 for some offsets on a line this engine stretched with its own
+     * spans (measured on the device: 74 of 600 lines came back negative at the start, and more read
+     * 0 at the end), and a -1 handed straight into a subtraction turns into "the line's ink is 0 px",
+     * which is the opposite of the truth. So: fall back to the line's own left edge at the start, and
+     * walk back to the last position the platform did place at the end.
+     */
+    private static float[] primaryPair(StaticLayout l, int from, int to) {
+        float a = l.getPrimaryHorizontal(from);
+        if (a < 0) a = l.getLineLeft(l.getLineForOffset(from));
+        float b = -1f;
+        for (int k = to; k >= from; k--) {
+            float v = l.getPrimaryHorizontal(k);
+            if (v >= 0) { b = v; break; }
+        }
+        return new float[] { a, b };
+    }
+
+    /** Blanks the wrap left at the end of a line, still inside that line's own range. */
+    private static int tailBlanks(StaticLayout l, int line) {
+        int s = l.getLineStart(line);
+        int last = l.getLineEnd(line) - 1;
+        CharSequence t = l.getText();
+        int n = 0;
+        while (last > s && Character.isWhitespace(t.charAt(last))) { n++; last--; }
+        return n;
+    }
+
+    /**
+     * 1 when those blanks are billed nothing because a BlankTail covers them, 0 when they ride inside
+     * the line's width. Only the justification pass puts a BlankTail on the text, and it throws the
+     * whole result away when no line of the paragraph could be spread (DocxTextLayout.spreadText ends
+     * with "if (widened == 0) return laidOut"), so a paragraph whose lines are all exactly full, or all
+     * without an openable seam, silently keeps its trailing blanks priced. That price is what this
+     * column exists to catch: a line can be 43 px short of the column and still have no room for a
+     * 46 px token, and the 4 px that tipped it is a blank nobody can see on the page.
+     */
+    private static int tailFree(StaticLayout l, int line) {
+        int n = tailBlanks(l, line);
+        if (n == 0) return 0;
+        int at = l.getLineEnd(line) - n;
+        if (!(l.getText() instanceof android.text.Spanned)) return 0;
+        android.text.Spanned sp = (android.text.Spanned) l.getText();
+        return sp.getSpans(at, at + 1, DocxTextLayout.BlankTail.class).length > 0 ? 1 : 0;
+    }
+
+    /**
+     * Span names covering one code unit, with the pixels the span adds. AutoGap is the quarter-em
+     * autoSpace seam, WidenGap the justification slack, BlankTail a blank billed nothing,
+     * AtomicRunSpan a Latin/digit string the breaker moves whole. Which one sits on a line's tail is
+     * what turns "the line stopped 43 px short and the next token still did not fit" into a sentence.
+     */
+    private static String spansAt(CharSequence text, int at) {
+        if (!(text instanceof android.text.Spanned)) return "";
+        android.text.Spanned sp = (android.text.Spanned) text;
+        Object[] found = sp.getSpans(at, at + 1, Object.class);
+        StringBuilder out = new StringBuilder();
+        for (Object o : found) {
+            if (out.length() > 0) out.append('+');
+            String name = o.getClass().getSimpleName();
+            if (name.length() == 0) name = o.getClass().getName();
+            out.append(name);
+            if (o instanceof DocxTextLayout.AutoGap) {
+                DocxTextLayout.AutoGap g = (DocxTextLayout.AutoGap) o;
+                out.append("(before=").append(g.before ? 1 : 0)
+                   .append(",after=").append(g.after ? 1 : 0).append(')');
+            } else if (o instanceof DocxTextLayout.WidenGap && WIDEN_EXTRA != null) {
+                try {
+                    out.append("(extra=").append(Math.round(WIDEN_EXTRA.getFloat(o))).append(')');
+                } catch (Throwable ignored) {
+                    out.append("(extra=?)");
+                }
+            }
+        }
+        return out.length() > 140 ? out.substring(0, 140) : out.toString();
+    }
+
+    /**
+     * The last nine code units of every laid-out line, one row each: what the character is, where it
+     * sits, what it costs, and which span owns that cost. A line's width alone cannot say whether the
+     * blank its wrap left behind took room -- this can, in the same document pixels every other column
+     * uses. Blanks show as U+0020 because clean() drops them from the printable text.
+     */
+    private static String charsTail(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page").append(TAB).append("paragraph").append(TAB).append("line").append(TAB)
+          .append("index").append(TAB).append("char").append(TAB).append("codepoint").append(TAB)
+          .append("xRelPx").append(TAB).append("advPx").append(TAB).append("spans").append(TAB)
+          .append("lineWidthPx").append(TAB).append("lineNaturalPx").append(TAB)
+          .append("lineTailChars").append(TAB).append("lineTailFree").append(NL);
+        for (int p = 0; p < result.totalPages(); p++) {
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null) continue;
+                StaticLayout l = pl.text.layout;
+                for (int i = pl.startLine; i < pl.endLine && i < l.getLineCount(); i++) {
+                    int s = l.getLineStart(i), e = l.getLineEnd(i);
+                    if (e <= s) continue;
+                    float left = l.getLineLeft(i);
+                    float stretch = widenExtraSum(l.getText(), s, e);
+                    int from = Math.max(s, e - 9);
+                    for (int c = from; c < e; c++) {
+                        float x = l.getPrimaryHorizontal(c);
+                        float nx = l.getPrimaryHorizontal(c + 1);
+                        char ch = l.getText().charAt(c);
+                        sb.append(p + 1).append(TAB).append(pl.blockIndex).append(TAB).append(i)
+                          .append(TAB).append(c - s).append(TAB).append(ch == 10 ? ' ' : ch).append(TAB)
+                          .append(String.format(Locale.ROOT, "U+%04X", (int) ch)).append(TAB)
+                          .append(r2(x < 0 ? -1f : x - left)).append(TAB)
+                          .append(r2(x < 0 || nx < 0 ? -1f : nx - x)).append(TAB)
+                          .append(spansAt(l.getText(), c)).append(TAB)
+                          .append(r2(l.getLineWidth(i))).append(TAB)
+                          .append(r2(l.getLineWidth(i) - stretch)).append(TAB)
+                          .append(tailBlanks(l, i)).append(TAB).append(tailFree(l, i)).append(NL);
+                    }
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String tailFitError = "";
+
+    /** One TSV row from cells, tab between, newline at the end. */
+    private static String row16(String... cells) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < cells.length; i++) {
+            if (i > 0) out.append(TAB);
+            out.append(cells[i]);
+        }
+        return out.append(NL).toString();
+    }
+
+    /**
+     * The same paragraph, one step later: justification slack taken out (it follows the break, it is
+     * never the cause of one) and every blank a live line left at its tail billed nothing, exactly as
+     * the engine means to bill it. The glue stays on -- whether a Latin string moves whole is a rule,
+     * and this layout is only here to price the blank.
+     */
+    private static StaticLayout relaidWithFreeTails(StaticLayout live) {
+        tailFitError = LAYOUT_BUILD == null ? "no build() to call" : "";
+        if (LAYOUT_BUILD == null) return null;
+        try {
+            android.text.SpannableStringBuilder copy =
+                    new android.text.SpannableStringBuilder(live.getText());
+            for (DocxTextLayout.WidenGap gap
+                    : copy.getSpans(0, copy.length(), DocxTextLayout.WidenGap.class)) copy.removeSpan(gap);
+            int billed = 0;
+            for (int i = 0; i + 1 < live.getLineCount(); i++) {
+                int n = tailBlanks(live, i);
+                if (n == 0) continue;
+                copy.setSpan(new DocxTextLayout.BlankTail(), live.getLineEnd(i) - n,
+                        live.getLineEnd(i), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                billed++;
+            }
+            if (billed == 0) return null;
+            return (StaticLayout) LAYOUT_BUILD.invoke(null, copy, live.getPaint(), live.getWidth(),
+                    live.getAlignment(), false, true);
+        } catch (Throwable failed) {
+            Throwable cause = failed instanceof java.lang.reflect.InvocationTargetException
+                    && failed.getCause() != null ? failed.getCause() : failed;
+            tailFitError = cause.getClass().getSimpleName() + ":" + cause.getMessage();
+            return null;
+        }
+    }
+
+    private static void appendLineRow(StringBuilder sb, int page, int block, String which,
+                                      StaticLayout l, int i, String note) {
+        int s = l.getLineStart(i), e = l.getLineEnd(i);
+        String text = clean(l.getText().subSequence(s, e).toString());
+        float stretch = widenExtraSum(l.getText(), s, e);
+        float natural = l.getLineWidth(i) - stretch;
+        sb.append(page).append(TAB).append(block).append(TAB).append(which).append(TAB).append(i)
+          .append(TAB).append(text.length()).append(TAB).append(edge(text, true)).append(TAB)
+          .append(edge(text, false)).append(TAB).append(r2(l.getLineWidth(i))).append(TAB)
+          .append(r2(stretch)).append(TAB).append(r2(natural)).append(TAB)
+          .append(r2(l.getWidth() - l.getLineLeft(i) - natural)).append(TAB)
+          .append(tailBlanks(l, i)).append(TAB).append(tailFree(l, i)).append(TAB)
+          .append(r2(nextRunWidth(l, i))).append(TAB).append(nextRunChars(l, i)).append(TAB)
+          .append(note).append(NL);
+    }
+
+    /**
+     * One row per line of every paragraph that leaves a blank at the end of a wrapped line, twice over:
+     * which=live is what the page shows, which=relay is the same text with those blanks billed nothing.
+     * Where a Latin token our layout moved down comes back onto the line, that break was lost to the
+     * width of a blank and not to the advance table -- the distinction the master asked for on para 94.
+     */
+    private static String tailFit(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page").append(TAB).append("paragraph").append(TAB).append("which").append(TAB)
+          .append("line").append(TAB).append("lineChars").append(TAB).append("first8").append(TAB)
+          .append("last8").append(TAB).append("lineWidthPx").append(TAB).append("lineStretchPx")
+          .append(TAB).append("lineNaturalPx").append(TAB).append("lineRoomPx").append(TAB)
+          .append("tailChars").append(TAB).append("tailFree").append(TAB).append("nextRunPx")
+          .append(TAB).append("nextRunChars").append(TAB).append("note").append(NL);
+        for (int p = 0; p < result.totalPages(); p++) {
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null) continue;
+                StaticLayout l = pl.text.layout;
+                boolean hasTail = false;
+                for (int i = pl.startLine; i + 1 < pl.endLine && i + 1 < l.getLineCount(); i++)
+                    if (tailBlanks(l, i) > 0) hasTail = true;
+                if (!hasTail) continue;
+                for (int i = pl.startLine; i < pl.endLine && i < l.getLineCount(); i++)
+                    appendLineRow(sb, p + 1, pl.blockIndex, "live", l, i, "");
+                StaticLayout relay = relaidWithFreeTails(l);
+                if (relay == null) {
+                    sb.append(row16(String.valueOf(p + 1), String.valueOf(pl.blockIndex), "relay",
+                            "-1", "", "", "", "", "", "", "", "", "", "", "", "",
+                            tailFitError.length() == 0 ? "no tail blanks" : tailFitError));
+                    continue;
+                }                for (int i = 0; i < relay.getLineCount(); i++)
+                    appendLineRow(sb, p + 1, pl.blockIndex, "relay", relay, i, "");
+            }
+        }
+        return sb.toString();
+    }
     private static boolean isLatinOrDigit(char c) {
         return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
                 || Character.isLetterOrDigit(c) && c < 0x2E80;
@@ -316,7 +545,7 @@ public final class DeviceCapture {
                     + "\tlineLeftPx\tparaXPx\topenGaps\tautoGaps\thangOverPx"
                     + "\tlineStretchPx\tlineNaturalPx\tlineRoomPx\tlayoutWidthPx"
                     + "\tnextCharPx\tnextRunPx\tnextRunChars"
-                    + "\tlineInkPx\tlineTailPx\n");
+                    + "\tlineInkPx\tlineTailPx"                    + "\tlineTailChars\tlineTailFree\n");
         for (int p = 0; p < result.totalPages(); p++) {
             for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
                 if (pl.text == null) continue;
@@ -376,7 +605,7 @@ public final class DeviceCapture {
                           .append('\t').append(Math.round(nextRun * 100) / 100f)
                           .append('\t').append(nextRunChars(l, i))
                           .append('\t').append(Math.round(inkPx * 100) / 100f)
-                          .append('\t').append(Math.round(tailPx * 100) / 100f).append('\n');
+                          .append('\t').append(Math.round(tailPx * 100) / 100f).append(TAB).append(tailBlanks(l, i)).append(TAB).append(tailFree(l, i)).append('\n');
                     }
                 }
             }
@@ -619,7 +848,8 @@ public final class DeviceCapture {
         int last = e - 1;
         CharSequence t = l.getText();
         while (last > s && Character.isWhitespace(t.charAt(last))) last--;
-        float from = l.getPrimaryHorizontal(s), to = l.getPrimaryHorizontal(last + 1);
+        float[] pos = primaryPair(l, s, last + 1);
+        float from = pos[0], to = pos[1];
         if (to < from) return new float[] { -1f, -1f };
         return new float[] { to - from, l.getLineWidth(line) - l.getLineLeft(line) - (to - from) };
     }
