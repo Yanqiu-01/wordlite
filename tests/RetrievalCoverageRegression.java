@@ -3,6 +3,7 @@ package com.rikkahub.wordlite;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -43,6 +44,8 @@ public final class RetrievalCoverageRegression {
     private static boolean sticky;
     /** E 组夹具：真出处只在第 MID_WINDOW_SEQ 扇窗口回得来，其余窗口一律回套话。 */
     private static boolean midWindow;
+    /** 全文桩回空正文：验"抓回来没有正文层"那一档仍然按摘要比对，不许谎称比过正文。 */
+    private static boolean fullTextEmpty;
     /** 慢桩每请求的耗时，时间闸门那组用它把挂钟闸门压出来。 */
     private static long slowMillis;
     /** 命中这些路径直接回 429，用来验限流不被误算成整轮不可用。 */
@@ -119,6 +122,7 @@ public final class RetrievalCoverageRegression {
         crossrefSize = -1;
         sticky = false;
         midWindow = false;
+        fullTextEmpty = false;
         slowMillis = 0L;
         SLOW_MILLIS.clear();
         throttled.clear();
@@ -215,6 +219,7 @@ public final class RetrievalCoverageRegression {
            落在 /europepmc/ 下；2.5.0 之前这一路是拿 pmcid 拼出来的，那条口实测 404。 */
         server.createContext("/europepmc/", exchange -> {
             record("/europepmc/fulltext");
+            if (fullTextEmpty) { respond(exchange, 200, ""); return; }
             respond(exchange, 200, FULL_TEXT_XML);
         });
         server.createContext("/arxiv", exchange -> {
@@ -225,7 +230,7 @@ public final class RetrievalCoverageRegression {
         /* crossref 那条对题论文的开放获取位置：只有名次第一才配得上这次抓取。 */
         server.createContext("/fulltext", exchange -> {
             record("/fulltext");
-            respond(exchange, 200, FULL_TEXT_XML);
+            respond(exchange, 200, fullTextEmpty ? "" : FULL_TEXT_XML);
         });
         /* 恒 429 的源：验"补试一次"与"N 个源不可用"按源计而不是按次数计。 */
         server.createContext("/throttled", exchange -> {
@@ -253,6 +258,42 @@ public final class RetrievalCoverageRegression {
         PaperSources.setEndpoint("europepmc", base + "/europepmc/search");
         PaperSources.setEndpoint("arxiv", base + "/arxiv");
         PaperSources.setEndpoint("core", base + "/core");
+    }
+
+    /* ---- 给量台借用的几个出口（tools/coverage-budget-probe.ps1 -> CoverageBudgetProbe）----
+       夹具只有一份：这台起桩、那台量额度，两处各写一套九个源的假响应，早晚会有一套说谎。 */
+
+    /** 起九个回环桩并把 endpoints 指过去。用完必须 stopStub()，否则 endpoints 还指着 127.0.0.1。 */
+    static void startStub() throws Exception {
+        start();
+    }
+
+    /** 收桩并把 endpoints 还回真源：漏掉这一步，下一个真联网探针会对着回环桩量出个假数。 */
+    static void stopStub() {
+        if (server != null) server.stop(0);
+        if (stubPool != null) stubPool.shutdownNow();
+        PaperSources.resetEndpoints();
+        server = null;
+        stubPool = null;
+    }
+
+    /** 清命中计数与夹具开关：量台连着量两轮，第二轮不能接着第一轮的账。 */
+    static void resetStub() {
+        resetFixtures();
+    }
+
+    /** 桩认识的路径（逐源延迟表按它铺）：都是 /<源名> 那一个形状。 */
+    static ArrayList<String> stubPaths() {
+        ArrayList<String> out = new ArrayList<String>();
+        for (String engine : NINE) out.add("/" + engine);
+        return out;
+    }
+
+    /** 给某一家桩定一次响应耗时：墙钟那一笔要在同一条代码路径上量，只能把延迟钉在桩这一头。 */
+    static void setStubDelay(String path, long millis) {
+        synchronized (RetrievalCoverageRegression.class) {
+            SLOW_MILLIS.put(path, Long.valueOf(millis));
+        }
     }
 
     private static final String FULL_TEXT_XML = "<article><body><sec><title>Intro</title>"
@@ -597,27 +638,44 @@ public final class RetrievalCoverageRegression {
         return engine.equals(candidate.source.engine);
     }
 
-    // ---- A 组：窗口数就是每个源被问的次数 ----
+    // ---- A 组：设置里的窗口数 = 每家最多问几扇；问哪几扇由 allocate() 按窗口里的中文字数排 ----
 
+    /**
+     * 九个源全选、每源上限 12：九家各问 12 次共 108 次提问，67 扇窗口全排上。
+     *
+     * 改之前这一轮的走法是“前 12 扇每扇问遍九家”，第 13 扇起一个字没问；现在同样的 108 次请求
+     * 摊到 67 扇，每扇 1-2 家。这里锁的就是这个形状：每源次数守恒、覆盖变宽、没有任何源整轮没被问。
+     */
     private static DuplicateEngine.Report askedOncePerWindow() {
         resetFixtures();
         DuplicateEngine.Report report = scan(thesis(200), new TextCorpus(), nine(), limits(12, 12));
         String[] paths = {"/cnki", "/cqvip", "/wanfang", "/ncpssd", "/openalex", "/crossref",
                 "/semantic-scholar", "/europepmc/search", "/arxiv"};
         for (String path : paths) {
-            check(hits(path) == 12, label(path) + " 被问了 12 次：设置里有几个窗口就问几次");
+            check(hits(path) == 12, label(path) + " 被问了 12 次：每源上限就是设置里的窗口数");
         }
 
         check(hits("/cnki") == hits("/cqvip") && hits("/cqvip") == hits("/arxiv")
                         && hits("/arxiv") == hits("/europepmc/search"),
                 "所有选中的源被问的次数一致，没有谁在半轮里被悄悄丢掉");
         check(report.windowsAvailable == 67, "200 段正文按三段一组切成 67 个检索窗口");
-        check(report.windowsPlanned == 12, "本次计划检索的窗口数取自设置里的 12");
-        check(report.windowsRetrieved == 12, "计划内的窗口全部发出了请求");
+        check(report.windowsPlanned == 67, "九家各 12 扇的额度买得起全部 67 扇，就不许只排前 12 扇");
+        check(report.windowsRetrieved == 67, "排上的窗口全部发出了请求");
+        check(report.windowsUnstaffed == 0, "额度够用时一扇也不许落下");
         for (String engine : NINE)
             check(asked(report, engine) == 12, engine + " 的提问次数记成 12，HTML 的「提问次数」列读的就是它");
+        check(requests(report) == 9 * 12, "提问总次数守恒在九家乘每源上限 = 108 次");
+        check(report.asksPlanned == 108 && report.asksSent == 108, "排期 108 次、真发 108 次");
+        check(report.windowDepthLow == 1 && report.windowDepthHigh == 2, "每窗 1-2 家：先铺宽再铺深");
+        check(report.chineseWindowsAsked == 36, "三家中文主库各 12 扇 = 36 扇问到中文");
         check(!report.retrievalIncomplete, "取回了候选的检索绝不许被标成什么都没查");
-        check(report.retrievalPartial, "67 个窗口只跑了 12 个，这一轮必须自认部分是");
+        check(!report.retrievalPartial, "67 扇全问到了就不许自认部分是");
+        System.out.println("SHAPE nine/12 planned=" + report.windowsPlanned + "/" + report.windowsAvailable
+                + " retrieved=" + report.windowsRetrieved + " unstaffed=" + report.windowsUnstaffed
+                + " asks=" + report.asksSent + "/" + report.asksPlanned
+                + " depth=" + report.windowDepthLow + "-" + report.windowDepthHigh
+                + " chinese=" + report.chineseWindowsAsked + " covered=" + report.coveredChars
+                + "/" + report.comparableChars + " partial=" + report.retrievalPartial);
         return report;
     }
     /** 六十段一模一样的正文：十二个窗口会切出一模一样的检索短语，去重必须挡住后十一次。 */
@@ -632,10 +690,21 @@ public final class RetrievalCoverageRegression {
             document.paragraphs.add(block);
         }
         DuplicateEngine.Report report = scan(document, new TextCorpus(), nine(), limits(12, 12));
-        check(report.windowsAvailable == 20 && report.windowsPlanned == 12, "六十段相同的正文切出 20 个窗口");
-        check(requests(report) == 9, "同一条检索短语不会问第二次：十二个窗口只发了九个请求");
-        check(hits("/cqvip") == 1 && hits("/cnki") == 1, "每个源只在第一个窗口被问过，剩下十一次是白送的");
-        check(report.windowsRetrieved == 1, "只有真正发过请求的窗口才计入已检索窗口数");
+        check(report.windowsAvailable == 20 && report.windowsPlanned == 20,
+                "六十段相同的正文切出 20 个窗口，额度买得起就全排上");
+        check(requests(report) == 9, "同一条检索短语不会问第二次：二十个窗口只发了九个请求");
+        check(hits("/cqvip") == 1 && hits("/cnki") == 1,
+                "每个源只在第一次遇到这条短语时被问一次，剩下那些是白送的");
+        /* 九次提问摊到哪几扇是排期自己的事（同一句正文切出的窗口本就同一条短语），
+           这里只锁两件事：已检索窗口数不是一扇，也不是没问过的那些；覆盖字数严格等于它乘一扇。 */
+        check(report.windowsRetrieved >= 2 && report.windowsRetrieved <= 9,
+                "只有真问出去的窗口才计数：本轮九次提问落在 "
+                        + report.windowsRetrieved + " 扇（不是 1 扇，也不许超过九次）");
+        check(report.windowsRetrieved * 90 == report.coveredChars,
+                "这一篇一扇九十字，覆盖字数严格等于问到的扇数乘九十：" + report.coveredChars);
+        check(report.asksSpilled > 0 && report.asksRefilled == 0,
+                "去重挡下的格子排回补问队列，但换谁问都是同一条短语，一次也不该真补出去："
+                        + report.asksSpilled + "/" + report.asksRefilled);
         check(!notes(report, "已取尽"), "短语去重挡下来的窗口不该被算成该源已取尽");
         check(report.retrievalPartial, "被去重挡掉的窗口同样要承认这次只跑了一个窗口");
     }
@@ -644,9 +713,12 @@ public final class RetrievalCoverageRegression {
     private static void singleWindowSetting() {
         resetFixtures();
         DuplicateEngine.Report one = scan(thesis(200), new TextCorpus(), nine(), limits(12, 1));
-        check(one.windowsPlanned == 1 && one.windowsRetrieved == 1, "设置成 1 个窗口就只跑 1 个窗口");
-        check(hits("/cqvip") == 1, "1 个窗口的设置真的只发了 1 次维普请求");
-        check(one.coveredChars == 120, "1 个窗口覆盖三段四十字，覆盖字数记 120 字");
+        check(one.windowsPlanned == 9 && one.windowsRetrieved == 9,
+                "设置里的 1 扇是每源上限：九家各问一扇，一共问九扇");
+        check(hits("/cqvip") == 1, "1 扇上限下的维普真的只发了 1 次请求");
+        check(one.coveredChars == 9 * 120, "九扇各覆盖三段四十字，覆盖字数记 1080 字");
+        check(one.windowDepthLow == 1 && one.windowDepthHigh == 1, "每扇恰好被问一次，一次也不多花");
+        check(one.chineseWindowsAsked == 3, "这九个名额先尽着三家中文主库：三扇各占一家");
     }
 
     private static void requestCeiling() {
@@ -657,14 +729,16 @@ public final class RetrievalCoverageRegression {
         check(DuplicateEngine.MIN_ENGINE_GAP_MILLIS == 400L, "同一源两次提问之间至少隔 400 毫秒");
         check(new EngineSettings().windows == 6, "新装机的检索窗口数默认降到 6，不再把闸门当默认路径");
         check(new PaperSources.Limits().perEngine == 12, "perEngine 仍是每次要几条，默认 12");
+        /* 每源上限放到 24：九家乘 24 = 216 次，远超 120 的额度。排期必须自己就停在 120 次以内，
+           而不是先排满再去撞闸——先排满再撞闸就是 2.6.2 那轮的形状，只是那时候没人看得见。 */
         DuplicateEngine.Report capped = scan(thesis(200), new TextCorpus(), nine(), limits(12, 24));
-        check(requests(capped) == DuplicateEngine.MAX_REQUESTS, "计划 216 次请求时正好撞在 120 这道闸上");
-        check(notes(capped, "检索请求已达上限 120 次"), "撞顶必须在注记里留下字据，不许静默收工");
-        check(capped.windowsPlanned == 24 && capped.windowsRetrieved < capped.windowsPlanned,
-                "闸门截断的是尾部窗口，并且报告承认没跑完");
-        check(capped.windowsRetrieved == 14, "第 14 个窗口只问得动前三个源，之后一道闸就落下来了");
-        check(asked(capped, "cnki") == 14 && asked(capped, "arxiv") == 13,
-                "被牺牲的是最后一个窗口的尾部源，不是某个源整轮被砍");
+        check(capped.asksPlanned == DuplicateEngine.MAX_REQUESTS,
+                "排期自己就落在 120 次以内：" + capped.asksPlanned);
+        check(requests(capped) == DuplicateEngine.MAX_REQUESTS,
+                "真发出去的请求正好 120 次：" + requests(capped));
+        check(capped.windowsPlanned == 67 && capped.windowsRetrieved == 67,
+                "同一份额度花在铺宽上：120 次照样把 67 扇全排上、全问到");
+        check(capped.windowsUnstaffed == 0, "这一轮没有落下的窗口");
         int lowest = Integer.MAX_VALUE, highest = 0;
         for (String engine : NINE) {
             int times = asked(capped, engine);
@@ -672,12 +746,32 @@ public final class RetrievalCoverageRegression {
             lowest = Math.min(lowest, times);
             highest = Math.max(highest, times);
         }
-        check(highest - lowest <= 1, "撞总配额时各源提问次数相差不超过一次（实测 " + lowest + "-" + highest
-                + "）：配额按泳道份额分，快泳道不许把慢泳道的份额花光");
-        check(!capped.retrievalIncomplete, "取回了候选的截断轮次是部分完成，不是未完成");
-        check(capped.retrievalPartial && capped.retrievalPartialReason.contains("相似率是下限"),
-                "被闸门截断的比率必须自己声明是下限");
-        check(notes(capped, capped.retrievalPartialReason), "面板上那行原因在注记里有同一句原文");
+        /* 九家不再一样多是刻意的：第一层先尽着中文主库，它们各自把 24 扇名额花满，
+           剩下的额度才轮到海外六家。摊平那条规矩移到没勾中文源的那一档去锁
+           （见 allocationRules 里的 flat 那段）。 */
+        check(asked(capped, "cnki") >= 20 && asked(capped, "cqvip") >= 20
+                        && asked(capped, "wanfang") >= 20,
+                "中文主库把自己那 24 扇名额几乎花满（重复短语会省掉一两次）："
+                        + asked(capped, "cnki") + "/" + asked(capped, "cqvip")
+                        + "/" + asked(capped, "wanfang"));        check(lowest >= 8,
+                "海外六家也没被撑到一次也没问：最少的一家也问了 " + lowest + " 次，"
+                        + "最多的 " + highest + " 次");
+        check(!capped.retrievalIncomplete, "取回了候选的轮次是跑完，不是未完成");
+        check(!capped.retrievalPartial, "67 扇全问到了就不许多自认部分是");
+        /* 额度真不够用的那一档：200 扇窗口、九家各 24 扇的手，120 次只买得起 120 扇。 */
+        resetFixtures();
+        DuplicateEngine.Report thin = scan(thesis(600), new TextCorpus(), nine(), limits(12, 24));
+        check(thin.windowsAvailable == 200, "600 段正文切出 200 扇窗口");
+        check(thin.asksPlanned == DuplicateEngine.MAX_REQUESTS, "排期正好把 120 次花完");
+        check(thin.windowsPlanned == 120 && thin.windowsUnstaffed == 80,
+                "额度只排得出 120 扇，剩下 80 扇明说没排上：" + thin.windowsPlanned
+                        + "/" + thin.windowsUnstaffed);
+        check(thin.budgetCapped && !thin.capCapped, "挡下这 80 扇的是请求额度，不是每源上限");
+        check(notes(thin, "检索请求额度 120 次只排得出 120 扇窗口，剩余 80 扇本轮没排上"),
+                "额度挡的必须写成额度，不能含糊成没跑完");
+        check(thin.retrievalPartial && thin.retrievalPartialReason.contains("相似率是下限"),
+                "被额度截断的比率必须自己声明是下限");
+        check(notes(thin, thin.retrievalPartialReason), "面板上那行原因在注记里有同一句原文");
     }
 
     private static void timeCeiling() {
@@ -692,8 +786,14 @@ public final class RetrievalCoverageRegression {
         DuplicateEngine.searchMillis = DuplicateEngine.MAX_SEARCH_MILLIS;
         check(notes(slow, "检索时间已用满"), "时间用完必须写进注记，不能悄悄结束");
         check(notes(slow, "个检索窗口后时间用完"), "注记要写清检索到第几个窗口时时间用完");
+        check(slow.windowsPlanned == 24 && slow.windowsUnstaffed == 43,
+                "两家各 12 扇只排得起 24 扇，剩下 43 扇开场就报了数：" + slow.windowsPlanned
+                        + "/" + slow.windowsUnstaffed);
         check(slow.windowsRetrieved >= 2 && slow.windowsRetrieved < slow.windowsPlanned,
                 "挂钟闸门确实在计划窗口跑完之前停了下来");
+        check(notes(slow, "剩余 " + (slow.windowsPlanned - slow.windowsRetrieved + slow.windowsUnstaffed)
+                        + " 个检索窗口未检索"),
+                "剩余那一句按整篇算：排上了没来得及问的与根本没排上的都算进去，不能只报一半");
         check(slow.retrievalPartial && slow.retrievalPartialReason.contains("检索时间已用满"),
                 "时间截断的部分完成原因指向时间闸门");
         check(!slow.retrievalIncomplete, "已经取回候选的时间截断轮次不许走未完成那一态");
@@ -702,32 +802,470 @@ public final class RetrievalCoverageRegression {
     // ---- C 组：报告与 HTML 里的覆盖率是真数字 ----
 
     private static void coverageDisclosure(DuplicateEngine.Report report) {
-        check(report.windowsAvailable == 67 && report.windowsRetrieved == 12,
+        check(report.windowsAvailable == 67 && report.windowsRetrieved == 67,
                 "报告同时带着可切窗口数与实检窗口数两个数");
         check(report.comparableChars == 8000, "200 段四十字的可检索正文按 validCount 记 8000 字");
-        check(report.coveredChars == 3 * 12 * 40, "12 个窗口覆盖 1440 字");
+        check(report.coveredChars == 8000, "67 扇全问到就覆盖全部 8000 字");
         check(report.coveredChars <= report.comparableChars, "覆盖字数不会超过可比对正文");
-        check(notes(report, "已检索 12/67 个检索窗口"), "覆盖率注记写的是实检比可切");
-        check(notes(report, "覆盖 1440 字（全文可比对 8000 字，18.00%）"), "覆盖率注记带字数与百分比");
-        check(notes(report, "相似率是下限"), "部分完成必须写出下限措辞");
+        check(notes(report, "已检索 67/67 个检索窗口"), "覆盖率注记写的是实检比可切");
+        check(notes(report, "覆盖 8000 字（全文可比对 8000 字，100.00%）"), "覆盖率注记带字数与百分比");
+        check(notes(report, "真问出去 108 次，摊到这些窗口每窗 1-2 家"),
+                "覆盖率那一句要交代这 120 次额度真花成了什么形状，不能只报一个窗口数");
+        check(notes(report, "其中 36 扇问到知网/万方/维普"),
+                "哪几扇问到过中文主库也写在这一句里——中文稿查重看的就是这三家");
         check(notes(report, "可比材料只有摘要的有"), "报告要交代语料里有多少篇只有摘要可比");
-        check(notes(report, "知网、万方、维普只回摘要"), "中文三库只有摘要可比这条结构性短板必须说出口");
+        check(notes(report, "摘要层（近似"), "抓到了全文也要单独报一行摘要级的数，不与正文级混成一个数");
         check(report.abstractOnlyCandidates + report.fullTextCandidates == report.comparableCandidates,
                 "只有摘要与抓到全文的篇数加起来等于可比候选数");
         check(report.recordOnlyCandidates == 0, "只有题录的候选不计入可比候选");
-        check(report.retrievalPartial && report.retrievalPartialReason.contains("把检索设置的窗口数调到 24"),
-                "被设置挡住的情况要告诉用户怎么扩大覆盖");
-        String html = CheckReport.html("thesis.docx", report);
-        check(html.contains("检索覆盖率"), "HTML 里有覆盖率小节");
-        check(html.contains("12/67"), "HTML 里写着实检比可切的窗口数");
-        check(html.contains("仅摘要可比"), "HTML 里写着只有摘要可比的篇数");
-        check(html.contains("相似率是下限"), "HTML 把部分覆盖的比率标成下限");
-        check(html.contains("提问次数"), "来源表里有每个源被提问的次数");
-        check(html.contains("可比材料"), "候选表里有可比材料这一列");
-        check(html.contains("总相似度比") && html.contains("自编率"), "部分完成的报告照样给出三个比率");
-        check(!html.contains("未完成查重"), "部分完成绝不允许走未完成那一态");
+        check(!report.retrievalPartial && report.retrievalPartialReason.isEmpty(),
+                "全篇问到了就不许自认部分是，也不许多留一句下限");
+        String wide = CheckReport.html("thesis.docx", report);
+        check(wide.contains("检索覆盖率"), "HTML 里有覆盖率小节");
+        check(wide.contains("67/67"), "HTML 里写着实检比可切的窗口数");
+        check(wide.contains("真问出去 108 次"), "HTML 那一格也写着提问次数与每窗几家");
+        check(wide.contains("仅摘要可比"), "HTML 里写着只有摘要可比的篇数");
+        check(wide.contains("提问次数"), "来源表里有每个源被提问的次数");
+        check(wide.contains("可比材料"), "候选表里有可比材料这一列");
+        check(wide.contains("总相似度比") && wide.contains("自编率"), "报告照样给出三个比率");
+        check(!wide.contains("未完成查重"), "跑完的轮次绝不允许走未完成那一态");
         check(report.notes.size() <= DuplicateEngine.MAX_NOTES, "注记条数仍在 MAX_NOTES 之内");
     }
+
+    /** 额度买不起全部窗口的那一轮：没排上的那几扇必须点名，比率必须自称下限，还要给出路。 */
+    private static void partialDisclosure() {
+        resetFixtures();
+        PaperSources.Limits tight = limits(12, 2);
+        tight.fullTexts = 0;   // 一篇全文都不许抓：只剩摘要可比那条短板必须自己说出口
+        DuplicateEngine.Report narrow = scan(thesis(200), new TextCorpus(), nine(), tight);
+        check(narrow.windowsAvailable == 67 && narrow.windowsPlanned == 18,
+                "每家只许问 2 扇时九家只排得上 18 扇：" + narrow.windowsPlanned);
+        check(narrow.windowsUnstaffed == 49, "剩下 49 扇当场报数，不许悄悄不算");
+        check(narrow.capCapped && !narrow.budgetCapped, "挡下这 49 扇的是每源上限，不是 120 次额度");
+        check(notes(narrow, "每个检索源按设置在 2 扇处截断，剩余 49 扇本轮没排上"),
+                "被每源上限挡住就说每源上限，别写成检索请求已达上限");
+        check(notes(narrow, "把检索设置的窗口数调到 24 可扩大覆盖"), "被设置挡住要告诉用户怎么扩大覆盖");
+        check(narrow.coveredChars == 18 * 120, "覆盖字数只算真问到的 18 扇：" + narrow.coveredChars);
+        check(notes(narrow, "已检索 18/67 个检索窗口"), "覆盖率注记写的是实检比可切");
+        check(narrow.retrievalPartial && narrow.retrievalPartialReason.contains("相似率是下限"),
+                "部分完成必须写出下限措辞");
+        check(notes(narrow, narrow.retrievalPartialReason), "面板上那行原因在注记里有同一句原文");
+        String html = CheckReport.html("thesis.docx", narrow);
+        check(html.contains("18/67"), "HTML 里写着实检比可切的窗口数");
+        check(html.contains("相似率是下限"), "HTML 把部分覆盖的比率标成下限");
+        check(notes(narrow, "知网、万方、维普只回摘要"),
+                "只剩摘要可比的时候，这条结构性短板必须说出口");
+        check(!html.contains("未完成查重"), "部分完成绝不允许走未完成那一态");
+    }
+
+    // ---- G 组：额度分配器本身。不联网，纯算排期，哪条规矩破了当场就能看见 ----
+
+    private static ArrayList<Integer> vals(int... values) {
+        ArrayList<Integer> out = new ArrayList<Integer>();
+        for (int value : values) out.add(Integer.valueOf(value));
+        return out;
+    }
+    private static ArrayList<Integer> repeated(int times, int value) {
+        ArrayList<Integer> out = new ArrayList<Integer>();
+        for (int i = 0; i < times; i++) out.add(Integer.valueOf(value));
+        return out;
+    }
+    private static int staffed(DuplicateEngine.Allocation a) { return a.windowsPlanned; }
+
+    private static void allocationRules() {
+        ArrayList<String> nine = nine();
+        /* 一、铺宽优先：只要额度买得起，每一扇都要被问到一次。 */
+        DuplicateEngine.Allocation wide = DuplicateEngine.allocate(repeated(60, 300), repeated(60, 300), repeated(60, 1),
+                nine, 12, 120, DuplicateEngine.ORPHAN_PROBE_LAYER);
+        check(staffed(wide) == 60 && wide.unstaffed == 0,
+                "六十扇等长窗口、九家各 12 扇：60 扇全排上");
+        check(wide.asks.size() == 108,
+                "先用 60 次把每扇铺一遍，剩下的才回头补第二家：实测 "
+                        + wide.asks.size());
+        check(wide.depthLow == 1 && wide.depthHigh == 2,
+                "铺宽排在加深前面：最浅的一扇一家，最深的也只有两家");
+        /* 二、额度挡住的那一档：排期正好花完，没排上的数目与闸门来源都写清楚。 */
+        DuplicateEngine.Allocation thin = DuplicateEngine.allocate(repeated(200, 300), repeated(200, 300), repeated(200, 1),
+                nine, 24, 120, DuplicateEngine.ORPHAN_PROBE_LAYER);
+        check(staffed(thin) == 120 && thin.unstaffed == 80,
+                "两百扇窗口、120 次额度：只排得出 120 扇，剩 80 扇");
+        check(thin.cappedByRequests && !thin.cappedByCap, "这是额度花光了，不是每源上限挡的");
+        check(thin.depthLow == 1 && thin.depthHigh == 1, "额度不够时宁可每扇一次铺满，不肯把几扇问穿");
+        /* 三、每源上限挡住的那一档。 */
+        DuplicateEngine.Allocation narrow = DuplicateEngine.allocate(repeated(67, 300), repeated(67, 300), repeated(67, 1),
+                nine, 4, 120, DuplicateEngine.ORPHAN_PROBE_LAYER);
+        check(staffed(narrow) == 36 && narrow.unstaffed == 31,
+                "九家各 4 扇 = 36 扇，剩下 31 扇：实测 " + staffed(narrow) + "/" + narrow.unstaffed);
+        check(narrow.cappedByCap && !narrow.cappedByRequests, "这一档挡人的是每源上限，额度还剩着");
+        /* 四、窗口按覆盖字数排队：几个字的过场段落不配和整段结论抢同一份额度。 */
+        ArrayList<Integer> mixed = vals(50, 400, 60, 500, 70, 30);
+        /* 与 mixed 一一对应的中文字数：这一段是正文，字数多的那几扇中文字也多，顺序一致。 */
+        ArrayList<Integer> mixedChinese = vals(40, 330, 50, 420, 55, 20);
+        DuplicateEngine.Allocation byValue = DuplicateEngine.allocate(mixedChinese, mixed, repeated(6, 1),
+                engines("cnki"), 2, 120, DuplicateEngine.ORPHAN_PROBE_LAYER);
+        check(staffed(byValue) == 2, "一家两扇的名额就排两扇");
+        check(askedWindow(byValue, 3) && askedWindow(byValue, 1) && !askedWindow(byValue, 0),
+                "排上的是 500 字与 400 字那两扇，不是正文最前面那扇 50 字的过场");
+        check(covered(byValue, mixed) == 900, "同样两个名额买到 900 字进比对：" + covered(byValue, mixed));
+        boolean saved = DuplicateEngine.windowsByChars;
+        try {
+            DuplicateEngine.windowsByChars = false;
+            DuplicateEngine.Allocation byOrder = DuplicateEngine.allocate(mixedChinese, mixed, repeated(6, 1),
+                    engines("cnki"), 2, 120, DuplicateEngine.ORPHAN_PROBE_LAYER);
+            check(covered(byOrder, mixed) == 450,
+                    "按正文顺序拿走的是前两扇：" + covered(byOrder, mixed) + " 字");
+            check(covered(byValue, mixed) == 2 * covered(byOrder, mixed),
+                    "同一两个名额，按字数排买到的字数翻一倍："
+                            + covered(byValue, mixed) + " 对 " + covered(byOrder, mixed));
+            DuplicateEngine.Allocation tied = DuplicateEngine.allocate(repeated(6, 100), repeated(6, 100), repeated(6, 1),
+                    engines("cnki"), 2, 120, DuplicateEngine.ORPHAN_PROBE_LAYER);
+            check(askedWindow(tied, 0) && askedWindow(tied, 1),
+                    "字数一样的窗口还是按正文顺序排，不靠运气");
+        } finally {
+            DuplicateEngine.windowsByChars = saved;
+        }
+        /* 五、中文主库优先，且没勾中文源时不许崩。 */
+        DuplicateEngine.Allocation firstPass = DuplicateEngine.allocate(repeated(9, 300), repeated(9, 300), repeated(9, 1),
+                nine, 1, 120, DuplicateEngine.ORPHAN_PROBE_LAYER);
+        check(firstPass.chineseWindows == 3,
+                "九个名额里三家中文主库先各占一扇：" + firstPass.chineseWindows);
+        DuplicateEngine.Allocation abroad = DuplicateEngine.allocate(repeated(6, 300), repeated(6, 300), repeated(6, 1),
+                engines("openalex", "arxiv"), 3, 120, DuplicateEngine.ORPHAN_PROBE_LAYER);
+        check(staffed(abroad) == 6 && abroad.chineseWindows == 0,
+                "只勾海外两家也照样把六扇铺满，一家中文源也没有");
+        /* 六、混主题那条补问式排在铺宽之后：额度只够每扇一次时它一次也不许排。 */
+        ArrayList<Integer> four = repeated(4, 300);
+        DuplicateEngine.Allocation tight = DuplicateEngine.allocate(four, four, vals(1, 2, 1, 1),
+                engines("cnki", "arxiv"), 8, 6, DuplicateEngine.ORPHAN_PROBE_LAYER);
+        check(staffed(tight) == 4 && tight.asks.size() == 6,
+                "六次额度先把四扇各问一次再补两扇："
+                        + staffed(tight) + " 扇 / " + tight.asks.size() + " 次");
+        for (int i = 0; i < tight.asks.size(); i++)
+            check(tight.asks.get(i).probe == 0,
+                    "铺宽还没铺完就轮不到那条补问式：第 " + i + " 次");
+        DuplicateEngine.Allocation roomy = DuplicateEngine.allocate(four, four, vals(1, 2, 1, 1),
+                engines("cnki", "arxiv"), 8, 9, DuplicateEngine.ORPHAN_PROBE_LAYER);
+        check(roomy.asks.size() == 9 && roomy.asks.get(8).probe == 1,
+                "八次把四扇各问两家，第九次才轮到那条补问式："
+                        + roomy.asks.size() + " 次");
+        /* 七、没有任何一家被整轮跳过。 */
+        LinkedHashMap<String, Integer> per = new LinkedHashMap<String, Integer>();
+        for (int i = 0; i < thin.asks.size(); i++) {
+            String key = thin.asks.get(i).engine;
+            Integer had = per.get(key);
+            per.put(key, Integer.valueOf(had == null ? 1 : had.intValue() + 1));
+        }
+        for (String engine : NINE)
+            check(per.get(engine) != null && per.get(engine).intValue() >= 1,
+                    engine + " 没被整轮跳过：分到 " + per.get(engine) + " 次");
+        check(thin.chineseWindows == 72,
+                "第一层先尽着中文主库：三家各 24 扇 = 72 扇先铺到中文，"
+                        + "剩下 48 扇由六家海外源接住");
+        /* 没勾中文源的时候没有优先层，同一份额度必须摊平。 */
+        DuplicateEngine.Allocation flat = DuplicateEngine.allocate(repeated(200, 300), repeated(200, 300),
+                repeated(200, 1), engines("openalex", "crossref", "arxiv", "europepmc"),
+                60, 120, DuplicateEngine.ORPHAN_PROBE_LAYER);
+        int[] counts = new int[4];
+        for (int i = 0; i < flat.asks.size(); i++)
+            counts[engines("openalex", "crossref", "arxiv", "europepmc").indexOf(
+                    flat.asks.get(i).engine)]++;
+        int lo = counts[0], hi = counts[0];
+        for (int value : counts) { lo = Math.min(lo, value); hi = Math.max(hi, value); }
+        check(hi - lo <= 1,
+                "没勾中文源时 120 次摊到四家相差不超过一次：实测 " + lo + "-" + hi);
+
+        /* 八、排窗口先看中文字数，再看总字数。这篇样稿里最长的一扇是正文段落（856 字），
+           第二长与第五长却是两条参考文献条目（705 字、667 字，一个中文字都没有）：光按总字数排，
+           每家只被问两扇的时候钱全花在英文书目上，中文主库拿到英文书目只回一屏不相干的英文题录。 */
+        ArrayList<Integer> refChars = vals(600, 705, 660, 300);
+        ArrayList<Integer> refChinese = vals(560, 0, 640, 290);
+        ArrayList<Integer> order = DuplicateEngine.windowOrder(refChinese, refChars);
+        check(order.get(0).intValue() == 2 && order.get(1).intValue() == 0,
+                "先排中文字数多的那两扇（640 与 560）：" + order);
+        check(order.get(3).intValue() == 1, "705 字的中零条排到最后：" + order);
+        DuplicateEngine.Allocation refs = DuplicateEngine.allocate(refChinese, refChars, repeated(4, 1),
+                engines("cnki"), 2, 120, DuplicateEngine.ORPHAN_PROBE_LAYER);
+        check(askedWindow(refs, 2) && askedWindow(refs, 0) && !askedWindow(refs, 1),
+                "两个名额给正文那两扇，不给最长的那扇参考文献条目");
+        check(covered(refs, refChars) == 1260, "同样两个名额买到 " + covered(refs, refChars) + " 字正文");
+        /* 纯英文稿子不受这条影响：中文字数全是零，退回复比总字数，顺序与之前一致。 */
+        ArrayList<Integer> allAbroad = DuplicateEngine.windowOrder(repeated(4, 0), refChars);
+        check(allAbroad.get(0).intValue() == 1 && allAbroad.get(1).intValue() == 2,
+                "中文字数全零时还是按总字数从大到小排：" + allAbroad);
+    }
+
+    private static boolean askedWindow(DuplicateEngine.Allocation a, int window) {
+        for (int i = 0; i < a.asks.size(); i++) if (a.asks.get(i).window == window) return true;
+        return false;
+    }
+    private static int covered(DuplicateEngine.Allocation a, ArrayList<Integer> chars) {
+        boolean[] hit = new boolean[chars.size()];
+        int sum = 0;
+        for (int i = 0; i < a.asks.size(); i++) {
+            int w = a.asks.get(i).window;
+            if (hit[w]) continue;
+            hit[w] = true;
+            sum += chars.get(w).intValue();
+        }
+        return sum;
+
+    }
+
+    /** 排给一家却问不动的那些格子必须换人补上：真机 2.6.3 那轮 5 个源判取尽，几十扇窗口跟着没问。 */
+    private static void stoppedSourceHandsItsWindowsBack() {
+        resetFixtures();
+        throttled.add("/throttled");
+        PaperSources.setEndpoint("arxiv", base + "/throttled");
+        DuplicateEngine.Report report = scan(thesis(20), new TextCorpus(),
+                engines("cnki", "cqvip", "wanfang", "openalex", "arxiv"), limits(12, 6));
+        PaperSources.setEndpoint("arxiv", base + "/arxiv");
+        throttled.clear();
+        check(asked(report, "arxiv") == 2,
+                "被限流的源补试一次就停手：" + asked(report, "arxiv"));
+        check(report.asksSpilled == 4,
+                "它排到的六格里没问出去的四格全部排回补问队列：" + report.asksSpilled);
+        /* 谁来补是四条道当场抢的，谁抢到不确定；锁死的是结果：排上的窗口
+           一扇也不许因为一家停了就整扇没问。 */
+        check(report.windowsPlanned == 7 && report.windowsRetrieved == report.windowsPlanned,
+                "一家停在半路上，排上的七扇还是全部问到了："
+                        + report.windowsRetrieved + "/" + report.windowsPlanned);
+        check(report.asksRefilled <= report.asksSpilled,
+                "补问不会多于退回：" + report.asksRefilled + "/" + report.asksSpilled);
+        check(report.asksSpilled == 0
+                        || notes(report, "次提问被停问的检索源退回"),
+                "退回了几格必须写进注记");
+        check(report.asksRefilled == 0
+                        || notes(report, "次改由其他检索源补问"),
+                "补了几次写几次，一次没补也不许写");
+    }
+
+
+    // ---- H 组：扫描时顺手抓开放获取正文（检索设置里那个开关） ----
+
+    /**
+     * 真机 2.6.4 那一轮：12/49 扇、比对材料 51 篇，正文可比只有 4 篇，另有 8 篇挂着能直接下的 PDF
+     * 等用户到结果页点。这一组量的是同一轮里顺手把它们抓回来按正文比对之后，屏幕上那几个数怎么变，
+     * 以及额度不够时是不是照实说"还有几篇没来得及下"。
+     */
+    private static void autoFullTextFetch() {
+        /* 一、开关与上限：默认开着、最多 6 篇；老设置里没这两项也按开着处理。 */
+        EngineSettings fresh = new EngineSettings();
+        check(fresh.autoPdf && fresh.autoPdfs == 6,
+                "新装机默认顺手抓正文，上限 6 篇：" + fresh.autoPdf + "/" + fresh.autoPdfs);
+        EngineSettings saved = new EngineSettings();
+        saved.autoPdf = false; saved.autoPdfs = 2;
+        EngineSettings back = EngineSettings.deserialize(EngineSettings.serialize(saved));
+        check(!back.autoPdf && back.autoPdfs == 2, "关掉与改上限都存得住、读得回");
+        EngineSettings old = EngineSettings.deserialize("{\"version\":3,\"web\":true,"
+                + "\"engines\":[\"cnki\",\"openalex\"],\"perEngine\":12,\"timeout\":20,"
+                + "\"windows\":12,\"coreKey\":\"\",\"proxy\":\"\"}");
+        check(old.autoPdf && old.autoPdfs == 6,
+                "3 号设置里没这两项：按新装机一样开着，不许静默关掉继续给用户看 0%");
+        boolean refused = false;
+        try { EngineSettings greedy = new EngineSettings(); greedy.autoPdfs = 11; greedy.validate(); }
+        catch (IllegalArgumentException error) { refused = true; }
+        check(refused, "上限超过 10 篇直接拒，不许拿设置当挡箭牌把请求额度全花在下载上");
+
+        /* 二、开关开着：名次那一份全文额度之外的候选，由剩下的请求额度接住。 */
+        resetFixtures();
+        crossrefSize = 1;
+        responseSize = 12;
+        TextCorpus corpus = new TextCorpus();
+        PaperSources.Limits on = limits(12, 4);
+        on.fullTexts = 1;
+        on.autoFullTexts = 3;
+        DuplicateEngine.Report got = scan(thesis(3), corpus,
+                engines("crossref", "openalex", "semantic-scholar", "europepmc"), on);
+        check(got.autoPdfTried == 3 && got.autoPdfFetched == 3,
+                "设了 3 篇就抓 3 篇，篇篇都带回正文：试 " + got.autoPdfTried + " 抓成 " + got.autoPdfFetched);
+        check(got.fullTextCandidates == 4,
+                "正文可比材料从名次队那 1 篇变成 4 篇：" + got.fullTextCandidates);
+        check(hits("/fulltext") + hits("/europepmc/fulltext") == 4,
+                "全文请求确实发了四次，不是报告自己写的："
+                        + hits("/fulltext") + "+" + hits("/europepmc/fulltext"));
+        check(corpusContains(corpus, FULL_TEXT_PROBE), "抓回来的正文进了比对语料");
+        check(got.autoPdfLeft == 0, "额度够的时候不许喊没来得及：" + got.autoPdfLeft);
+        check(notes(got, "本轮顺手抓了 3 篇开放获取全文，3 篇已按正文比对"),
+                "注记按篇数说实话");
+        check(!notes(got, "没来得及下"), "上限是自己设的，不许写成没来得及");
+        check(CheckReport.html("thesis.docx", got).contains("顺手抓正文"),
+                "报告那张表里有顺手抓正文那一行");
+        int fullWith = got.fullTextCandidates;
+
+        /* 三、开关关掉（或上限 0）：与之前一字不差，一篇也不许多抓。 */
+        resetFixtures();
+        crossrefSize = 1;
+        responseSize = 12;
+        PaperSources.Limits off = limits(12, 4);
+        off.fullTexts = 1;
+        off.autoFullTexts = 0;
+        DuplicateEngine.Report shut = scan(thesis(3), new TextCorpus(),
+                engines("crossref", "openalex", "semantic-scholar", "europepmc"), off);
+        check(shut.autoPdfTried == 0 && shut.autoPdfLeft == 0,
+                "上限 0 就是关掉：一次下载都不许多发");
+        check(shut.fullTextCandidates == 1 && shut.fullTextCandidates < fullWith,
+                "关掉之后正文可比回到名次队那一篇：" + shut.fullTextCandidates);
+        check(!notes(shut, "顺手抓"), "没做这件事就不许在注记里提它");
+        check(!CheckReport.html("thesis.docx", shut).contains("顺手抓正文"),
+                "报告里也不多那一行");
+
+        /* 四、抓回来没有正文层：仍然按摘要比对，且这一篇不许冒充正文可比。 */
+        resetFixtures();
+        crossrefSize = 1;
+        responseSize = 12;
+        fullTextEmpty = true;
+        PaperSources.Limits dry = limits(12, 4);
+        dry.fullTexts = 1;
+        /* 上限给到 10：这一档要量的是"同一家落空两次之后不再替它花钱"，
+           上限先到的话量到的就是上限本身，挡不住的那几篇根本轮不到说话。 */
+        dry.autoFullTexts = 10;
+        DuplicateEngine.Report empty = scan(thesis(3), new TextCorpus(),
+                engines("crossref", "openalex", "semantic-scholar", "europepmc"), dry);
+        check(empty.autoPdfTried >= DuplicateEngine.MAX_AUTO_MISS_STREAK
+                        && empty.autoPdfFailed == empty.autoPdfTried && empty.autoPdfFetched == 0,
+                "抓回来一个字都没有的一篇也不许多抓：试 " + empty.autoPdfTried
+                        + " 抓成 " + empty.autoPdfFetched + " 落空 " + empty.autoPdfFailed);
+        check(hits("/europepmc/fulltext") == DuplicateEngine.MAX_AUTO_MISS_STREAK,
+                "落空按家计：同一家连着两篇读不出正文层就不许多花一次请求，"
+                        + "europepmc 全文请求 " + hits("/europepmc/fulltext") + " 次");
+        check(hits("/fulltext") >= 1,
+                "别家的链接不许被这一家的落空连坐：crossref 全文请求 " + hits("/fulltext") + " 次");
+        check(empty.fullTextCandidates == 0,
+                "抓回空正文的一篇也不许标成正文可比：" + empty.fullTextCandidates);
+        check(notes(empty, empty.autoPdfFailed + " 篇抓回来没有正文层，仍按摘要比对"),
+                "落空那几篇要说清仍按摘要比：" + empty.autoPdfFailed);
+        check(empty.autoPdfLeft > 0
+                        && notes(empty, "没来得及下（Europe PMC 这一轮连着 2 篇都读不出正文层）"),
+                "剩下的篇数写成没来得及，并点名是哪一家的链接读不出：" + empty.autoPdfLeft
+                        + " " + empty.autoPdfReason);
+        check(notes(empty, "回来的页面几乎没字 " + empty.autoPdfFailed + " 篇"),
+                "落空按形状说人话，不许只写一句\u201c没抓到\u201d：" + empty.autoPdfShapes);
+        check(CheckReport.html("thesis.docx", empty).contains("回来的页面几乎没字"),
+                "报告那张表里的顺手抓正文一行也带形状");
+        check(DuplicateEngine.autoFetchLine(2, 0, 2, 1, "连着 2 篇都读不出正文层",
+                "回来的页面几乎没字 2 篇").contains("仍按摘要比对（回来的页面几乎没字 2 篇）"),
+                "形状只跟在落空那半句后面");
+        fullTextEmpty = false;
+
+        /* 五、检索把 120 次额度花光了：剩下的候选照实写"没来得及下"，并写明是被什么挡的。 */
+        resetFixtures();
+        responseSize = 12;
+        PaperSources.Limits tight = limits(12, 24);
+        tight.autoFullTexts = 10;
+        DuplicateEngine.Report drained = scan(thesis(200), new TextCorpus(), nine(), tight);
+        check(drained.asksSent == DuplicateEngine.MAX_REQUESTS,
+                "这一轮检索先把请求额度花光：" + drained.asksSent + "/" + DuplicateEngine.MAX_REQUESTS);
+        check(drained.asksSent + drained.autoPdfTried <= DuplicateEngine.MAX_REQUESTS,
+                "顺手抓正文与检索抢的是同一个 120 次，合计不许越过去："
+                        + drained.asksSent + "+" + drained.autoPdfTried);
+        check(drained.autoPdfLeft > 0 && notes(drained, "没来得及下（检索请求额度已用完）"),
+                "还有 " + drained.autoPdfLeft + " 篇挂着 PDF 没排上，注记里要写明是额度用完");
+        check(drained.autoPdfTried == 0, "额度见底之后一篇也不许多抓：" + drained.autoPdfTried);
+
+        /* 六、抓回的正文要落进自建库。用户要的是"顺手抓进自建库"，不是这一轮在内存里比完就丢：
+           下一轮检索即使那几家不再回正文，自建库里也还留着那几篇可比正文。 */
+        check(got.autoBodies.size() == 3,
+                "抓成正文的三篇都留着正文本身交给自建库：" + got.autoBodies.size());
+        check(shut.autoBodies.isEmpty() && drained.autoBodies.isEmpty(),
+                "关掉开关与额度见底这两轮一篇也不许多存："
+                        + shut.autoBodies.size() + "/" + drained.autoBodies.size());
+        LocalLibrary library = new LocalLibrary(freshLibraryDir("auto-fetch"));
+        String stored = DuplicateEngine.fileAutoBodies(library, got);
+        /* 桩对三次全文请求回的是同一份 PDF 文本，入库那一条哈希判重的规矩就该把它们挡成一篇。
+           断言按规矩写，不按"抓了三篇就该有三篇"写：那是测愿望。 */
+        check(library.size() == 1, "同一份正文抓三次也只进一篇：" + library.size());
+        check(stored.contains("顺手抓回的正文已存进自建库 1 篇（自建库现在 1 篇")
+                && stored.contains("另有 2 篇库里已有同一正文，没有重复入库"),
+                "存库那一句把存了几篇、几篇是同一正文都说明白：" + stored);
+        int storeAt = got.notes.indexOf(stored), fetchAt = -1;
+        for (int i = 0; i < got.notes.size(); i++) {
+            if (got.notes.get(i).startsWith("本轮顺手抓了")) fetchAt = i;
+        }
+        check(fetchAt >= 0 && storeAt == fetchAt + 1,
+                "存库那一句紧跟在顺手抓正文那一句后面，不被注记上限挤掉：" + storeAt + "/" + fetchAt);
+        check(CheckReport.html("thesis.docx", got).contains("顺手抓回的正文已存进自建库"),
+                "报告那张表/注记里读得到存库这一句");
+        TextCorpus reread = new TextCorpus();
+        library.index(reread);
+        check(corpusContains(reread, FULL_TEXT_PROBE),
+                "重开这个库再 index，抓回的正文仍在比对语料里——下一轮不必再花请求重抓");
+
+        /* 正文各不相同的三篇：三篇都该进库，库里的篇数要跟着涨，第二遍重跑不许翻倍。 */
+        LocalLibrary distinct = new LocalLibrary(freshLibraryDir("auto-fetch-distinct"));
+        DuplicateEngine.Report three = new DuplicateEngine.Report();
+        three.autoBodies.add(new DuplicateEngine.AutoBody("钎焊界面扩散层研究", "openalex",
+                FULL_TEXT_PROBE + "第一篇的其余段落，讲保温时间与硬度分布。"));
+        three.autoBodies.add(new DuplicateEngine.AutoBody("互连层的可靠性评估", "europepmc",
+                FULL_TEXT_PROBE + "第二篇的其余段落，讲热循环下的失效判据。"));
+        three.autoBodies.add(new DuplicateEngine.AutoBody("多孔铜的制备参数", "cnki",
+                FULL_TEXT_PROBE + "第三篇的其余段落，讲孔隙率与电流密度的关系。"));
+        String threeLine = DuplicateEngine.fileAutoBodies(distinct, three);
+        check(distinct.size() == 3 && threeLine.startsWith("顺手抓回的正文已存进自建库 3 篇（自建库现在 3 篇"),
+                "三份不同的正文三篇都进库：" + distinct.size() + " " + threeLine);
+        String twice = DuplicateEngine.fileAutoBodies(distinct, three);
+        check(distinct.size() == 3 && twice.contains("另有 3 篇库里已有同一正文"),
+                "同一轮重跑一遍不许多存一篇：" + distinct.size() + " " + twice);
+
+        /* 空正文与"没开开关"都不该在库里留东西，也不该在报告里留一句空话。 */
+        LocalLibrary dryRun = new LocalLibrary(freshLibraryDir("auto-fetch-dry"));
+        check(DuplicateEngine.fileAutoBodies(dryRun, shut).isEmpty() && dryRun.size() == 0,
+                "关掉开关的那一轮：自建库一个字都不许多，报告里也不多一句");
+        check(DuplicateEngine.autoStoreLine(0, 0, 0, "", 0).isEmpty(),
+                "一篇没存、一篇没挡就不开口");
+        DuplicateEngine.Report blank = new DuplicateEngine.Report();
+        blank.autoBodies.add(new DuplicateEngine.AutoBody("抓回来是空的", "crossref", "   "));
+        String blankLine = DuplicateEngine.fileAutoBodies(new LocalLibrary(freshLibraryDir("auto-fetch-blank")), blank);
+        check(blankLine.contains("1 篇没存进自建库："), "空正文按落空算并写明原因：" + blankLine);
+        /* 七、arXiv 那批只剩文章页的候选：下载口按 id 自己拼。真机那一轮 9 行留档全是
+           "arxiv.org/<id> fetch-failed 响应过大"——abs/html 那一页永远取不到字，
+           而这正是"顺手抓正文"唯一真能抓到中文以外正文的一路。 */
+        check(PaperSources.arxivPdfUrl("2010.10905v2").equals("https://arxiv.org/pdf/2010.10905v2.pdf"),
+                "按 id 拼出的是下载口：" + PaperSources.arxivPdfUrl("2010.10905v2"));
+        check(PaperSources.arxivPdfUrl("https://arxiv.org/abs/math/0301001v1")
+                .equals("https://arxiv.org/pdf/math/0301001v1.pdf"),
+                "老式 id 与 abs 页都拼得对：" + PaperSources.arxivPdfUrl("https://arxiv.org/abs/math/0301001v1"));
+        check(PaperSources.pdfLink(PaperSources.arxivPdfUrl("2010.10905v2")),
+                "拼出来的那条走 PDF 那一路，不再去读 HTML 撞响应上限");
+        check(PaperSources.pdfUrlRank(PaperSources.arxivPdfUrl("2010.10905v2")) <= 1,
+                "拼出来的那条值得花全文额度：" + PaperSources.pdfUrlRank(PaperSources.arxivPdfUrl("2010.10905v2")));
+        check(PaperSources.arxivPdfUrl("").isEmpty() && PaperSources.arxivPdfUrl("https://arxiv.org/").isEmpty(),
+                "没有 id 就不硬拼一条假链接");
+        String oneEntry = "<entry><id>http://arxiv.org/abs/1407.5806v1</id>"
+                + "<title>Predicting cement microstructure</title>"
+                + "<summary>一种把显微结构与力学性能连起来的代理模型。</summary>"
+                + "<published>2014-07-21T00:00:00Z</published>"
+                + "<link href=\"http://arxiv.org/abs/1407.5806v1\" rel=\"alternate\"/></entry>";
+        java.util.ArrayList<PaperSources.Candidate> parsed = PaperSources.parseArxiv(oneEntry, 5);
+        check(parsed.size() == 1, "feed 里一条解析出一条：" + parsed.size());
+        check("https://arxiv.org/pdf/1407.5806v1.pdf".equals(parsed.get(0).fullTextUrl),
+                "feed 没给 pdf 链接的条目不再攥着 abs 页：" + parsed.get(0).fullTextUrl);
+        /* 真机那一条的形状：feed 给了 pdf 链接，但没有 .pdf 后缀。正是这一条让拼接口在
+           宿主断言全绿的情况下仍旧没生效——平手时 betterFullTextUrl 取第一条，源的那条排前就赢。 */
+        String extensionless = "<entry><id>http://arxiv.org/abs/2208.07815v1</id>"
+                + "<title>The JCMT Transient Survey</title>"
+                + "<summary>\u5355\u5386\u5143\u6682\u6e90\u4e0e\u5149\u53d8\u3002</summary>"
+                + "<published>2022-08-15T00:00:00Z</published>"
+                + "<link title=\"pdf\" href=\"https://arxiv.org/pdf/2208.07815v1\" "
+                + "rel=\"related\" type=\"application/pdf\"/></entry>";
+        java.util.ArrayList<PaperSources.Candidate> ext = PaperSources.parseArxiv(extensionless, 5);
+        check(ext.size() == 1, "feed 给了无后缀 pdf 链接也解析出一条：" + ext.size());
+        check("https://arxiv.org/pdf/2208.07815v1.pdf".equals(ext.get(0).fullTextUrl),
+                "source 给的 pdf 链接没后缀时仍换成下载口：" + ext.get(0).fullTextUrl);
+        check(PaperSources.pdfLink(ext.get(0).fullTextUrl),
+                "换出来的那条走 PDF 那一路，不再走文本撞响应上限：" + ext.get(0).fullTextUrl);
+        resetFixtures();
+        crossrefSize = -1;
+    }
+
+    /** 每次都给一个空的库目录：篇数断言只有从零开始数才算数。 */
+    private static File freshLibraryDir(String name) {
+        File directory = new File("artifacts/build/host-auto-library/" + name);
+        File[] children = directory.listFiles();
+        if (children != null) for (int i = 0; i < children.length; i++) children[i].delete();
+        directory.mkdirs();
+        return directory;
+    }
+
     // ---- D 组：按名次入库，零分候选不进语料 ----
 
     private static void rankedIntake() {
@@ -735,7 +1273,9 @@ public final class RetrievalCoverageRegression {
         boilerplate = true;
         crossrefSize = 1;
         responseSize = 12;
-        PaperSources.Limits limits = limits(12, 1);
+        /* 每源上限 4 扇：四个源在这一扇窗口上各问一次，与改前那轮同样四次提问，
+           名次与全文额度那些数才还能一个不动地比。 */
+        PaperSources.Limits limits = limits(12, 4);
         limits.fullTexts = 1;
         TextCorpus corpus = new TextCorpus();
         DuplicateEngine.Report report = scan(thesis(3), corpus,
@@ -843,9 +1383,10 @@ public final class RetrievalCoverageRegression {
         check(peakInFlight() >= 3, "三条源同时在飞：峰值 " + peakInFlight() + " 条并发，串行实现里这个数永远是 1");
         check(asked(report, "cnki") == 4 && asked(report, "cqvip") == 4 && asked(report, "wanfang") == 4,
                 "并行不改变每个源被问的次数：四扇窗口每个源照旧四次");
-        check(report.windowsRetrieved == 4, "四扇窗口全部问出去");
-        check(report.retrievalPartial && report.retrievalPartialReason.contains("按设置在"),
-                "六十七扇窗口只计划了四扇，这一轮照样要自认部分是，原因指向设置里的窗口数");
+        check(report.windowsRetrieved == 12, "三家各四扇的名额排满十二扇，全部问出去");
+        check(report.windowsUnstaffed == 55
+                        && report.retrievalPartialReason.contains("每个检索源按设置在 4 扇处截断"),
+                "六十七扇只排上十二扇：自认部分是，且原因指向每源上限而不是银幕");
     }
 
     /** 一个慢源挂在一扇窗口上，其余源不许陪它一起等：这一条在串行实现里必输，因为它只能问出一次。 */
@@ -876,7 +1417,7 @@ public final class RetrievalCoverageRegression {
         check(shortestGap() >= DuplicateEngine.MIN_ENGINE_GAP_MILLIS - 40L,
                 "四条泳道同时跑，同一源相邻两次提问仍隔满一个间隔：实测最短 " + shortestGap() + "ms");
         check(peakInFlight() >= 2, "同源限速没把整轮退回串行：峰值 " + peakInFlight() + " 条并发");
-        check(report.windowsRetrieved == 6, "限速之下六个窗口照样全跑完");
+        check(report.windowsRetrieved == 54, "限速之下九家各六扇 = 54 扇照样全跑完");
     }
     private static void cancelledAndPrivate(String documentText) {
         resetFixtures();
@@ -946,11 +1487,15 @@ public final class RetrievalCoverageRegression {
             start();
             DuplicateEngine.Report wide = askedOncePerWindow();
             coverageDisclosure(wide);
+            partialDisclosure();
+            allocationRules();
+            stoppedSourceHandsItsWindowsBack();
             singleWindowSetting();
             identicalWindowIsNotAskedTwice();
             requestCeiling();
             timeCeiling();
             rankedIntake();
+            autoFullTextFetch();
             midWindowHitEntersCorpus();
             corpusCeiling();
             throttleCountsBySource();

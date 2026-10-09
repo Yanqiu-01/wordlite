@@ -25,6 +25,12 @@ public final class PaperSources {
         public int windows = 12;
         /** 本次检测允许的开放获取全文抓取次数。 */
         public int fullTexts = 6;
+        /**
+         * 本轮还允许"顺手抓正文"几篇：名次队花完全文额度之后，还只有摘要可比、又挂着可直下 PDF 的
+         * 候选由它接住。用的是检索剩下的请求额度，与检索抢同一个数。默认 0 = 关，由 app 从检索设置
+         * 里写进来——不给默认值，免得哪条没设它的调用路径悄悄开始下载。
+         */
+        public int autoFullTexts;
         public String coreKey = "";
         /** host:port of an HTTP proxy for this retrieval pass, empty to dial out directly. */
         public String proxy = "";
@@ -48,6 +54,7 @@ public final class PaperSources {
             out.perEngine = perEngine;
             out.windows = windows;
             out.fullTexts = fullTexts;
+            out.autoFullTexts = autoFullTexts;
             out.coreKey = coreKey;
             out.proxy = proxy;
             out.shapes = shapes;
@@ -1419,7 +1426,8 @@ public final class PaperSources {
         }
         return out;
     }
-    private static ArrayList<Candidate> parseArxiv(String xml, int limit) {
+    /** 包内可见：这条解析要能在宿主上单独量（文章页 vs /pdf/ 那条区别只在测试里量得动）。 */
+    static ArrayList<Candidate> parseArxiv(String xml, int limit) {
         ArrayList<Candidate> out = new ArrayList<Candidate>();
         for (String entry : Xml.elements(xml, "entry")) {
             Candidate candidate = new Candidate();
@@ -1431,11 +1439,44 @@ public final class PaperSources {
             candidate.source.year = year(first(Xml.text(entry, "published"), Xml.text(entry, "updated")));
             candidate.source.locator = id;
             candidate.abstractText = clip(Xml.text(entry, "summary"));
-            candidate.fullTextUrl = Xml.attribute(entry, "link", "href", "title", "pdf");
+            /* 源的 link 里给没给 pdf 都不许只攥着文章页：abs/html 那一页对取正文没有意义
+               （见 arxivPdfUrl 那段实测）。feed 给了就听 feed 的，没给按 id 自己拼。 */
+            /* 自己拼的那一条排在前：源给的 pdf 链接常常没有 .pdf 后缀（真机留档写着
+               https://arxiv.org/pdf/2208.07815v1），而 pdfLink() 认的是 .pdf 或 /pdf 结尾。两条同为 1 档时
+               betterFullTextUrl 取第一条：把源那条排前，等于把取不到字的那条选上——fullText() 因此走
+               文本那一路，整份 PDF 撞穿响应上限，留档只剩 fetch-failed 响应过大（真机 2026-10-09
+               那一轮六个全文额度全烧在这里，一字没回）。 */
+            candidate.fullTextUrl = betterFullTextUrl(
+                    arxivPdfUrl(candidate.source.id),
+                    Xml.attribute(entry, "link", "href", "title", "pdf"));
             add(out, candidate, limit);
         }
         return out;
     }
+    /**
+     * arXiv 那批候选手里常常只剩文章页：真机 2026-10-09 那一轮的留档写着
+     * <code>arxiv.org/2010.10905v2 fetch-failed 响应过大</code>——arXiv 的 HTML5 全文版一份就超过
+     * 响应上限，这条路永远拿不到字。同一批 id 换 /pdf/&lt;id&gt;.pdf 逐条实测一击命中
+     * （2.4-6.3 MB，解出 1,645-65,535 字）。没有 id 就回空，不硬拼一条假链接。
+     */
+    static String arxivPdfUrl(String idOrUrl) {
+        String value = idOrUrl == null ? "" : idOrUrl.trim();
+        int scheme = value.indexOf("://");
+        if (scheme >= 0) {
+            String path = value.substring(scheme + 3);
+            int slash = path.indexOf('/');
+            value = slash < 0 ? "" : path.substring(slash + 1);
+        }
+        int query = value.indexOf('?');
+        if (query >= 0) value = value.substring(0, query);
+        if (value.startsWith("abs/")) value = value.substring(4);
+        else if (value.startsWith("pdf/")) value = value.substring(4);
+        if (value.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
+            value = value.substring(0, value.length() - 4);
+        }
+        return value.isEmpty() ? "" : "https://arxiv.org/pdf/" + value + ".pdf";
+    }
+
     private static ArrayList<Candidate> parseCore(Object root, int limit) {
         ArrayList<Candidate> out = new ArrayList<Candidate>();
         for (Object item : listAt(root, "results")) {

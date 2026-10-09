@@ -1,6 +1,7 @@
 package com.rikkahub.wordlite;
 
 import java.io.IOException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -27,6 +28,18 @@ public final class DuplicateEngine {
     public static final String MATERIAL_SPLIT_LABEL = "命中材料分档";
     /** 报告里列几条"可以下进自建库"的候选：再多那一屏就没人看了。 */
     static final int MAX_DOWNLOADABLES = 10;
+    /** 一轮里"顺手抓正文"的篇数天花板：设置里的数最高也只能到这里，剩下的额度得留给检索。 */
+    static final int MAX_AUTO_FULL_TEXTS = 10;
+    /**
+     * 同一家连着几篇抓回来读不出正文层，就不再替它花额度（别家照抓）。
+     * <p>2026-10-09 真机先量了"整轮连着两篇就收手"那一版：Europe PMC 这一轮链接整批超时，
+     * 两条它的落空把后面 arXiv 三条实测能下成 5.6 万字正文的直链一起挡在门外
+     * （探针同一轮逐条实测：arXiv rank=0 五条全部 200，2.4-6.3 MB，1,645-65,535 字）。
+     * 落空是逐家的事，不是整轮的事。
+     */
+    static final int MAX_AUTO_MISS_STREAK = 2;
+    /** "本轮顺手抓了 N 篇……"那句的开头。注记要按它找到紧跟其后的"存进自建库"那一句。 */
+    static final String AUTO_FETCH_PREFIX = "本轮顺手抓了 ";
     /* 挂钟闸门与限速：实测一轮 9 个源约 10 秒（维普最慢 4062ms），但 Routes 的多路尝试能把单个
        请求拖到 20 秒以上，所以只设请求数上限挡不住慢网络，两个闸必须同时存在。 */
     static final long MAX_SEARCH_MILLIS = 180000L, MIN_ENGINE_GAP_MILLIS = 400L;
@@ -154,7 +167,7 @@ public final class DuplicateEngine {
         /* ---- 0.6.0 覆盖率披露：三态里的"部分完成"必须自带数字，不能只留一句道歉 ---- */
         /** 全文按 retrievable() 过滤后能切出的窗口组数，文档覆盖率的分母。 */
         public int windowsAvailable;
-        /** 设置允许本次做的窗口组数 = min(windowsAvailable, limits.windows)。 */
+        /** 本轮排期排上的窗口组数：额度与每源上限之内，按覆盖字数从大到小选出来的。 */
         public int windowsPlanned;
         /** 真正发出过请求的窗口组数：同一窗口只要有任一源被问过就算。 */
         public int windowsRetrieved;
@@ -162,6 +175,22 @@ public final class DuplicateEngine {
         public int coveredChars;
         /** 可检索的正文总字数：retrievable() 通过的段落字数；结构性文本另计 excludedChars。 */
         public int comparableChars;
+        /** 本轮排期打算发出去的提问次数（不超 MAX_REQUESTS）；一次提问一次请求。 */
+        public int asksPlanned;
+        /** 本轮可用的请求额度，与"每家最多问几扇"的上限（取自设置里的窗口数）。 */
+        public int windowsBudget, perSourceWindowCap;
+        /** 真问出去的提问次数，与排期打算发的次数排在一起看：撞了挂钟时前者小于后者。 */
+        public int asksSent;
+        /** 停问的源退回来的提问格子数，与其中真被别家补问掉的那些：报告里那句补问读这两个数。 */
+        public int asksSpilled, asksRefilled;
+        /** 真问出去的提问里，问得最浅与最深的一扇各问了几家：报告里"每窗问 2-3 家"读这两个数。 */
+        public int windowDepthLow, windowDepthHigh;
+        /** 排上的窗口里，有几扇至少问到过一家中文主库（知网/万方/维普）。 */
+        public int chineseWindowsAsked;
+        /** 全文切得出、本轮一次也没排上的窗口数；被谁挡的看下面两个布尔。 */
+        public int windowsUnstaffed;
+        /** 没排满是请求额度用尽（budgetCapped）还是每源上限用尽（capCapped）：两句话不一样。 */
+        public boolean budgetCapped, capCapped;
         /** 每个检索源被提问的次数：一扇窗口最多两次（整窗一次，混主题那段单独一次）。HTML 的「提问次数」列读它。 */
         public final LinkedHashMap<String, Integer> windowsAsked = new LinkedHashMap<String, Integer>();
         /** 真正进了语料（摘要或全文非空）的候选数。 */
@@ -219,6 +248,22 @@ public final class DuplicateEngine {
          * 带着可下载 PDF 直链的候选：结果页给一条"下进自建库"的入口。
          * 自建库走的是与联网正文同一个判据（TextCorpus 那一次 match），所以这一条不是安慰奖。
          */
+        /**
+         * 本轮顺手抓开放获取正文的四笔账，逐篇可核：试着抓了几篇（autoPdfTried）、真按正文比对的
+         * 有几篇（autoPdfFetched）、抓回来一个字都没有、仍按摘要算的有几篇（autoPdfFailed）、
+         * 还挂着链接但这一轮没排上的有几篇（autoPdfLeft，原因写在 autoPdfReason）。
+         * autoPdfTried 与 autoPdfLeft 都是零，说明这一轮没开这个开关。
+         */
+        public int autoPdfTried, autoPdfFetched, autoPdfFailed, autoPdfLeft;
+        /** autoPdfLeft 那几个字到底是被什么挡住的："检索请求额度已用完"或"检索时间已用满"。 */
+        public String autoPdfReason = "";
+        /** 落空那几篇的形状（"扫描版无文字层 2 篇、回来的不是 PDF 1 篇"）：同一句注记的补充。 */
+        public String autoPdfShapes = "";
+        /**
+         * 顺手抓成正文的那几篇的正文本身：引擎不碰磁盘，这一份交给 app 落进自建库
+         * （fileAutoBodies）。空列表 = 这一轮没开开关，或一篇都没抓成。
+         */
+        public final ArrayList<AutoBody> autoBodies = new ArrayList<AutoBody>();
         public final ArrayList<Downloadable> downloadables = new ArrayList<Downloadable>();
         /** 留档被 MAX_SHAPE_ROWS 裁过的行数：档里没这一行才说明真的问了几次就是几行。 */
         public int shapesDropped;
@@ -231,6 +276,16 @@ public final class DuplicateEngine {
             this.title = title == null ? "" : title;
             this.engine = engine == null ? "" : engine;
             this.url = url == null ? "" : url;
+        }
+    }
+
+    /** 顺手抓成正文的一篇：题名、哪个检索源给的、抓回的正文。app 按这份落自建库。 */
+    public static final class AutoBody {
+        public final String title, engine, text;
+        AutoBody(String title, String engine, String text) {
+            this.title = title == null ? "" : title;
+            this.engine = engine == null ? "" : engine;
+            this.text = text == null ? "" : text;
         }
     }
 
@@ -342,6 +397,95 @@ public final class DuplicateEngine {
     /** 比对材料清单那一行的唯一写法；空语料返回空串，界面连那一行都不画。 */
     public static String inventoryLine(Report report) {
         return report == null || report.inventory == null ? "" : report.inventory.summaryLine();
+    }
+
+    /**
+     * "本轮顺手抓正文"那一句的唯一写法：结果页的注记与报告那张表读同一句，两处各起一名就一定漂移。
+     * 四个数各说一件事，不许谁替谁下结论——抓了 3 篇不等于 3 篇都有正文，剩下的也不许偷偷不算。
+     */
+    public static String autoFetchLine(int tried, int got, int failed, int left, String reason) {
+        return autoFetchLine(tried, got, failed, left, reason, "");
+    }
+
+    public static String autoFetchLine(int tried, int got, int failed, int left, String reason,
+                                       String shapes) {
+        if (tried <= 0 && left <= 0) return "";
+        StringBuilder out = new StringBuilder(AUTO_FETCH_PREFIX).append(tried)
+                .append(" 篇开放获取全文，").append(got).append(" 篇已按正文比对");
+        if (failed > 0) {
+            out.append("，").append(failed).append(" 篇抓回来没有正文层，仍按摘要比对");
+            if (shapes != null && !shapes.isEmpty()) out.append("（").append(shapes).append("）");
+        }
+        if (left > 0) {
+            out.append("，还有 ").append(left).append(" 篇没来得及下");
+            if (reason != null && !reason.isEmpty()) out.append("（").append(reason).append("）");
+        }
+        return out.toString();
+    }
+
+    /**
+     * 顺手抓回的正文落进自建库：走 LocalLibrary.addDocument 那三条规矩（同一正文哈希判重、
+     * 名额与容量都算），引擎自己一个字都不写盘。存了几篇、几篇库里已有、几篇没存进去是三笔
+     * 分开的账——"抓回来比过了"和"存下来了"不许混着说，注记与结果页读同一句。
+     */
+    public static String fileAutoBodies(LocalLibrary library, Report report) {
+        if (library == null || report == null || report.autoBodies.isEmpty()) return "";
+        int stored = 0, duplicates = 0, failed = 0;
+        String firstError = "";
+        for (int i = 0; i < report.autoBodies.size(); i++) {
+            AutoBody body = report.autoBodies.get(i);
+            String title = body.title.trim();
+            if (title.isEmpty()) title = "开放获取全文";
+            LocalLibrary.AddResult added;
+            try {
+                added = library.addDocument(title + ".txt",
+                        body.text.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                        null, true, MATERIAL_FULL);
+            } catch (RuntimeException error) {
+                added = null;
+            }
+            if (added != null && added.ok) stored++;
+            else if (added != null && !added.duplicateOf.isEmpty()) duplicates++;
+            else {
+                failed++;
+                if (firstError.isEmpty())
+                    firstError = added == null ? "入库时出错" : added.error;
+            }
+        }
+        String line = autoStoreLine(stored, duplicates, failed, firstError, library.size());
+        if (!line.isEmpty()) noteAfter(report, AUTO_FETCH_PREFIX, line);
+        return line;
+    }
+
+    /** 存库那一句的唯一写法：一篇没存、一篇没挡就不开口，报告里不留一句空话。 */
+    static String autoStoreLine(int stored, int duplicates, int failed, String firstError, int librarySize) {
+        if (stored <= 0 && duplicates <= 0 && failed <= 0) return "";
+        StringBuilder out = new StringBuilder();
+        if (stored > 0) noteTail(out, "顺手抓回的正文已存进自建库 " + stored
+                + " 篇（自建库现在 " + librarySize + " 篇，可在自建库里删掉）");
+        if (duplicates > 0) noteTail(out, "另有 " + duplicates + " 篇库里已有同一正文，没有重复入库");
+        if (failed > 0) noteTail(out, failed + " 篇没存进自建库"
+                + (firstError == null || firstError.isEmpty() ? "" : "：" + firstError));
+        return out.toString();
+    }
+    private static void noteTail(StringBuilder out, String sentence) {
+        if (out.length() > 0) out.append('，');
+        out.append(sentence);
+    }
+
+    /**
+     * 插在同一组账的那句后面。注记有 MAX_NOTES 上限且按顺序挤位，排在最后一位的
+     * "存进自建库"最容易被挤掉——它必须跟着"顺手抓了 N 篇"那一行走。
+     */
+    private static void noteAfter(Report report, String anchor, String value) {
+        if (value == null || value.isEmpty() || report.notes.contains(value)) return;
+        for (int i = 0; i < report.notes.size(); i++) {
+            if (report.notes.get(i).startsWith(anchor)) {
+                if (report.notes.size() < MAX_NOTES) report.notes.add(i + 1, value);
+                return;
+            }
+        }
+        note(report, value);
     }
 
     /** 摘要层的注记：报告中心与面板的注记列表都要能查到这一层做了、做了什么口径。 */
@@ -756,6 +900,200 @@ public final class DuplicateEngine {
      * 牺牲的必须是尾部窗口（覆盖宽度均匀），而不是尾部源（那会让某个库整轮零命中，
      * 等于偷偷换成"只有先答的库算数"）。
      */
+    /**
+     * 一扇窗口的混主题补问式排在第几层：前两层先按整窗检索式问两家，第三层才补问那条例式。
+     *
+     * 排期永远是先铺宽再铺深（每一层给所有已排上的窗口各补一次），所以这一层的位置决定的是
+     * "补问式排在第三次提问之前还是之后"。docs/retrieval-recall.md 里 0/5 到 2/5 那笔账说明
+     * 补问式比"同一扇多问一家"值钱，所以它排在第 2 层后面、第 3 层前面，而不是排到最后。
+     */
+    static final int ORPHAN_PROBE_LAYER = 2;
+    /* 额度分配的两个旋钮，同样跑完必须还原：orphanLayer 是那条混主题补问式排在第几层，
+       windowsByChars 是窗口按"这一扇里有多少中文字"排还是按正文顺序排。量台
+       tools/coverage-budget-probe.ps1 用 windowsByChars 在同一条 allocate() 路径上量两种排法的差距，
+       用 --engines= 把额度压小好把排法的差量出来。 */
+    static int orphanLayer = ORPHAN_PROBE_LAYER;
+    static boolean windowsByChars = true;
+    /** 中文稿最常抄的三家。每扇窗口的第一个名额优先留给它们（本篇勾了才算）。 */
+    static final String[] CHINESE_ENGINES = { "cnki", "cqvip", "wanfang" };
+
+    /** 一次提问：本轮排期里的第几扇窗口、这一扇的第几条检索式、问哪一家。 */
+    static final class Ask {
+        final int window, probe; final String engine;
+        Ask(int window, int probe, String engine) {
+            this.window = window; this.probe = probe; this.engine = engine;
+        }
+    }
+
+    /**
+     * 窗口的提问顺序：先比"这一扇里有多少中文字"，其次比"这一扇一共多少字"，最后按正文顺序。
+     *
+     * <p>第一把尺不用总字数，是这篇样稿量出来的：按总字数排，最长的几扇里排在第二与第五的是两条参考文献条目（705 字与 667 字，中文字数都是 0）。每家只被问两扇的时候钱全花在英文书目上：回环桩实测 12 条英文题录条条进得了语料（与检索式零共同词那一档从 11 篇变成 0 篇），而正文里真该问的段落一扇也没问到。纯英文的稿子不受影响：它的中文字数全零，退回复比总字数，与之前同一条顺序。</p>
+     */
+    static ArrayList<Integer> windowOrder(ArrayList<Integer> chinese, ArrayList<Integer> chars) {
+        int total = chars == null ? 0 : chars.size();
+        ArrayList<Integer> order = new ArrayList<Integer>();
+        for (int w = 0; w < total; w++) order.add(Integer.valueOf(w));
+        final ArrayList<Integer> cjk = chinese != null && chinese.size() == total ? chinese : null;
+        Collections.sort(order, new Comparator<Integer>() {
+            public int compare(Integer left, Integer right) {
+                if (cjk != null) {
+                    int byCjk = cjk.get(right.intValue()).intValue() - cjk.get(left.intValue()).intValue();
+                    if (byCjk != 0) return byCjk;
+                }
+                int by = chars.get(right.intValue()).intValue() - chars.get(left.intValue()).intValue();
+                return by != 0 ? by : left.intValue() - right.intValue();
+            }
+        });
+        return order;
+    }
+
+    /** allocate() 的结果：本轮的提问排期，外加没排上的窗口有几个、被哪一道闸挡的。 */
+    static final class Allocation {
+        final ArrayList<Ask> asks = new ArrayList<Ask>();
+        /** 排进本轮的窗口数（按窗口去重，不是提问次数）。 */
+        int windowsPlanned;
+        /** 排上的窗口里问得最浅与最深各几家：报告里"每窗问 2-3 家"读这两个数。 */
+        int depthLow, depthHigh;
+        /** 排上的窗口里，有几扇至少问到过一家中文主库。 */
+        int chineseWindows;
+        /** 全文切得出、本轮一次也没排上的窗口数。 */
+        int unstaffed;
+        /** 挡下剩余窗口的是哪一道闸：120 次额度用尽，还是每源上限（设置里的窗口数）用尽。 */
+        boolean cappedByRequests, cappedByCap;
+    }
+
+    /** 这一家的材料是中文稿最可能抄的那三家之一吗。 */
+    static boolean chineseEngine(String engine) {
+        for (int i = 0; i < CHINESE_ENGINES.length; i++) if (CHINESE_ENGINES[i].equals(engine)) return true;
+        return false;
+    }
+
+    /**
+     * 额度怎么花：先决定问哪几扇窗口，再决定每一扇问哪几家。
+     *
+     * 以前没有这一层，走法是"窗口按正文顺序一扇一扇过，每扇把勾选的源挨个问一遍"，撞到 120 次或
+     * 180 秒才停。九个源全选、每扇又要为混主题那段补问一次时，一扇窗口吃掉 18 次，于是真机那轮
+     * 只走到 8/49 扇就整轮停摆，报告落到"可比正文 0 篇"，屏幕上就是一个 0%。这一层把顺序倒过来：
+     * 一、窗口按"这一扇里有多少中文字"从大到小排——"1 引言"那种几个字的段落不配和整段结论抢同一份额度，
+     *     排序用的字数与报告分母用的是同一把尺（TextCorpus.validCount）；
+     * 二、第 0 层名额先给中文主库，排到它们的每源上限见底为止；
+     * 三、往后每一层给所有已排上的窗口各补一次，宽一层永远排在深一层前面：额度只够每扇一次时，
+     *     它宁可让 108 扇各问一次，也不肯让 54 扇各问两次——报告的分母是"这一篇有多少字进过比对"，
+     *     砍窗口数就是直接砍那个数；混主题那条补问式排在 orphanLayer 那一层
+     *     （docs/retrieval-recall.md 里 0/5 到 2/5 那笔账靠的就是它），排在同一扇的第三次提问之前，
+     *     但永远不许插到还没被问过的新窗口前面。
+     * 每家最多被问 limits.windows 扇——设置里那个数管的就是这个，所以把它调大是"每家多问几扇"，
+     * 不是"整轮只看前几扇"。
+     */
+    static Allocation allocate(ArrayList<Integer> chinese, ArrayList<Integer> chars, ArrayList<Integer> probes,
+                               ArrayList<String> engines, int perSourceCap, int budget, int orphanAt) {
+        Allocation out = new Allocation();
+        int total = chars.size();
+        out.unstaffed = total;
+        if (total == 0 || engines.isEmpty() || budget <= 0) return out;
+        ArrayList<Integer> order = new ArrayList<Integer>();
+        for (int w = 0; w < total; w++) order.add(Integer.valueOf(w));
+        if (windowsByChars) order = windowOrder(chinese, chars);
+        int cap = Math.max(1, perSourceCap);
+        /* 补问式最早也只能排在第二层：第一层管的是"这一扇到底有没有被问过"，抢在它前面是白送。 */
+        int orphanAfter = Math.max(1, Math.min(orphanAt, engines.size()));
+        LinkedHashMap<String, Integer> spare = new LinkedHashMap<String, Integer>();
+        for (int i = 0; i < engines.size(); i++) spare.put(engines.get(i), Integer.valueOf(cap));
+        ArrayList<boolean[]> used = new ArrayList<boolean[]>();
+        ArrayList<Integer> depth = new ArrayList<Integer>();
+        for (int w = 0; w < total; w++) {
+            used.add(new boolean[slotCeiling(probes.get(w).intValue(), engines.size()) * engines.size()]);
+            depth.add(Integer.valueOf(0));
+        }
+        int left = budget, layer = 0;
+        while (left > 0) {
+            boolean added = false;
+            for (int i = 0; i < order.size() && left > 0; i++) {
+                int w = order.get(i).intValue();
+                int probe = slotProbe(probes.get(w).intValue(), layer, orphanAfter, engines.size());
+                if (probe < 0) continue;
+                /* 补问式不占每源名额，所以名额花光的这家也能被排上；整窗式才要求还有名额。 */
+                String engine = pickEngine(engines, spare, used.get(w), probe, layer == 0, probe == 0);
+                if (engine == null) continue;
+                int slot = engines.indexOf(engine);
+                /* 每源上限管的是“这家最多问几扇”，不是“最多发几次”：同一扇上的第二条
+                   检索式（混主题那条补问式）不再扣一扇名额，否则设置里写 6 就等于把补问挤掉。 */
+                boolean newWindowForEngine = !coversWindow(used.get(w), engines.size(), slot);
+                used.get(w)[probe * engines.size() + slot] = true;
+                if (newWindowForEngine)
+                    spare.put(engine, Integer.valueOf(spare.get(engine).intValue() - 1));
+                depth.set(w, Integer.valueOf(depth.get(w).intValue() + 1));
+                out.asks.add(new Ask(w, probe, engine));
+                left--;
+                added = true;
+            }
+            if (!added) break;
+            layer++;
+        }
+        int staffed = 0, low = Integer.MAX_VALUE, high = 0;
+        for (int w = 0; w < total; w++) {
+            int asked = depth.get(w).intValue();
+            if (asked <= 0) continue;
+            staffed++;
+            low = Math.min(low, asked);
+            high = Math.max(high, asked);
+        }
+        boolean[] chineseWindow = new boolean[total];
+        for (int i = 0; i < out.asks.size(); i++)
+            if (chineseEngine(out.asks.get(i).engine)) chineseWindow[out.asks.get(i).window] = true;
+        for (int w = 0; w < total; w++) if (chineseWindow[w]) out.chineseWindows++;
+        out.windowsPlanned = staffed;
+        out.depthLow = staffed == 0 ? 0 : low;
+        out.depthHigh = high;
+        out.unstaffed = total - staffed;
+        out.cappedByRequests = out.unstaffed > 0 && left <= 0;
+        out.cappedByCap = out.unstaffed > 0 && left > 0;
+        return out;
+    }
+
+    /** 这一家在这一扇上是否已经被排过（任一条检索式算数）。 */
+    private static boolean coversWindow(boolean[] used, int engines, int slot) {
+        for (int i = 0; i < used.length; i++) if (i % engines == slot && used[i]) return true;
+        return false;
+    }
+
+    /** 这一层这一扇该问哪条检索式：-1 表示这一扇到此为止，没有更多名额。 */
+    private static int slotProbe(int probeCount, int layer, int orphanAfter, int engines) {
+        if (layer >= slotCeiling(probeCount, engines)) return -1;
+        return (probeCount > 1 && layer == orphanAfter) ? 1 : 0;
+    }
+
+    /** 一扇窗口最多排几次：每家人手一次整窗式，混主题那条补问式再多一次。 */
+    private static int slotCeiling(int probeCount, int engines) {
+        return engines + (probeCount > 1 ? 1 : 0);
+    }
+
+    /**
+     * 挑下一家问：没在这条检索式上问过的、还有额度的里面，剩余额度最多的那家（并列按勾选顺序）。
+     *
+     * 按剩余额度挑就是按"最少被问过"挑：九家全选时它把提问摊平，谁也不会整轮没被问过——
+     * 报告里"每个检索源至少问到一次"那条老规矩靠这个维持。第一层多一条规矩：先尽着中文主库。
+     */
+    private static String pickEngine(ArrayList<String> engines, LinkedHashMap<String, Integer> spare,
+                                     boolean[] used, int probe, boolean firstSlot, boolean needSpare) {
+        int size = engines.size();
+        for (int pass = 0; pass < (firstSlot ? 2 : 1); pass++) {
+            String best = null;
+            int bestSpare = 0;
+            for (int i = 0; i < size; i++) {
+                String engine = engines.get(i);
+                if (used[probe * size + i]) continue;
+                int value = spare.get(engine).intValue();
+                if (needSpare && value <= 0) continue;
+                if (firstSlot && pass == 0 && !chineseEngine(engine)) continue;
+                if (best == null || value > bestSpare) { best = engine; bestSpare = value; }
+            }
+            if (best != null) return best;
+        }
+        return null;
+    }
+
     private static void search(String text, TextCorpus corpus, Report report, ArrayList<String> engines,
                                PaperSources.Limits limits, ApiClient.Cancellation cancellation, Progress progress) {
         if (engines.isEmpty()) return;
@@ -763,23 +1101,55 @@ public final class DuplicateEngine {
         report.windowsAvailable = plan.groups.size();
         report.comparableChars = plan.comparableChars;
         if (plan.groups.isEmpty()) { note(report, "正文没有可用于检索的段落"); return; }
-        int planned = Math.min(plan.groups.size(), Math.max(1, Math.min(limits.windows, MAX_WINDOWS)));
-        report.windowsPlanned = planned;
         int perSourceCap = Math.max(1, limits.perEngine);
         int poolCap = Math.max(60, 8 * perSourceCap * engines.size());
-        /* 检索式在起线程之前全部算好：泳道之间只共用这一排算完的检索式与候选池，
-           谁都不把自己的检索现场摊给别的线程看。 */
+        /* 检索式与额度分配在起线程之前全部算完：泳道之间只共用这一排算完的检索式与提问排期，
+           谁都不把自己的检索现场摊给别的线程看。切得出多少扇是文档的事，问哪几扇是额度算出来的。 */
+        ArrayList<ArrayList<String>> allProbes = new ArrayList<ArrayList<String>>();
+        ArrayList<Integer> probeCounts = new ArrayList<Integer>();
+        for (int w = 0; w < plan.members.size(); w++) {
+            ArrayList<String> phrases = windowProbes(plan.members.get(w));
+            allProbes.add(phrases);
+            probeCounts.add(Integer.valueOf(phrases.size()));
+        }
+        /* 每源上限仍然取自设置里那个数，并且像以前一样截到 MAX_WINDOWS：超出去的那一截花的是同一份 120 次额度，
+           而报告里那句"把窗口数调到 24 可扩大覆盖"也只有在这里真的截了才不至于说假话。 */
+        int windowCap = Math.min(MAX_WINDOWS, Math.max(1, limits.windows));
+        Allocation budget = allocate(plan.chinese, plan.chars, probeCounts, engines, windowCap, MAX_REQUESTS,
+                orphanLayer);
+        report.windowsPlanned = budget.windowsPlanned;
+        report.asksPlanned = budget.asks.size();
+        report.windowsBudget = MAX_REQUESTS;
+        report.perSourceWindowCap = windowCap;
+        report.windowsUnstaffed = budget.unstaffed;
+        report.budgetCapped = budget.cappedByRequests;
+        report.capCapped = budget.cappedByCap;
+        /* 只有排进本轮的窗口进扫描表，且按正文顺序进：排序式必须按文档顺序重建，
+           并行与"按字数排窗口"都不许改动它（见 Sweep#askedQueries）。 */
+        boolean[] staffed = new boolean[plan.members.size()];
+        for (int i = 0; i < budget.asks.size(); i++) staffed[budget.asks.get(i).window] = true;
+        int[] local = new int[plan.members.size()];
+        int kept = 0;
+        for (int w = 0; w < plan.members.size(); w++) {
+            local[w] = kept;
+            if (staffed[w]) kept++;
+        }
         /* 响应留档（A4）先建账本再起泳道：每一次请求都要落一行，成功也要落。
            Limits 是调用方递进来的，本轮的出口不往它身上挂——先复制一份再挂（PaperSources.Limits#copy）。 */
         ShapeLedger shapes = new ShapeLedger(report);
         PaperSources.Limits pass = limits.copy();
         pass.shapes = shapes;
-        Sweep sweep = new Sweep(pass, shapes, cancellation, progress, planned, poolCap,
+        Sweep sweep = new Sweep(pass, shapes, cancellation, progress, kept, poolCap,
                 Math.max(0L, engineGapMillis), System.currentTimeMillis() + Math.max(1L, searchMillis),
-                planned * engines.size());
-        for (int w = 0; w < planned; w++)
-            sweep.addWindow(windowProbes(plan.members.get(w)), plan.chars.get(w).intValue());
-        ArrayList<Lane> lanes = lanes(sweep, engines);
+                budget.asks.size(), MAX_REQUESTS);
+        for (int w = 0; w < plan.members.size(); w++)
+            if (staffed[w]) sweep.addWindow(allProbes.get(w), plan.chars.get(w).intValue());
+        ArrayList<Ask> schedule = new ArrayList<Ask>();
+        for (int i = 0; i < budget.asks.size(); i++) {
+            Ask ask = budget.asks.get(i);
+            schedule.add(new Ask(local[ask.window], ask.probe, ask.engine));
+        }
+        ArrayList<Lane> lanes = lanes(sweep, engines, schedule);
         runLanes(lanes);
         /* 注记与逐源状态等全部泳道收工后，按设置里的源顺序并回来：谁先回来不得影响注记顺序。 */
         LinkedHashMap<String, Boolean> failed = new LinkedHashMap<String, Boolean>();
@@ -826,9 +1196,18 @@ public final class DuplicateEngine {
         if (cancelled(cancellation)) note(report, "检索已取消，结果只覆盖已完成的窗口");
         report.windowsRetrieved = sweep.windowsRetrieved();
         report.coveredChars = sweep.coveredChars();
+        /* 每窗几家、问了几次、几扇问到中文主库：一律按真问出去的算，不按排期算——撞了挂钟那一轮，
+           排期说的数做不到，报告不能替它圆。 */
+        report.asksSent = sweep.asksSent();
+        report.windowDepthLow = sweep.depthLow();
+        report.windowDepthHigh = sweep.depthHigh();
+        report.chineseWindowsAsked = sweep.chineseWindows();
+        report.asksSpilled = sweep.spillCells();
+        report.asksRefilled = sweep.refillCells();
         /* 第二阶段用本轮那份 Limits（带留档出口）：全文抓取也要落一行，出口不在这就没法落。 */
         phaseB(sweep.askedQueries(), corpus, report, engines, sweep.limits, cancellation, sweep.pool, skipped,
-                failedLast, exhausted, silent, requestCap, timeCap, poolCap, sweep.droppedCandidates(), sweep.deadline);
+                failedLast, exhausted, silent, requestCap, timeCap, poolCap, sweep.droppedCandidates(),
+                sweep, sweep.deadline);
     }
 
     /**
@@ -870,6 +1249,20 @@ public final class DuplicateEngine {
             Integer value = byThread.get(Long.valueOf(Thread.currentThread().getId()));
             return value == null ? 0 : value.intValue();
         }
+        /** 留档里现在的行数：顺手抓正文用它认出"这一次抓取留下的那一行"。 */
+        int rows() { synchronized (lock) { return report.shapes.size(); } }
+        /**
+         * 那一次抓取留下的最后一个形状号。一条都没留下按 no-response 算——连接都没建成，
+         * 比"扫描件没字"更靠前，用户能做的下一步也不同。
+         */
+        String lastShapeSince(int from) {
+            synchronized (lock) {
+                int size = report.shapes.size();
+                if (size <= from) return "no-response";
+                String shape = report.shapes.get(size - 1).shape;
+                return shape == null || shape.trim().isEmpty() ? "no-response" : shape.trim();
+            }
+        }
         private void bump() {
             Long key = Long.valueOf(Thread.currentThread().getId());
             Integer value = byThread.get(key);
@@ -891,6 +1284,8 @@ public final class DuplicateEngine {
         final ShapeLedger shapes;
         final Progress progress; final int planned; final int poolCap; final long gap; final long deadline;
         final int total;
+        /** 还没花掉的请求额度（整轮一个数，不按泳道切份额）：Lane 每发一次问扣一次。 */
+        private final AtomicInteger requestsLeft;
         final ArrayList<ArrayList<String>> probes = new ArrayList<ArrayList<String>>();
         final ArrayList<Integer> chars = new ArrayList<Integer>();
         final ArrayList<PaperSources.Candidate> pool = new ArrayList<PaperSources.Candidate>();
@@ -899,23 +1294,73 @@ public final class DuplicateEngine {
         volatile boolean stop;
         private final LinkedHashMap<String, Boolean> poolKeys = new LinkedHashMap<String, Boolean>();
         private final ArrayList<Boolean[]> sent = new ArrayList<Boolean[]>();
+        /** 格子 = 一扇窗口的一条检索式。问不动的格子排到这里，等同道其他源本轮补问。 */
+        private final ArrayDeque<int[]> spill = new ArrayDeque<int[]>();
+        private final ArrayList<boolean[]> spilled = new ArrayList<boolean[]>();
+        private int spillCells, refillCells;
         private boolean[] askedWindow;
+        /** 每扇窗口真问出去几次、有没有问到过一家中文主库：报告的"每窗问 2-3 家"读这两个数组。 */
+        private int[] asksByWindow;
+        private boolean[] chineseWindow;
         private int dropped;
         private final AtomicInteger done = new AtomicInteger();
         Sweep(PaperSources.Limits limits, ShapeLedger shapes, ApiClient.Cancellation cancellation,
-              Progress progress, int planned, int poolCap, long gap, long deadline, int total) {
+              Progress progress, int planned, int poolCap, long gap, long deadline, int total, int requests) {
             this.limits = limits; this.shapes = shapes;
             this.cancellation = cancellation; this.progress = progress;
             this.planned = planned; this.poolCap = poolCap; this.gap = gap; this.deadline = deadline;
             this.total = total; this.askedWindow = new boolean[planned];
+            this.asksByWindow = new int[planned]; this.chineseWindow = new boolean[planned];
+            this.requestsLeft = new AtomicInteger(Math.max(0, requests));
+        }
+        /** 还剩几次请求额度：只读，报告与断言看它。 */
+        int requestsLeft() { return requestsLeft.get(); }
+        /** 领一次请求额度：120 次这道闸在这里扣，扣不动就是撞闸，四条道抢同一个数也超不出去。 */
+        boolean spendRequest() {
+            while (true) {
+                int now = requestsLeft.get();
+                if (now <= 0) return false;
+                if (requestsLeft.compareAndSet(now, now - 1)) return true;
+            }
         }
         void addWindow(ArrayList<String> phrases, int validChars) {
             synchronized (lock) {
                 probes.add(phrases);
                 chars.add(Integer.valueOf(validChars));
                 sent.add(new Boolean[phrases.size()]);
+                spilled.add(new boolean[phrases.size()]);
+            }
+            /* 这一格问不动时落回补问队列（Sweep#spill）。 */
+        }
+        /**
+         * 这一格没问出去（排到的那家报错、已判取尽、或这条短语问过）：排回补问队列。
+         *
+         * 同一格只排一次：九家都停的时候不能把队列堆成九倍，补问也没那么多额度。
+         */
+        void spill(int window, int probe) {
+            synchronized (lock) {
+                if (window < 0 || window >= spilled.size()) return;
+                boolean[] flags = spilled.get(window);
+                if (probe < 0 || probe >= flags.length || flags[probe]) return;
+                flags[probe] = true;
+                spill.addLast(new int[] { window, probe });
+                spillCells++;
             }
         }
+        /** 取一格等补问的；取不到就是排期已经落地。 */
+        int[] takeSpill() {
+            synchronized (lock) {
+                return spill.pollFirst();
+            }
+        }
+        /** 补问成功一次记一笔：报告要说清退回多少、补回多少。 */
+        void refilled() {
+            synchronized (lock) {
+                refillCells++;
+            }
+        }
+        int spillCells() { synchronized (lock) { return spillCells; } }
+        int refillCells() { synchronized (lock) { return refillCells; } }
         /** 一次检索的候选并进池子：返回 true 表示池子已经装到顶，那一次的沉默不能算成源自己取尽。 */
         boolean collect(String engine, ArrayList<PaperSources.Candidate> found,
                         LinkedHashMap<String, Integer> gained) {
@@ -934,11 +1379,44 @@ public final class DuplicateEngine {
                 return full;
             }
         }
-        /** 记"这一扇窗口的这一条检索式真的问出去了"：覆盖字数与排序式都从这儿出。 */
-        void sent(int window, int probe) {
+        /** 记"这一扇窗口的这一条检索式真的问出去了"：覆盖字数、排序式、每窗几家都从这儿出。 */
+        void sent(int window, int probe, String engine) {
             synchronized (lock) {
                 askedWindow[window] = true;
+                asksByWindow[window]++;
+                if (chineseEngine(engine)) chineseWindow[window] = true;
                 sent.get(window)[probe] = Boolean.TRUE;
+            }
+        }
+        /** 真问出去的提问次数。 */
+        int asksSent() {
+            synchronized (lock) {
+                int sum = 0;
+                for (int w = 0; w < planned; w++) sum += asksByWindow[w];
+                return sum;
+            }
+        }
+        /** 问到过的窗口里最浅与最深：没问过的窗口不参与，免得把"没排上"混进"问得浅"。 */
+        int depthLow() {
+            synchronized (lock) {
+                int low = 0;
+                for (int w = 0; w < planned; w++)
+                    if (asksByWindow[w] > 0 && (low == 0 || asksByWindow[w] < low)) low = asksByWindow[w];
+                return low;
+            }
+        }
+        int depthHigh() {
+            synchronized (lock) {
+                int high = 0;
+                for (int w = 0; w < planned; w++) high = Math.max(high, asksByWindow[w]);
+                return high;
+            }
+        }
+        int chineseWindows() {
+            synchronized (lock) {
+                int count = 0;
+                for (int w = 0; w < planned; w++) if (chineseWindow[w]) count++;
+                return count;
             }
         }
         int windowsRetrieved() {
@@ -987,7 +1465,9 @@ public final class DuplicateEngine {
      * "同一个源两次提问之间"的规矩，跨源并行不碰它：每个源仍然只在自己的线程里被逐次提问。
      */
     private static final class Lane implements Runnable {
-        final ArrayList<String> engines; int quota;
+        final ArrayList<String> engines;
+        /** 本轮排给这一道的提问（窗口序号已换成本轮扫描表里的序号），按排期顺序问。 */
+        final ArrayList<Ask> plan = new ArrayList<Ask>();
         final LinkedHashMap<String, Boolean> skipped = new LinkedHashMap<String, Boolean>();
         final LinkedHashMap<String, Boolean> exhausted = new LinkedHashMap<String, Boolean>();
         final LinkedHashMap<String, Boolean> silent = new LinkedHashMap<String, Boolean>();
@@ -997,9 +1477,9 @@ public final class DuplicateEngine {
         /** 这个源至少有一次停在连接层：整轮都没答过话的源才会被算成"没通"。 */
         final LinkedHashMap<String, Boolean> deadRoute = new LinkedHashMap<String, Boolean>();
         final ArrayList<String> notes = new ArrayList<String>();
+        /** 120 次请求额度见底 / 挂钟用完：两道闸各自留字据。 */
         boolean quotaCap, timeCap;
         private final Sweep sweep;
-        private int asks;
         private final LinkedHashMap<String, Long> lastAsk = new LinkedHashMap<String, Long>();
         private final LinkedHashMap<String, Boolean> askedPhrase = new LinkedHashMap<String, Boolean>();
         private final LinkedHashMap<String, Integer> gained = new LinkedHashMap<String, Integer>();
@@ -1007,76 +1487,136 @@ public final class DuplicateEngine {
         private final LinkedHashMap<String, Integer> retries = new LinkedHashMap<String, Integer>();
         private final LinkedHashMap<String, Integer> askedBy = new LinkedHashMap<String, Integer>();
         private final LinkedHashMap<String, Boolean> askedNow = new LinkedHashMap<String, Boolean>();
-        Lane(Sweep sweep, ArrayList<String> engines, int quota) {
-            this.sweep = sweep; this.engines = engines; this.quota = quota;
+        Lane(Sweep sweep, ArrayList<String> engines) {
+            this.sweep = sweep; this.engines = engines;
         }
         int asksOf(String engine) { return count(askedBy, engine); }
         public void run() {
-            for (int w = 0; w < sweep.planned; w++) {
-                if (cancelled(sweep.cancellation) || sweep.stop) return;
-                if (asks >= quota) { quotaCap = true; return; }
-                ArrayList<String> phrases = sweep.probes.get(w);
+            int next = 0;
+            while (next < plan.size()) {
+                /* 一次到站 = 排给这一道的、同一扇窗口里的所有提问。取尽判据要按窗口看，
+                   所以它落在下面一站问完之后，与改之前逐窗过账的口径一字不差。 */
+                int window = plan.get(next).window;
                 boolean poolFull = false;
                 askedNow.clear();
                 gained.clear();
-                for (int p = 0; p < phrases.size() && !quotaCap && !timeCap; p++) {
-                    String phrase = phrases.get(p);
+                while (next < plan.size() && plan.get(next).window == window) {
+                    if (cancelled(sweep.cancellation) || sweep.stop) return;
+                    Ask ask = plan.get(next);
+                    next++;
+                    ArrayList<String> phrases = sweep.probes.get(window);
+                    if (ask.probe < 0 || ask.probe >= phrases.size()) continue;
+                    String phrase = phrases.get(ask.probe);
                     if (phrase.isEmpty()) continue;
-                    for (int e = 0; e < engines.size(); e++) {
-                        String engine = engines.get(e);
-                        if (Boolean.TRUE.equals(skipped.get(engine))
-                                || Boolean.TRUE.equals(exhausted.get(engine))) continue;
-                        if (asks >= quota) { quotaCap = true; break; }
-                        /* 剩余额度连一次带超时的请求都放不下就不再发：那是发出去必死的请求。 */
-                        if (sweep.deadline - System.currentTimeMillis()
-                                <= sweep.limits.timeoutSeconds * 1000L + 1000L) { timeCap = true; break; }
-                        /* 相邻窗口的重复段落会凑出同一个 48 字短语，这种请求纯属白送。 */
-                        if (Boolean.TRUE.equals(askedPhrase.get(engine + "|" + phrase))) continue;
-                        waitTurn(lastAsk, engine, sweep.gap, sweep.deadline, sweep.cancellation);
-                        askedPhrase.put(engine + "|" + phrase, Boolean.TRUE);
-                        askedNow.put(engine, Boolean.TRUE);
-                        bump(askedBy, engine);
-                        asks++;
-                        sweep.sent(w, p);
-                        sweep.step("检索 " + PaperSources.label(engine));
-                        int shapesBefore = sweep.shapes.mark();
-                        try {
-                            ArrayList<PaperSources.Candidate> found =
-                                    PaperSources.search(engine, phrase, sweep.limits, sweep.cancellation);
-                            failedLast.remove(engine);
-                            answered.put(engine, Boolean.TRUE);
-                            poolFull = poolFull | sweep.collect(engine, found, gained);
-                        } catch (IllegalArgumentException error) {
-                            sweep.shapes.miss(engine, phrase, message(error), shapesBefore);
-                            skipped.put(engine, Boolean.TRUE); failedLast.put(engine, Boolean.TRUE);
-                            /* 这一路一次请求都没发出去：源没勾、检索式为空、缺密钥。它和"路没通"
-                               是两句不同的话，用户下一步做的事也相反。 */
-                            notes.add(skippedNote(PaperSources.label(engine), error, false));
-                        } catch (IOException error) {
-                            /* 留档：响应侧没机会落行的失败（连不上、超时、429 被包成 IOException）
-                               在这里补一行，档里从此没有"问了但什么都没留下"这一格。 */
-                            sweep.shapes.miss(engine, phrase, message(error), shapesBefore);
-                            /* 429 与"这个源挂了"不是一回事：匿名共享配额是暂时的，一次失败就整轮放弃太狠。
-                               判据用注记前缀而不是状态码，因为 PaperSources.search() 只往上抛 IOException。 */
-                            failedLast.put(engine, Boolean.TRUE);
-                            /* 连通情况按这一次的下场记：403/412 是答了话，拨不上与超时是路没通。 */
-                            int reach = reachOf(error);
-                            if (reach > 0) answered.put(engine, Boolean.TRUE);
-                            else if (reach < 0) deadRoute.put(engine, Boolean.TRUE);
-                            boolean throttled = message(error).startsWith(THROTTLED_PREFIX)
-                                    && count(retries, engine) < MAX_THROTTLE_RETRIES;
-                            if (throttled) {
-                                bump(retries, engine);
-                                notes.add("已重试 " + PaperSources.label(engine) + "：" + message(error));
-                            } else {
-                                skipped.put(engine, Boolean.TRUE);
-                                notes.add(skippedNote(PaperSources.label(engine), error, true));
-                            }
-                        }
-                    }
+                    int sent = askOn(ask.engine, window, ask.probe, phrase);
+                    if (sent == STOP) return;
+                    /* 排给这一家的这一格问不动（它报了错、已判取尽，或这条短语刚问过）：落回排期，
+                       本轮内由这一道里还活着的源补问。不补的话，这一扇窗口就跟着一个
+                       停下的源一起没被问过——真机 2.6.3 那轮 5 个源判了取尽，120 次请求
+                       全花在 10 扇窗口上，后面 39 扇一次也没问到。 */
+                    if (sent == MISS) sweep.spill(window, ask.probe);
+                    else poolFull = poolFull | sentPoolFull;
                 }
-                /* 取尽判据原样留在"同一个源"这一格：连着两个窗口一篇新的都没多就不再花配额问它。
-                   池子被我们自己装满的那些轮不算它沉默，否则是把内存上限伪装成源的意愿。 */
+                settleQuiet(poolFull);
+            }
+            refill();
+        }
+
+        /** askOn() 的三种下场：真问出去 / 这一格问不动 / 额度或挂钟不等人，整条道收手。 */
+        private static final int SENT = 0, MISS = 1, STOP = 2;
+        /** 上一次 askOn() 是不是把候选池装到了顶：取尽判据要把它与源自己的沉默分开。 */
+        private boolean sentPoolFull;
+
+        /**
+         * 向指定的那一家问这一格：120 次请求与 180 秒挂钟都在这里扣，四条道抢的是同一个原子数。
+         *
+         * MISS 不是错：该问的那一家问不了（停了、或这条短语刚问过），怎么接着办由调用方定。
+         */
+        private int askOn(String engine, int window, int probe, String phrase) {
+            sentPoolFull = false;
+            if (Boolean.TRUE.equals(skipped.get(engine))
+                    || Boolean.TRUE.equals(exhausted.get(engine))) return MISS;
+            /* 相邻窗口的重复段落会凑出同一个 48 字短语，这种请求纯属白送，也不算额度。 */
+            if (Boolean.TRUE.equals(askedPhrase.get(engine + "|" + phrase))) return MISS;
+            /* 剩余额度连一次带超时的请求都放不下就不再发：那是发出去必死的请求。 */
+            if (sweep.deadline - System.currentTimeMillis()
+                    <= sweep.limits.timeoutSeconds * 1000L + 1000L) { timeCap = true; return STOP; }
+            if (!sweep.spendRequest()) { quotaCap = true; return STOP; }
+            waitTurn(lastAsk, engine, sweep.gap, sweep.deadline, sweep.cancellation);
+            askedPhrase.put(engine + "|" + phrase, Boolean.TRUE);
+            askedNow.put(engine, Boolean.TRUE);
+            bump(askedBy, engine);
+            sweep.sent(window, probe, engine);
+            sweep.step("检索 " + PaperSources.label(engine));
+            int shapesBefore = sweep.shapes.mark();
+            try {
+                ArrayList<PaperSources.Candidate> found =
+                        PaperSources.search(engine, phrase, sweep.limits, sweep.cancellation);
+                failedLast.remove(engine);
+                answered.put(engine, Boolean.TRUE);
+                sentPoolFull = sweep.collect(engine, found, gained);
+            } catch (IllegalArgumentException error) {
+                sweep.shapes.miss(engine, phrase, message(error), shapesBefore);
+                skipped.put(engine, Boolean.TRUE); failedLast.put(engine, Boolean.TRUE);
+                /* 这一路一次请求都没发出去：源没勾、检索式为空、缺密钥。它和"路没通"
+                   是两句不同的话，用户下一步做的事也相反。 */
+                notes.add(skippedNote(PaperSources.label(engine), error, false));
+            } catch (IOException error) {
+                /* 留档：响应侧没机会落行的失败（连不上、超时、429 被包成 IOException）
+                   在这里补一行，档里从此没有"问了但什么都没留下"这一格。 */
+                sweep.shapes.miss(engine, phrase, message(error), shapesBefore);
+                /* 429 与"这个源挂了"不是一回事：匿名共享配额是暂时的，一次失败就整轮放弃太狠。
+                   判据用注记前缀而不是状态码，因为 PaperSources.search() 只往上抛 IOException。 */
+                failedLast.put(engine, Boolean.TRUE);
+                /* 连通情况按这一次的下场记：403/412 是答了话，拨不上与超时是路没通。 */
+                int reach = reachOf(error);
+                if (reach > 0) answered.put(engine, Boolean.TRUE);
+                else if (reach < 0) deadRoute.put(engine, Boolean.TRUE);
+                boolean throttled = message(error).startsWith(THROTTLED_PREFIX)
+                        && count(retries, engine) < MAX_THROTTLE_RETRIES;
+                if (throttled) {
+                    bump(retries, engine);
+                    notes.add("已重试 " + PaperSources.label(engine) + "：" + message(error));
+                } else {
+                    skipped.put(engine, Boolean.TRUE);
+                    notes.add(skippedNote(PaperSources.label(engine), error, true));
+                }
+            }
+            return SENT;
+        }
+
+        /**
+         * 本轮内的补问：停问的源没能问出去的那些格子，捾回来问给这一道里还活着的源。
+         *
+         * 为什么不等下一轮：排期是起线程之前算死的，源是当场停的。差的那一口当场不补，那一
+         * 扇窗口这一轮就一次也没被问过。额度花光时 askOn 自己会把它停下，不会多花一次请求。
+         */
+        private void refill() {
+            while (true) {
+                if (cancelled(sweep.cancellation) || sweep.stop) return;
+                int[] cell = sweep.takeSpill();
+                if (cell == null) return;
+                ArrayList<String> phrases = sweep.probes.get(cell[0]);
+                if (cell[1] < 0 || cell[1] >= phrases.size()) continue;
+                String phrase = phrases.get(cell[1]);
+                if (phrase.isEmpty()) continue;
+                askedNow.clear();
+                gained.clear();
+                boolean poolFull = false;
+                for (int i = 0; i < engines.size(); i++) {
+                    int sent = askOn(engines.get(i), cell[0], cell[1], phrase);
+                    if (sent == STOP) return;
+                    if (sent != SENT) continue;
+                    poolFull = poolFull | sentPoolFull;
+                    sweep.refilled();
+                    break;
+                }
+                settleQuiet(poolFull);
+            }
+        }
+
+        /** 取尽判据：连着两次问完一篇新的都没多的源，判它取尽，不再花配额问它。 */
+        private void settleQuiet(boolean poolFull) {
                 if (!poolFull) for (int e = 0; e < engines.size(); e++) {
                     String engine = engines.get(e);
                     if (!Boolean.TRUE.equals(askedNow.get(engine))) continue;
@@ -1088,36 +1628,33 @@ public final class DuplicateEngine {
                     quiet.put(engine, Integer.valueOf(streak));
                     if (streak >= 2) exhausted.put(engine, Boolean.TRUE);
                 }
-            }
         }
     }
 
     /**
-     * 泳道怎么分：源按轮转进道（第 i 个源进第 i mod 道数 条），总配额按泳道里源数的份额切，
-     * 余数发给前面的泳道，各道加起来正好等于 MAX_REQUESTS。
+     * 泳道怎么分：源按轮转进道（第 i 个源进第 i mod 道数 条），排期里属于哪一道的提问就交给哪一道。
      *
      * 为什么是轮转而不是切段：真机上慢的永远是同几个源（维普 4062ms、知网匿名口十几秒），
      * 按顺序切段会把它们全挤进同一条泳道，那条泳道一慢就等于那个源整轮没被问——
      * 那正是原来串行实现的病，不能换个名字再犯一遍。
+     *
+     * 额度不再按泳道切份额：120 次是整轮的额度，由 Sweep 拿一个原子数逐次扣（Lane 每发一次问扣一次）。
+     * 按份额切的做法撞闸时只砍在份额先花完的那几条道上，剩下的道还在按自己的份额白问。
      */
-    private static ArrayList<Lane> lanes(Sweep sweep, ArrayList<String> engines) {
+    private static ArrayList<Lane> lanes(Sweep sweep, ArrayList<String> engines, ArrayList<Ask> plan) {
         int count = Math.min(engines.size(), MAX_LANES);
         ArrayList<ArrayList<String>> grouped = new ArrayList<ArrayList<String>>();
         for (int i = 0; i < count; i++) grouped.add(new ArrayList<String>());
         for (int i = 0; i < engines.size(); i++) grouped.get(i % count).add(engines.get(i));
         ArrayList<Lane> out = new ArrayList<Lane>();
-        int assigned = 0;
-        for (int i = 0; i < count; i++) {
-            int share = (int) ((long) MAX_REQUESTS * grouped.get(i).size() / engines.size());
-            out.add(new Lane(sweep, grouped.get(i), share));
-            assigned += share;
-        }
-        for (int i = 0; i < count && assigned < MAX_REQUESTS; i++) {
-            out.get(i).quota = out.get(i).quota + 1;
-            assigned++;
+        for (int i = 0; i < count; i++) out.add(new Lane(sweep, grouped.get(i)));
+        for (int i = 0; i < plan.size(); i++) {
+            Ask ask = plan.get(i);
+            out.get(Math.max(0, engines.indexOf(ask.engine)) % count).plan.add(ask);
         }
         return out;
     }
+
 
     /** 起线程与收线程：只有一个源就不值得起线程，那条路走的还是原来那条串行代码。 */
     private static void runLanes(ArrayList<Lane> lanes) {
@@ -1159,7 +1696,7 @@ public final class DuplicateEngine {
                                ArrayList<PaperSources.Candidate> pool, LinkedHashMap<String, Boolean> skipped,
                                LinkedHashMap<String, Boolean> failedLast, LinkedHashMap<String, Boolean> exhausted,
                                LinkedHashMap<String, Boolean> silent, boolean requestCap, boolean timeCap,
-                               int poolCap, int poolDropped, long deadline) {
+                               int poolCap, int poolDropped, Sweep sweep, long deadline) {
         CandidateRanker.Dedup merged = CandidateRanker.dedup(pool);
         report.mergedDuplicates = merged.merges.size();
         report.merges.addAll(merged.merges);
@@ -1181,6 +1718,15 @@ public final class DuplicateEngine {
         ArrayList<CandidateRanker.Selection> plan = CandidateRanker.plan(query, merged.kept, budget,
                 Math.max(1, limits.perEngine));
         boolean corpusCap = false;
+        /* 顺手抓正文的额度：名次那一队的花完之后才轮到它，篇数由检索设置说了算。
+           它每次抓之前要从 sweep 那份请求额度里领一次——领不到就是与检索抢同一个 120 次抢输了，
+           照实写"还有几篇没来得及下"，不许假装这一轮没这事。 */
+        int autoCap = sweep == null ? 0 : Math.min(MAX_AUTO_FULL_TEXTS, Math.max(0, limits.autoFullTexts));
+        int autoTried = 0, autoGot = 0, autoFailed = 0, autoLeft = 0;
+        String autoOut = "";
+        LinkedHashMap<String, Integer> autoShapes = new LinkedHashMap<String, Integer>();
+        /** 逐家记落空：哪一家的链接这一轮已经连着读不出正文层，它的剩下的篇数就不再问。 */
+        LinkedHashMap<String, Integer> autoMisses = new LinkedHashMap<String, Integer>();
         for (int i = 0; i < plan.size(); i++) {
             CandidateRanker.Selection pick = plan.get(i);
             if (cancelled(cancellation)) { note(report, "检索已取消，结果只覆盖已完成的窗口"); break; }
@@ -1204,6 +1750,43 @@ public final class DuplicateEngine {
                     if (got != null && !got.trim().isEmpty()) { body = body.isEmpty() ? got : body + "\n" + got; fetched = true; }
                 } catch (IOException error) { note(report, "全文抓取失败，改用摘要比对：" + message(error)); }
             }
+            if (autoCap > 0 && !fetched && !cancelled(cancellation)
+                    && PaperSources.pdfUrlRank(candidate.fullTextUrl) <= 2) {
+                if (autoTried >= autoCap) {
+                    /* 用户自己设的篇数到了：这一篇照旧进"可下进自建库"那张表，不算没来得及。 */
+                } else if (deadline - System.currentTimeMillis()
+                        <= limits.timeoutSeconds * 1000L + 1000L) {
+                    autoLeft++; autoOut = "检索时间已用满";
+                } else if (count(autoMisses, autoEngine(candidate)) >= MAX_AUTO_MISS_STREAK) {
+                    autoLeft++;
+                    autoOut = PaperSources.label(autoEngine(candidate)) + " 这一轮连着 "
+                            + MAX_AUTO_MISS_STREAK + " 篇都读不出正文层";
+                } else if (!sweep.spendRequest()) {
+                    autoLeft++; autoOut = "检索请求额度已用完";
+                } else {
+                    autoTried++;
+                    String got = null;
+                    int shapeRow = sweep.shapes.rows();
+                    try { got = PaperSources.fullText(candidate, limits, cancellation); }
+                    catch (IOException error) { note(report, "顺手抓正文没成，仍按摘要比对：" + message(error)); }
+                    if (got == null || got.trim().isEmpty()) {
+                        /* 落空要记下它到底是什么形状：六篇全是"扫描版无文字层"与"回来的不是 PDF"
+                           是两回事，前者是这一轮的运气，后者是这一路的链接本身就不对。 */
+                        String engine = autoEngine(candidate);
+                        autoMisses.put(engine, Integer.valueOf(count(autoMisses, engine) + 1));
+                        String shape = CorpusImport.Batch.shapeLabel(sweep.shapes.lastShapeSince(shapeRow));
+                        autoShapes.put(shape, Integer.valueOf(count(autoShapes, shape) + 1));
+                    }
+                    if (got != null && !got.trim().isEmpty()) {
+                        body = body.isEmpty() ? got : body + "\n" + got;
+                        fetched = true; autoGot++;
+                        /* 正文留着给 app 落自建库：下一轮不必再花一次请求重抓同一篇。 */
+                        report.autoBodies.add(new AutoBody(
+                                candidate.source == null ? "" : candidate.source.title,
+                                candidate.source == null ? "" : candidate.source.engine, got));
+                    } else autoFailed++;
+                }
+            }
             report.candidates.add(candidate);
             bump(report.candidateCount, CandidateRanker.sourceKey(candidate));
             if (body.trim().isEmpty()) {
@@ -1225,6 +1808,12 @@ public final class DuplicateEngine {
                 report.downloadables.add(new Downloadable(candidate.source.title,
                         candidate.source.engine, pick.candidate.fullTextUrl.trim()));
         }
+        report.autoPdfTried = autoTried;
+        report.autoPdfFetched = autoGot;
+        report.autoPdfFailed = autoFailed;
+        report.autoPdfLeft = autoLeft;
+        report.autoPdfReason = autoOut;
+        report.autoPdfShapes = tally(autoShapes);
         everyConnectorFailed(report, engines, skipped);
         disclose(report, silent, failedLast, exhausted, requestCap, timeCap, corpusCap, poolCap, poolDropped);
     }
@@ -1235,13 +1824,39 @@ public final class DuplicateEngine {
      * 注记入队顺序是刻意的：覆盖率与闸门必须先于「X 未命中相关文献」一类逐源注记，否则
      * MAX_NOTES 写满时被挤掉的恰好是最要紧的那几句。
      */
+    /**
+     * 覆盖率那行后面追的一句：这一轮的钱花成了什么形状。全按真问出去的数说，排期不算数。
+     *
+     * 用户看到的"覆盖率"是一个百分比，它背后其实是两件事——问了多少扇、每扇问了几家。
+     * 2.6.2 那轮只说 8/49，谁也不知道那 120 次请求是被"每扇问遍九家"吃掉的。
+     */
+    private static String allocationLine(Report report) {
+        if (report.asksSent <= 0 || report.windowsRetrieved <= 0) return "";
+        String depth = report.windowDepthLow == report.windowDepthHigh
+                ? String.valueOf(report.windowDepthLow)
+                : report.windowDepthLow + "-" + report.windowDepthHigh;
+        String out = "；真问出去 " + report.asksSent + " 次，摊到这些窗口每窗 " + depth + " 家";
+        if (report.chineseWindowsAsked > 0)
+            out = out + "，其中 " + report.chineseWindowsAsked + " 扇问到知网/万方/维普";
+        return out;
+    }
+
     private static void disclose(Report report, LinkedHashMap<String, Boolean> silent,
                                  LinkedHashMap<String, Boolean> failedLast, LinkedHashMap<String, Boolean> exhausted,
                                  boolean requestCap, boolean timeCap, boolean corpusCap, int poolCap, int poolDropped) {
         double rate = report.comparableChars <= 0 ? 0d : report.coveredChars * 100d / report.comparableChars;
-        int left = report.windowsPlanned - report.windowsRetrieved;
+        /* "剩余几个窗口没检索"按整篇算：既包括排上了却没来得及问的，也包括额度根本没能排进本轮的。
+           只报前者就是把"钱不够"说成"没时间"，那正是 2.6.2 那轮报告最容易被读错的地方。 */
+        int left = report.windowsPlanned - report.windowsRetrieved + report.windowsUnstaffed;
         note(report, "已检索 " + report.windowsRetrieved + "/" + report.windowsAvailable + " 个检索窗口，覆盖 "
-                + report.coveredChars + " 字（全文可比对 " + report.comparableChars + " 字，" + percent(rate) + "）");
+                + report.coveredChars + " 字（全文可比对 " + report.comparableChars + " 字，" + percent(rate)
+                + "）" + allocationLine(report));
+        /* 源停在半路上退回来的那些提问：补了多少、没补上多少。只说覆盖率不说这一句，
+           用户看不出去这一轮的窗口是自巶问完的还是补兜补完的。 */
+        if (report.asksSpilled > 0)
+            note(report, "检索中途有 " + report.asksSpilled + " 次提问被停问的检索源退回，其中 "
+                    + report.asksRefilled + " 次改由其他检索源补问"
+                    + (report.asksRefilled == report.asksSpilled ? "" : "，剩下的没问上"));
         String gate = "";
         if (requestCap) {
             note(report, "检索请求已达上限 " + MAX_REQUESTS + " 次，剩余 " + left + " 个检索窗口未检索");
@@ -1252,6 +1867,17 @@ public final class DuplicateEngine {
                     + report.windowsPlanned + " 个检索窗口后时间用完，剩余 " + left + " 个检索窗口未检索");
             if (gate.isEmpty())
                 gate = "检索时间已用满 " + (searchMillis / 1000L) + " 秒，剩余 " + left + " 个检索窗口未检索";
+        }
+        if (report.windowsUnstaffed > 0 && !requestCap && !timeCap) {
+            /* 额度排不下不是"检索中途出了事"，是这一份额度就买得起这么多扇：说清是哪一道闸挡的，
+               用户才知道下一步该动哪个旋钮（多勾的源在争同一份每源上限，不是额度）。 */
+            String why = report.budgetCapped
+                    ? "检索请求额度 " + MAX_REQUESTS + " 次只排得出 " + report.windowsPlanned
+                            + " 扇窗口，剩余 " + report.windowsUnstaffed + " 扇本轮没排上"
+                    : "每个检索源按设置在 " + report.perSourceWindowCap + " 扇处截断，剩余 "
+                            + report.windowsUnstaffed + " 扇本轮没排上；把检索设置的窗口数调到 24 可扩大覆盖";
+            note(report, why);
+            if (gate.isEmpty()) gate = why;
         }
         if (corpusCap && gate.isEmpty()) {
             /* 语料闸拦住的是"取回的比入库的多"，跟窗口没跑完是两件事，理由不能借隔壁那句。 */
@@ -1279,8 +1905,8 @@ public final class DuplicateEngine {
             reason = "检索中途停止，只跑了 " + report.windowsRetrieved + "/" + report.windowsPlanned
                     + " 个检索窗口，相似率是下限";
         else if (report.windowsPlanned < report.windowsAvailable)
-            reason = "检索窗口数按设置在 " + report.windowsPlanned + " 段处截断，全文还可切出 "
-                    + (report.windowsAvailable - report.windowsPlanned) + " 段；把检索设置的窗口数调到 24 可扩大覆盖";
+            reason = "本轮排到 " + report.windowsPlanned + "/" + report.windowsAvailable
+                    + " 个检索窗口，全文还能切出的段落没问完，相似率是下限";
         /* 未完成与部分是互斥的两态：什么都没问出来才走 incomplete，问出来了但没跑完绝不能走那条，
            否则 CheckReport 会把真实测出的比率整块抹掉。 */
         if (!report.retrievalIncomplete && !reason.isEmpty()) {
@@ -1293,6 +1919,10 @@ public final class DuplicateEngine {
             if (count(report.candidateCount, engine) > 0) chinese++;
         if (chinese > 0 && report.fullTextCandidates == 0)
             note(report, "知网、万方、维普只回摘要，正文与图表无法比对，相似率是下限");
+        if (report.autoPdfTried > 0 || report.autoPdfLeft > 0)
+            note(report, autoFetchLine(report.autoPdfTried, report.autoPdfFetched,
+                    report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason,
+                    report.autoPdfShapes));
         if (!report.downloadables.isEmpty())
             note(report, "另有 " + report.downloadables.size() + " 篇候选挂着可直接下载的开放获取 PDF，"
                     + "结果页可一键下进自建库（自建库按正文比对，不按摘要）");
@@ -1366,6 +1996,8 @@ public final class DuplicateEngine {
         final ArrayList<String> groups = new ArrayList<String>();
         /** 与 groups 一一对应：该组三段落在正文里的有效字数，口径 TextCorpus.validCount。 */
         final ArrayList<Integer> chars = new ArrayList<Integer>();
+        /** 与 groups 一一对应：这一扇窗口里有多少个中文字。排提问顺序用它，不用 chars——参考文献条目那种整段英文的窗口最长，可它一个中文字也没有。 */
+        final ArrayList<Integer> chinese = new ArrayList<Integer>();
         /** 与 groups 一一对应：这一扇窗口里那几段的原文。组串只是检索式的原料，段落自己那句才是探针要护住的东西。 */
         final ArrayList<ArrayList<String>> members = new ArrayList<ArrayList<String>>();
         /** retrievable() 通过的段落总字数：文档覆盖率的分母。 */
@@ -1376,6 +2008,16 @@ public final class DuplicateEngine {
      * 段落 -> 三段落一组的窗口，并算出每组的覆盖字数。normalize() 逐字符等长，所以原文偏移
      * 可以直接搬到归一化串上做 validCount，不必再切一遍文本。
      */
+    /** 归一化串这一段里有几个中文字（标点、空白不算）。窗口排队用它判"这一扇值不值得问中文库"。 */
+    static int cjkCount(String norm, int from, int to) {
+        int count = 0;
+        for (int i = Math.max(0, from); i < Math.min(to, norm.length()); i++) {
+            char c = norm.charAt(i);
+            if (c >= 0x4E00 && c <= 0x9FFF) count++;
+        }
+        return count;
+    }
+
     static WindowPlan windowPlan(String text, int cap) {
         WindowPlan out = new WindowPlan();
         String value = text == null ? "" : text;
@@ -1401,7 +2043,7 @@ public final class DuplicateEngine {
         }
         StringBuilder group = new StringBuilder();
         ArrayList<String> member = new ArrayList<String>();
-        int grouped = 0, limit = cap < 1 ? 1 : cap;
+        int grouped = 0, groupedCjk = 0, limit = cap < 1 ? 1 : cap;
         for (int i = 0; i < kept.size(); i++) {
             int[] span = spans.get(i);
             int chars = TextCorpus.validCount(norm, span[0], span[1]);
@@ -1410,16 +2052,19 @@ public final class DuplicateEngine {
             group.append(kept.get(i));
             member.add(kept.get(i));
             grouped += chars;
+            groupedCjk += cjkCount(norm, span[0], span[1]);
             if (i % WINDOW_PARAGRAPHS != WINDOW_PARAGRAPHS - 1 && i != kept.size() - 1) continue;
             /* 超出上限的组不再追加：设置里的窗口数就是用户许给这次检索的提问次数，
                切得出多少组是文档的事，问不问是设置的事，两个数各记各的。 */
             if (out.groups.size() >= limit) continue;
             out.groups.add(group.toString());
             out.chars.add(Integer.valueOf(grouped));
+            out.chinese.add(Integer.valueOf(groupedCjk));
             out.members.add(new ArrayList<String>(member));
             group.setLength(0);
             member.clear();
             grouped = 0;
+            groupedCjk = 0;
         }
         return out;
     }
@@ -1696,6 +2341,29 @@ public final class DuplicateEngine {
     private static void note(Report report, String value) {
         if (report.notes.size() < MAX_NOTES && !report.notes.contains(value)) report.notes.add(value);
     }
+    /** 顺手抓正文按"哪一家给的这条链接"记账；认不出来源的归到 unknown 一堆，不充谁的名下。 */
+    private static String autoEngine(PaperSources.Candidate candidate) {
+        String engine = candidate == null || candidate.source == null ? null : candidate.source.engine;
+        return engine == null || engine.trim().isEmpty() ? "unknown" : engine.trim();
+    }
+
+    /** "扫描版无文字层 4 篇、回来的不是 PDF 2 篇"：按篇数从多到少，最多三种，再多那一屏读不动。 */
+    private static String tally(LinkedHashMap<String, Integer> shapes) {
+        java.util.ArrayList<Map.Entry<String, Integer>> rows =
+                new java.util.ArrayList<Map.Entry<String, Integer>>(shapes.entrySet());
+        Collections.sort(rows, new Comparator<Map.Entry<String, Integer>>() {
+            public int compare(Map.Entry<String, Integer> a, Map.Entry<String, Integer> b) {
+                return Integer.valueOf(b.getValue().intValue() - a.getValue().intValue());
+            }
+        });
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < rows.size() && i < 3; i++) {
+            if (out.length() > 0) out.append("、");
+            out.append(rows.get(i).getKey()).append(' ').append(rows.get(i).getValue()).append(" 篇");
+        }
+        return out.toString();
+    }
+
     private static int count(LinkedHashMap<String, Integer> counts, String engine) {
         Integer value = counts.get(engine);
         return value == null ? 0 : value.intValue();
