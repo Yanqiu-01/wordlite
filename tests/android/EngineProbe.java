@@ -104,6 +104,15 @@ public final class EngineProbe {
         String auto = DuplicateEngine.autoFetchLine(report.autoPdfTried, report.autoPdfFetched,
                 report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason, report.autoPdfShapes);
         if (!auto.isEmpty()) System.out.println("屏上顺手抓正文行: " + auto);
+        /* 顺手抓正文那几次落在哪条链接上、什么形状、几毫秒：留档最后那几行就是它。
+           没有这几行，"没打通 N 篇"在探针里查不下去——下载那一屏同一批链接往往是通的。 */
+        System.out.println("ROUTES-after-scan " + Routes.summary());
+        for (int i = Math.max(0, report.shapes.size() - 12); i < report.shapes.size(); i++) {
+            PaperSources.ShapeRow row = report.shapes.get(i);
+            System.out.println("  FETCH " + row.engine + "  " + row.probe + "  status=" + row.status
+                    + "  bytes=" + row.bodyBytes + "  ms=" + row.millis + "  shape=" + row.shape
+                    + (row.error == null || row.error.isEmpty() ? "" : "  err=" + row.error));
+        }
         for (String note : report.notes) System.out.println("note: " + note);
 
         /* "可以下进自建库"那一屏：逐篇按 app 的取法取一遍，形状留给回执，再拼屏上那句汇总。 */
@@ -128,6 +137,7 @@ public final class EngineProbe {
                     number, pick.engine, 0, got.hops, got.status, got.bytes.length, got.chars, got.shape,
                     clip(pick.title, 60), clip(pick.url, 110));
         }
+        System.out.println("ROUTES-after-downloads " + Routes.summary());
         System.out.println("屏上标题行 summary(): " + batch.summary());
         for (String line : batch.detail().split("\n")) System.out.println("  回执 " + line);
         System.out.println("可比正文 " + report.fullTextCandidates + " 篇 · 下载那一屏 " + batch.total

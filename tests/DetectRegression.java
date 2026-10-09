@@ -753,7 +753,13 @@ public final class DetectRegression {
         check(arxiv.source.title.equals("Phase field simulation of brazing filler flow & wetting"), "arXiv title entities decoded");
         check(arxiv.abstractText.contains("<gap> dependence") && arxiv.source.authors.equals("H. Tanaka, P. Silva"),
                 "arXiv summary entities decoded and authors joined");
-        check(arxiv.fullTextUrl.equals("https://arxiv.org/pdf/2103.11222v2"), "arXiv pdf link read from link attributes");
+        /* 真机留档里源给的就是这种没有 .pdf 后缀的地址（arxiv.org/pdf/2208.07815v1）：
+           它过不了 pdfLink()，fullText() 于是走文本那一路，整份 PDF 撞穿响应上限，
+           留档只剩 fetch-failed 响应过大。平手时换成带后缀的下载口。 */
+        check(arxiv.fullTextUrl.equals("https://arxiv.org/pdf/2103.11222v2.pdf"),
+                "源给的 pdf 链接没有后缀时换成下载口：" + arxiv.fullTextUrl);
+        check(PaperSources.pdfLink(arxiv.fullTextUrl),
+                "换出来的那条走 PDF 那一路：" + arxiv.fullTextUrl);
         check(query("/arxiv").contains("search_query=all:brazing+temperature") && query("/arxiv").contains("max_results=5"),
                 "arXiv query sends the terms with a result cap");
 

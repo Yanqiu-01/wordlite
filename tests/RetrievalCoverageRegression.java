@@ -1239,6 +1239,20 @@ public final class RetrievalCoverageRegression {
         check(parsed.size() == 1, "feed 里一条解析出一条：" + parsed.size());
         check("https://arxiv.org/pdf/1407.5806v1.pdf".equals(parsed.get(0).fullTextUrl),
                 "feed 没给 pdf 链接的条目不再攥着 abs 页：" + parsed.get(0).fullTextUrl);
+        /* 真机那一条的形状：feed 给了 pdf 链接，但没有 .pdf 后缀。正是这一条让拼接口在
+           宿主断言全绿的情况下仍旧没生效——平手时 betterFullTextUrl 取第一条，源的那条排前就赢。 */
+        String extensionless = "<entry><id>http://arxiv.org/abs/2208.07815v1</id>"
+                + "<title>The JCMT Transient Survey</title>"
+                + "<summary>\u5355\u5386\u5143\u6682\u6e90\u4e0e\u5149\u53d8\u3002</summary>"
+                + "<published>2022-08-15T00:00:00Z</published>"
+                + "<link title=\"pdf\" href=\"https://arxiv.org/pdf/2208.07815v1\" "
+                + "rel=\"related\" type=\"application/pdf\"/></entry>";
+        java.util.ArrayList<PaperSources.Candidate> ext = PaperSources.parseArxiv(extensionless, 5);
+        check(ext.size() == 1, "feed 给了无后缀 pdf 链接也解析出一条：" + ext.size());
+        check("https://arxiv.org/pdf/2208.07815v1.pdf".equals(ext.get(0).fullTextUrl),
+                "source 给的 pdf 链接没后缀时仍换成下载口：" + ext.get(0).fullTextUrl);
+        check(PaperSources.pdfLink(ext.get(0).fullTextUrl),
+                "换出来的那条走 PDF 那一路，不再走文本撞响应上限：" + ext.get(0).fullTextUrl);
         resetFixtures();
         crossrefSize = -1;
     }

@@ -1441,9 +1441,14 @@ public final class PaperSources {
             candidate.abstractText = clip(Xml.text(entry, "summary"));
             /* 源的 link 里给没给 pdf 都不许只攥着文章页：abs/html 那一页对取正文没有意义
                （见 arxivPdfUrl 那段实测）。feed 给了就听 feed 的，没给按 id 自己拼。 */
+            /* 自己拼的那一条排在前：源给的 pdf 链接常常没有 .pdf 后缀（真机留档写着
+               https://arxiv.org/pdf/2208.07815v1），而 pdfLink() 认的是 .pdf 或 /pdf 结尾。两条同为 1 档时
+               betterFullTextUrl 取第一条：把源那条排前，等于把取不到字的那条选上——fullText() 因此走
+               文本那一路，整份 PDF 撞穿响应上限，留档只剩 fetch-failed 响应过大（真机 2026-10-09
+               那一轮六个全文额度全烧在这里，一字没回）。 */
             candidate.fullTextUrl = betterFullTextUrl(
-                    Xml.attribute(entry, "link", "href", "title", "pdf"),
-                    arxivPdfUrl(candidate.source.id));
+                    arxivPdfUrl(candidate.source.id),
+                    Xml.attribute(entry, "link", "href", "title", "pdf"));
             add(out, candidate, limit);
         }
         return out;
