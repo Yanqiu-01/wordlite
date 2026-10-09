@@ -266,6 +266,9 @@ public final class ApiWorkflow {
                    不再是 PaperSources.Limits 里一个没人读的摆设。 */
                 limits.windows = options.windows;
                 limits.fullTexts = DuplicateEngine.MAX_FULL_TEXTS;
+                /* 检索设置里那个开关到得了检索循环：开着就用剩下的请求额度顺手抓几篇开放获取正文，
+                   并按正文比对、落进自建库；关掉（或设成 0）就还是只在名次队那几篇上花全文额度。 */
+                limits.autoFullTexts = options.autoPdf ? options.autoPdfs : 0;
                 limits.coreKey = options.coreKey;
                 limits.proxy = options.proxy;
                 ArrayList<String> engines = new ArrayList<String>();
@@ -276,6 +279,10 @@ public final class ApiWorkflow {
                                 progress(total > 0 ? label + " " + done + "/" + total : label);
                             }
                         });
+                /* 顺手抓回的开放获取正文此刻才落进自建库：这一轮的比对已经用内存里那份正文跑完，
+                   入库是为了下一轮不必再花一次请求重抓同一篇。存了几篇、几篇库里已有、几篇没存进去
+                   都写进注记，再落报告中心——顺序反了，回看的那份报告里就没有这一句。 */
+                DuplicateEngine.fileAutoBodies(library, result);
                 /* 报告中心（1.0.0）：先落一条记录再回界面。写盘留在 worker 线程里做——
                    几十万字节的 JSON 压在 UI 线程上，取消按钮会先卡住。 */
                 final ReportStore.Record saved = reports.save(ReportStore.recordFor(result, host.fileName()));
@@ -844,7 +851,15 @@ public final class ApiWorkflow {
         }
         final EditText perEngine = field(String.valueOf(engine.perEngine), "每个引擎候选数（1-50）");
         final EditText timeout = field(String.valueOf(engine.timeoutSeconds), "超时秒数（5-120）");
-        final EditText windows = field(String.valueOf(engine.windows), "检索窗口数（1-24）");
+        /* 这个数的口径写在自己脸上：它管的是"每家最多问几扇"，不是"整轮只看前几扇"——
+           后者是 2.6.2 之前的实际行为，那会儿 12 意味着第 9 扇之后一个字都没查。 */
+        final EditText windows = field(String.valueOf(engine.windows),
+                "每源检索窗口数（1-24，每家最多问几扇）");
+        final CheckBox autoPdf = check("扫描时顺手抓开放获取全文：存进自建库并按正文比对"
+                + "（用剩下的检索请求额度）", engine.autoPdf);
+        box.addView(autoPdf);
+        final EditText autoPdfs = field(String.valueOf(engine.autoPdfs), "顺手抓正文最多几篇（0-10，0 为关掉）");
+        box.addView(autoPdfs);
         final EditText core = field(engine.coreKey, "CORE API Key（可留空）");
         final EditText proxy = field(engine.proxy, "HTTP 代理 host:port（海外检索源需经电脑代理时填写，可留空）");
         box.addView(perEngine); box.addView(timeout); box.addView(windows); box.addView(core); box.addView(proxy);
@@ -860,6 +875,8 @@ public final class ApiWorkflow {
                     value.perEngine = number(perEngine.getText().toString(), engine.perEngine);
                     value.timeoutSeconds = number(timeout.getText().toString(), engine.timeoutSeconds);
                     value.windows = number(windows.getText().toString(), engine.windows);
+                    value.autoPdf = autoPdf.isChecked();
+                    value.autoPdfs = number(autoPdfs.getText().toString(), engine.autoPdfs);
                     value.coreKey = core.getText().toString().trim();
                     value.proxy = proxy.getText().toString().trim();
                     try { value.validate(); settings.saveEngine(value); engine = value; toast("已保存检索设置"); }

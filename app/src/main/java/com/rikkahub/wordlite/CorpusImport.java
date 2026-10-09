@@ -166,8 +166,8 @@ public final class CorpusImport {
             return out.toString();
         }
 
-        /** 形状号说人话。空号说"没说原因"，不替它编一个。 */
-        private static String shapeLabel(String shape) {
+        /** 形状号说人话。空号说"没说原因"，不替它编一个。顺手抓正文的注记也读这一份。 */
+        static String shapeLabel(String shape) {
             String value = shape == null ? "" : shape.trim();
             if (value.startsWith("not-a-pdf")) return "回来的不是 PDF";
             if (value.equals("needs-entitlement")) return "要机构权限或登录";
@@ -183,6 +183,12 @@ public final class CorpusImport {
             if (value.equals("import-failed")) return "读不出正文";
             if (value.equals("library-full")) return "自建库名额已满";
             if (value.equals("pdf-no-text")) return "PDF 里没读到字";
+            if (value.equals("text-empty") || value.equals("empty-body")) return "页面里没读到字";
+            if (value.startsWith("text-thin") || value.equals("thin")) return "回来的页面几乎没字";
+            if (value.startsWith("text-js-shell") || value.equals("js-shell")) return "只回了一个脚本壳页";
+            if (value.startsWith("text-blocked") || value.equals("blocked")) return "挡人页（人机验证）";
+            if (value.equals("binary-body") || value.startsWith("text-binary")) return "回来的是二进制";
+            if (value.equals("no-response")) return "没等到回话";
             if (value.equals("pdf-encrypted")) return "PDF 已加密";
             return "没说原因";
         }

@@ -25,7 +25,7 @@ import java.util.Collections;
  * <p>这一套用回环桩把三档各跑一遍，比的是结果页收尾的字：①一个源都没答话——第一行是原因并把
  * 通了几个数带上，换行之后才是两条出路；②答了话但可比正文 0 篇——沿用今天那句，一字不改，
  * "知网、万方、维普只回摘要"也照旧留着；③可比正文 N 篇（N&gt;0）——整份报告逐字节不变。
- * 基准串与基准哈希取自 e9f5322（2.5.0 那棵树），样例文档、窗口数与桩和这里同一套。</p>
+ * 三句收尾仍逐字钉在 e9f5322（2.5.0 那棵树）；整份报告的哈希自检索额度重排那一轮起重钉，理由写在 REPORT_HASH_WITH_COMPARABLE 上。样例文档、窗口数与桩这里同一套。</p>
  *
  * <p>结果页那一行出自 ApiWorkflow.showScan()：它把 report.retrievalReason 原样贴上去，
  * HTML 报告那一屏出自 CheckReport.unfinished()，两边同一个串，所以这里比这一个串就够。</p>
@@ -47,9 +47,18 @@ public final class RetrievalBlockageAudit {
     /** 中文三库只到摘要这条结构性短板，两档量不到的轮次都必须继续说出口。 */
     private static final String NOTE_ABSTRACT_ONLY =
             "知网、万方、维普只回摘要，正文与图表无法比对，相似率是下限";
-    /** e9f5322 上"可比正文 1 篇"那一档整份报告的哈希，口径见 canonical()。 */
-    private static final String HEAD_REPORT_HASH_WITH_COMPARABLE =
-            "0d41e75c4a3bea23176841bd2dce26a102680d6204ca7a07e2fa6203ffcae47e";
+    /**
+     * "可比正文 1 篇"那一档整份报告的哈希，口径见 canonical()。
+     *
+     * <p>e9f5322 上这个数是 0d41e75c4a3bea23176841bd2dce26a102680d6204ca7a07e2fa6203ffcae47e，
+     * 检索额度重排那一轮起重钉。重钉的理由逐行核过，只有这几处：同样 120 次额度、windows=2，
+     * 跑通那一档从 2/49 扇 / 覆盖 842 字（4.22%）/ 响应留档 40 次，变成 18/49 扇 / 覆盖 9482 字
+     * （47.49%）/ 响应留档 20 次；覆盖率那一格改成"真问出去 N 次，每窗 a-b 家"；截断那句注记改成
+     * "每个检索源按设置在 K 扇处截断，剩余 M 扇本轮没排上"。来源榜那一行末列从 4 到 2 是问出去的
+     * 检索式换了窗口。三档收尾的逐字串一字未动，"知网、万方、维普只回摘要"也照旧。</p>
+     */
+    private static final String REPORT_HASH_WITH_COMPARABLE =
+            "ca65088fc271badbc9ff48084ff1626c36b4789ed21bdf94dae4586797f8b7ef";
 
     private static final String CAUSE_NO_ROUTE = "手机这次没能连上任何检索源";
     private static final String FIX_WLAN = "WLAN 或移动数据";
@@ -261,12 +270,12 @@ public final class RetrievalBlockageAudit {
         check(!notesMention(report, "个检索源里通了"), "跑通的那一轮不许多出「通了几个源」这一行注记");
         String html = CheckReport.html("thesis.docx", report);
         check(!html.contains("检索源连通"), "报告那张表在跑通的轮次里不多这一行");
-        check(HEAD_REPORT_HASH_WITH_COMPARABLE.equals(canonicalHash(html)),
-                "整份报告与 e9f5322 逐字节相同（口径见 canonical）：" + canonicalHash(html));
+        check(REPORT_HASH_WITH_COMPARABLE.equals(canonicalHash(html)),
+                "整份报告与钉住的哈希逐字节相同（口径见 canonical）：" + canonicalHash(html));
         // 另一个方向的反证：把连通那几个数抹成零，同一轮的报告不许有半个字的变化。
         report.hostsAsked = 0; report.hostsReached = 0; report.hostsUnreachable = 0;
         check(canonicalHash(CheckReport.html("thesis.docx", report))
-                .equals(HEAD_REPORT_HASH_WITH_COMPARABLE), "连通账目满不满，跑通那一轮的报告都不许变");
+                .equals(REPORT_HASH_WITH_COMPARABLE), "连通账目满不满，跑通那一轮的报告都不许变");
     }
 
     /**

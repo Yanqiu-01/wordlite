@@ -93,14 +93,24 @@ public final class CheckReport {
         if (report.windowsPlanned <= 0 && report.comparableCandidates <= 0) return;
         double rate = report.comparableChars <= 0 ? 0 : report.coveredChars * 100d / report.comparableChars;
         out.append("<h2>检索覆盖率</h2><table><thead><tr><th>项目</th><th>数值</th></tr></thead><tbody>");
-        metricText(out, "已检索窗口数", report.windowsRetrieved + "/" + report.windowsAvailable + " 个窗口组"
-                + "（本次设置允许 " + report.windowsPlanned + " 个）");
+        String shape = report.asksSent <= 0 ? "（本次设置允许 " + report.windowsPlanned + " 个）"
+                : "（真问出去 " + report.asksSent + " 次，每窗 "
+                        + (report.windowDepthLow == report.windowDepthHigh
+                                ? String.valueOf(report.windowDepthLow)
+                                : report.windowDepthLow + "-" + report.windowDepthHigh) + " 家）";
+        metricText(out, "已检索窗口数", report.windowsRetrieved + "/" + report.windowsAvailable
+                + " 个窗口组" + shape);
         metricText(out, "已覆盖字数", report.coveredChars + " 字（可检索正文 " + report.comparableChars + " 字）");
         metricText(out, "覆盖率", percent(rate));
         metricText(out, "可比候选文献", report.comparableCandidates + " 篇（仅摘要可比 "
                 + report.abstractOnlyCandidates + " 篇，只有题录 " + report.recordOnlyCandidates + " 篇）");
         metricText(out, "开放获取全文", report.fullTextCandidates + " 篇已抓取；与检索词零共同词被挡掉 "
                 + report.unrankedCandidates + " 篇");
+        /* 顺手抓正文那一行只在真抓过（或该抓而没排上）的那一轮出现，没开的轮次一个字都不许多。
+           措辞与结果页注记同出一处（DuplicateEngine.autoFetchLine），两处不许各写一遍。 */
+        String autoFetch = DuplicateEngine.autoFetchLine(report.autoPdfTried, report.autoPdfFetched,
+                report.autoPdfFailed, report.autoPdfLeft, report.autoPdfReason, report.autoPdfShapes);
+        if (!autoFetch.isEmpty()) metricText(out, "顺手抓正文", autoFetch);
         /* 通了几个检索源单独占一行，只在"路是通的、可比正文一篇都没有"那一轮印：那一屏要分清的正是
            "站点只回了题录摘要"与"手机根本没有一条路走到检索站"，两者的下一步相反。出口那一档的原因行
            里已经带着这个数，跑通的那一轮多这一行没有新信息，报告必须与今天一字不差。 */

@@ -3,7 +3,9 @@
 #
 # Usage:  pwsh tools/device-probe.ps1 [[-Query <text>] [-Engines a,b] [-Proxy host:port]
 #         [-Reverse] [-Serial <sn>] [-Per N] [-Timeout s] [-IncludeCnki] [-Keep]
-#         [-Mode engines|fulltext|scan] [-Fetch N] [-Budget N] [-Windows N] [-Doc <本地正文.txt>]
+#         [-Mode engines|fulltext|scan] [-Fetch N] [-Budget N] [-Windows N] [-Auto N] [-Doc <本地正文.txt>]
+#         -Auto = 检索设置里"顺手抓正文最多几篇"：0 关掉那一档，>0 与手机上那个数同一条口径。
+#         改前/改后各跑一遍（-Auto 0 与 -Auto 6），差值就是这一档买回来的正文可比篇数。
 #         scan = 应用那一路的整轮：稿件以纯文本推进 DuplicateEngine.scan（参数 per=12 windows=6
 #         fullTexts=6 timeout=20 与手机上那次查重一致），报"可比正文 N 篇"与下载那一屏的逐篇形状。
 #         fulltext: see EngineProbe's BODY/EMPTY lines
@@ -51,6 +53,7 @@ param(
     [switch]$NoTcp,
     [string]$JavaHome = "",
     [int]$Windows = 0,
+    [int]$Auto = 0,
     [string]$Doc = ""
 )
 $ErrorActionPreference = "Stop"
@@ -188,6 +191,7 @@ try {
     if ($Proxy)   { $argv[-1] += (' --proxy=' + $Proxy) }
     if ($NoTcp)   { $argv[-1] += ' --no-tcp' }
     if ($Windows -gt 0) { $argv[-1] += (' --windows=' + $Windows) }
+    if ($Auto -gt 0) { $argv[-1] += (' --auto=' + $Auto) }
     if ($Mode -eq "scan") { $argv[-1] += (' --doc=' + $remoteDoc) }
     Write-Host ("> adb -s <sn> shell " + $argv[-1]) -ForegroundColor DarkGray
     Write-Host ("   remote: CLASSPATH=" + $remoteDex + " app_process / " + $remoteClass + " ...")
