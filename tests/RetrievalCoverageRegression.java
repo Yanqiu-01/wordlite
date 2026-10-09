@@ -1216,6 +1216,29 @@ public final class RetrievalCoverageRegression {
         blank.autoBodies.add(new DuplicateEngine.AutoBody("抓回来是空的", "crossref", "   "));
         String blankLine = DuplicateEngine.fileAutoBodies(new LocalLibrary(freshLibraryDir("auto-fetch-blank")), blank);
         check(blankLine.contains("1 篇没存进自建库："), "空正文按落空算并写明原因：" + blankLine);
+        /* 七、arXiv 那批只剩文章页的候选：下载口按 id 自己拼。真机那一轮 9 行留档全是
+           "arxiv.org/<id> fetch-failed 响应过大"——abs/html 那一页永远取不到字，
+           而这正是"顺手抓正文"唯一真能抓到中文以外正文的一路。 */
+        check(PaperSources.arxivPdfUrl("2010.10905v2").equals("https://arxiv.org/pdf/2010.10905v2.pdf"),
+                "按 id 拼出的是下载口：" + PaperSources.arxivPdfUrl("2010.10905v2"));
+        check(PaperSources.arxivPdfUrl("https://arxiv.org/abs/math/0301001v1")
+                .equals("https://arxiv.org/pdf/math/0301001v1.pdf"),
+                "老式 id 与 abs 页都拼得对：" + PaperSources.arxivPdfUrl("https://arxiv.org/abs/math/0301001v1"));
+        check(PaperSources.pdfLink(PaperSources.arxivPdfUrl("2010.10905v2")),
+                "拼出来的那条走 PDF 那一路，不再去读 HTML 撞响应上限");
+        check(PaperSources.pdfUrlRank(PaperSources.arxivPdfUrl("2010.10905v2")) <= 1,
+                "拼出来的那条值得花全文额度：" + PaperSources.pdfUrlRank(PaperSources.arxivPdfUrl("2010.10905v2")));
+        check(PaperSources.arxivPdfUrl("").isEmpty() && PaperSources.arxivPdfUrl("https://arxiv.org/").isEmpty(),
+                "没有 id 就不硬拼一条假链接");
+        String oneEntry = "<entry><id>http://arxiv.org/abs/1407.5806v1</id>"
+                + "<title>Predicting cement microstructure</title>"
+                + "<summary>一种把显微结构与力学性能连起来的代理模型。</summary>"
+                + "<published>2014-07-21T00:00:00Z</published>"
+                + "<link href=\"http://arxiv.org/abs/1407.5806v1\" rel=\"alternate\"/></entry>";
+        java.util.ArrayList<PaperSources.Candidate> parsed = PaperSources.parseArxiv(oneEntry, 5);
+        check(parsed.size() == 1, "feed 里一条解析出一条：" + parsed.size());
+        check("https://arxiv.org/pdf/1407.5806v1.pdf".equals(parsed.get(0).fullTextUrl),
+                "feed 没给 pdf 链接的条目不再攥着 abs 页：" + parsed.get(0).fullTextUrl);
         resetFixtures();
         crossrefSize = -1;
     }

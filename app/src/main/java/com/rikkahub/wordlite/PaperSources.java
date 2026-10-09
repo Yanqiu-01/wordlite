@@ -1426,7 +1426,8 @@ public final class PaperSources {
         }
         return out;
     }
-    private static ArrayList<Candidate> parseArxiv(String xml, int limit) {
+    /** 包内可见：这条解析要能在宿主上单独量（文章页 vs /pdf/ 那条区别只在测试里量得动）。 */
+    static ArrayList<Candidate> parseArxiv(String xml, int limit) {
         ArrayList<Candidate> out = new ArrayList<Candidate>();
         for (String entry : Xml.elements(xml, "entry")) {
             Candidate candidate = new Candidate();
@@ -1438,11 +1439,39 @@ public final class PaperSources {
             candidate.source.year = year(first(Xml.text(entry, "published"), Xml.text(entry, "updated")));
             candidate.source.locator = id;
             candidate.abstractText = clip(Xml.text(entry, "summary"));
-            candidate.fullTextUrl = Xml.attribute(entry, "link", "href", "title", "pdf");
+            /* 源的 link 里给没给 pdf 都不许只攥着文章页：abs/html 那一页对取正文没有意义
+               （见 arxivPdfUrl 那段实测）。feed 给了就听 feed 的，没给按 id 自己拼。 */
+            candidate.fullTextUrl = betterFullTextUrl(
+                    Xml.attribute(entry, "link", "href", "title", "pdf"),
+                    arxivPdfUrl(candidate.source.id));
             add(out, candidate, limit);
         }
         return out;
     }
+    /**
+     * arXiv 那批候选手里常常只剩文章页：真机 2026-10-09 那一轮的留档写着
+     * <code>arxiv.org/2010.10905v2 fetch-failed 响应过大</code>——arXiv 的 HTML5 全文版一份就超过
+     * 响应上限，这条路永远拿不到字。同一批 id 换 /pdf/&lt;id&gt;.pdf 逐条实测一击命中
+     * （2.4-6.3 MB，解出 1,645-65,535 字）。没有 id 就回空，不硬拼一条假链接。
+     */
+    static String arxivPdfUrl(String idOrUrl) {
+        String value = idOrUrl == null ? "" : idOrUrl.trim();
+        int scheme = value.indexOf("://");
+        if (scheme >= 0) {
+            String path = value.substring(scheme + 3);
+            int slash = path.indexOf('/');
+            value = slash < 0 ? "" : path.substring(slash + 1);
+        }
+        int query = value.indexOf('?');
+        if (query >= 0) value = value.substring(0, query);
+        if (value.startsWith("abs/")) value = value.substring(4);
+        else if (value.startsWith("pdf/")) value = value.substring(4);
+        if (value.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
+            value = value.substring(0, value.length() - 4);
+        }
+        return value.isEmpty() ? "" : "https://arxiv.org/pdf/" + value + ".pdf";
+    }
+
     private static ArrayList<Candidate> parseCore(Object root, int limit) {
         ArrayList<Candidate> out = new ArrayList<Candidate>();
         for (Object item : listAt(root, "results")) {
