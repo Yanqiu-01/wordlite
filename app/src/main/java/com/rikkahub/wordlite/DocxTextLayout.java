@@ -125,6 +125,7 @@ public final class DocxTextLayout {
                 : Layout.Alignment.ALIGN_NORMAL;
         boolean allowWordWrap = f.wordWrap && hasLongLatinRun(text);
         if (text.length() > 0) glueSlashRuns(text, paint, width);
+        if (text.length() > 0) glueNumericUnits(text, paint, width);
         StaticLayout layout = build(text, paint, width, alignment, f.alignment == 3, allowWordWrap);
         // The platform keeps owning the word spaces of a Latin run only while it keeps them inside
         // the column. Below API 34 it does not: measured on the target phone, a Latin line that had
@@ -2137,6 +2138,114 @@ public final class DocxTextLayout {
         for (int[] r : runs)
             if (uniformRun(text, base, r[0], r[1]))
                 text.setSpan(new AtomicRunSpan(), r[0], r[1], Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    }
+
+    /**
+     * The numeric postfixes UAX#14 classes PO. These are the units this document writes after a
+     * number with a blank in front of them: the thesis has 41 "200 ℃"-style sites and 29 unspaced
+     * ones ("93%", "100%"), counted by py artifacts/uax14/_peek.py over word/document.xml.
+     */
+    private static boolean isNumericPostfix(char c) {
+        return c == '\u2103'      // DEGREE CELSIUS, PO (not ID: it is a numeric postfix)
+                || c == '\u2109'  // DEGREE FAHRENHEIT
+                || c == '\u00b0'  // DEGREE SIGN
+                || c == '\u0025'  // PERCENT SIGN
+                || c == '\u2030'  // PER MILLE SIGN
+                || c == '\u2031'  // PER TEN THOUSAND SIGN
+                || c == '\uff05'; // FULLWIDTH PERCENT SIGN
+    }
+
+    /** The characters LB25 lets stand inside a number: its prefix, its separators, its hyphen. */
+    private static boolean continuesNumber(char c) {
+        return (c >= '0' && c <= '9')
+                || c == '.' || c == ',' || c == ':'                  // IS / SY
+                || c == '-' || c == '\u2013'                          // HY
+                || c == '+' || c == '$' || c == '\u00a5' || c == '\u20ac'   // PR
+                || c == '(' || c == '\uff08';                         // OP
+    }
+
+    private static boolean holdsDigit(CharSequence text, int start, int end) {
+        for (int i = start; i < end; i++) if (text.charAt(i) >= '0' && text.charAt(i) <= '9') return true;
+        return false;
+    }
+
+    /**
+     * The number-plus-unit stretches Word refuses to cut at the blank inside them.
+     *
+     * UAX#14 rule LB25 keeps a number and its postfix together ("12.54¢", "200℃"), but it does
+     * not reach ACROSS a blank: LB18 breaks after a space and nothing bridges a space for NU and PO
+     * (only LB16 and LB17 bridge one, for CL/CP-NS and B2). icu4c/source/data/brkitr/rules/line.txt,
+     * read for this change, shows LB18 as a plain break with no numeric exception, so the platform's
+     * own ICU is entitled to end a line on "200 " and does. Word is tighter here than the standard:
+     * of the 25 "number blank unit" seams inside the compared paragraphs of tests/samples/input-liu.docx
+     * it ends a line at 0, while we end at 2 -- py tools/break-rule-yield.py, row "NU SP PO", which is
+     * the only row of that table with a disagreement in our direction where Word cuts none of the
+     * slots at all. Both of ours are the same shape: "接头在200 |℃、15 d" (para 94, p10) and "室温
+     * 和300 |℃强度" (para 154, p18), and Word's own break in the second case sits right after the
+     * unit, "300 ℃|强度" -- the seam moves by exactly the width of the postfix.
+     *
+     * The rows that LOOKED like candidates and are not, all measured on the same capture:
+     *   "37.68 MPa" (NU SP AL, 75 slots): Word 2, we 2, one of them the same cut -- Word takes
+     *       "1000 |h后" at a blank between a number and its unit --
+     *       and 13 of the 14 "at a space" disagreements hold FEWER characters on our line than Word
+     *       fits on its own (py tools/line-capacity.py), so that family is the width model, not a rule.
+     *   ID x NU (126 slots): Word 4, we 9 -- legal for both.
+     *   ID x ID (6773 slots): Word 173, we 174. Width.
+     *
+     * Only a range with a blank INSIDE it is collected. A number written tight against its postfix
+     * ("93%") is already one unbreakable token under LB25, and gluing it would add span edges -- which
+     * are break opportunities for StaticLayout -- without removing a single seam. For the same reason
+     * a cluster followed by a blank is left alone: an edge there would sit where LB7 forbids a break
+     * (x SP) and could hand the next line a leading blank.
+     */
+    static ArrayList<int[]> numericUnitRuns(CharSequence text, int columnPx, RunWidth width) {
+        ArrayList<int[]> runs = new ArrayList<>();
+        int i = 0;
+        while (i < text.length()) {
+            if (!isNumericPostfix(text.charAt(i))) { i++; continue; }
+            int p = i;
+            while (p + 1 < text.length() && isNumericPostfix(text.charAt(p + 1))) p++;
+            int end = p + 1;
+            int k = i - 1, blanks = 0;
+            while (k >= 0 && Character.isWhitespace(text.charAt(k))) { k--; blanks++; }
+            if (blanks == 0) { i = end; continue; }     // LB25 already holds an unspaced number
+            while (k >= 0 && continuesNumber(text.charAt(k))) k--;
+            int start = k + 1;
+            if (!holdsDigit(text, start, i)) { i = end; continue; }
+            if (end < text.length() && Character.isWhitespace(text.charAt(end))) { i = end; continue; }
+            int[] last = runs.isEmpty() ? null : runs.get(runs.size() - 1);
+            if (last != null && last[1] >= start) last[1] = Math.max(last[1], end);
+            else runs.add(new int[]{start, end});
+            i = end;
+        }
+        // Same guard the slash rule learned the hard way: a glued cluster no line can hold is a worse
+        // defect than the break it removes (a 126-character run laid out 1119 px in a 567 px column).
+        for (int k = runs.size() - 1; k >= 0; k--)
+            if (width.of(runs.get(k)[0], runs.get(k)[1]) > columnPx) runs.remove(k);
+        return runs;
+    }
+
+    /**
+     * Attach the glue. A cluster that overlaps a run the slash rule already owns is dropped rather than
+     * stacked: two ReplacementSpans over one range and the platform bills only one of them (see
+     * applyAutoSpace), and both of these spans only carry break behaviour, so neither is worth losing
+     * the other over. Like the slash rule, this refuses a range that is not one uniform measurement
+     * state: here that is the ordinary case where the document sets hAnsi differently from ascii and
+     * the unit would be billed in the digits' face.
+     */
+    private static void glueNumericUnits(SpannableStringBuilder text, TextPaint base, int columnPx) {
+        ArrayList<int[]> runs = numericUnitRuns(text, columnPx, new RunWidth() {
+            @Override public float of(int start, int end) {
+                float total = 0f;
+                for (int i = start; i < end; i++) total += charAdvance(text, base, i);
+                return total;
+            }
+        });
+        for (int[] r : runs) {
+            if (text.getSpans(r[0], r[1], AtomicRunSpan.class).length > 0) continue;
+            if (uniformRun(text, base, r[0], r[1]))
+                text.setSpan(new AtomicRunSpan(), r[0], r[1], Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
     }
 
     /**

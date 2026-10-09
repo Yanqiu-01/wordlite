@@ -59,6 +59,10 @@ Add-Suite "HangPunctuationRegression" @()
 # 斜不断行：Word 在 Cu/SB/P-Cu/SB/Cu 这种串上从不切在斜杠后（真值 tools/slash-break-truth.py 量死），
 # 规则的范围（斜杠两边都得是字母数字、不许比行宽、区间不许以斜杠开头结尾）都在这里钉着。
 Add-Suite "SlashAtomicRegression" @()
+# UAX#14 断行规则表（docs/line-break-rules-uax14.md）：数字与其单位不许切在中间那个空格上（LB25 跨过
+# 空白）。范围、守卫、以及三条量出来"不该做"的规则（NU SP AL 的 37.68 MPa、LB7 的空白边、LB21 的连字符）
+# 全在这儿钉着；每条断言的注释写了规则号与参照文件。
+Add-Suite "Uax14RulesRegression" @()
 Add-Suite "TextCorpusRegression"   @()
 Add-Suite "SourceLedgerRegression" @()
 Add-Suite "CharLedgerRegression"   @()
