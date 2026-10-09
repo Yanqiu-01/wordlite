@@ -180,6 +180,10 @@ public final class CorpusImport {
             if (value.equals("no-link")) return "没有全文链接";
             if (value.equals("pdf-no-text-layer")) return "扫描版无文字层";
             if (value.equals("pdf-unreadable") || value.equals("pdf-undecodable")) return "PDF 解不出字";
+            if (value.equals("import-failed")) return "读不出正文";
+            if (value.equals("library-full")) return "自建库名额已满";
+            if (value.equals("pdf-no-text")) return "PDF 里没读到字";
+            if (value.equals("pdf-encrypted")) return "PDF 已加密";
             return "没说原因";
         }
 
@@ -237,6 +241,7 @@ public final class CorpusImport {
                 // 一个坏文件不许拖垮一批：异常只记在自己这条回执上，循环继续走下一个。
                 receipt.status = Status.FAILED;
                 receipt.message = describe(error);
+                receipt.shape = readShapeOf(receipt.message, error);
             }
             batch.receipts.add(receipt);
             if (progress == null) continue;
@@ -281,6 +286,7 @@ public final class CorpusImport {
         if (library.capacityRemaining() <= 0) {
             receipt.status = Status.FAILED;
             receipt.message = "自建库名额已满（上限 " + library.capacity() + " 个文件）";
+            receipt.shape = "library-full";
             return;
         }
         LocalLibrary.Extract extract;
@@ -289,6 +295,7 @@ public final class CorpusImport {
         } catch (Exception error) {
             receipt.status = Status.FAILED;
             receipt.message = describe(error);
+            receipt.shape = readShapeOf(receipt.message, error);
             return;
         }
         receipt.pages = extract.pages;
@@ -311,6 +318,7 @@ public final class CorpusImport {
                     ? "PDF 有文字流，但字体编码映射不出文字"
                             + (extract.undecodableNote.isEmpty() ? "" : "：" + extract.undecodableNote)
                     : "没有从文件里读到文本";
+            receipt.shape = extract.undecodable ? "pdf-undecodable" : "pdf-no-text";
             return;
         }
         String hash = LocalLibrary.bodyHash(text);
@@ -341,7 +349,24 @@ public final class CorpusImport {
         }
         receipt.status = Status.FAILED;
         receipt.message = added.error.length() == 0 ? "入库失败" : added.error;
+        receipt.shape = "import-failed";
     }
+
+    /**
+     * 解析那一路的失败也归进形状号。真机那一屏写着"失败 3 个（没说原因 1 个、
+     * 没打通 2 个）"，那个"没说原因"是一份加密的 PDF：下载口它是好好的（真的 %PDF- 头），
+     * 死在解析口，而形状号以前只有下载口会填。认得出是哪一种就说哪一种，认不出才留空。
+     */
+    static String readShapeOf(String message, Throwable error) {
+        String text = message == null ? "" : message;
+        if (text.indexOf("加密") >= 0) return "pdf-encrypted";
+        if (text.indexOf("字体编码") >= 0) return "pdf-undecodable";
+        if (text.indexOf("没有从文件里读到文本") >= 0) return "pdf-no-text";
+        if (text.indexOf("名额已满") >= 0) return "library-full";
+        if (error instanceof java.io.IOException) return "import-failed";
+        return "";
+    }
+
 
     /** 一条"从链接下载后入库"的候选：显示名 + PDF 直链。名字由调用方定（一般是题名）。 */
     public static final class Pick {
