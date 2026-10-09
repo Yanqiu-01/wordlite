@@ -26,7 +26,7 @@
 import argparse, gzip, hashlib, io, json, os, re, sys, time
 import math
 import threading
-import urllib.parse, urllib.request
+import urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 import xml.etree.ElementTree as ET
@@ -233,6 +233,10 @@ def fetch(url, h, tries=4, wait=2.0, timeout=90, headers=None):
                 if (r.headers.get("Content-Encoding") or "").lower() == "gzip":
                     raw = gzip.decompress(raw)
                 return raw
+        except urllib.error.HTTPError as e:
+            last = e
+            # 撞 429 就硬退：Wikimedia 这一族是共享出口限速，2 秒重试等于继续撞
+            time.sleep((20.0 if e.code in (429, 403, 503) else wait) * (k + 1))
         except Exception as e:
             last = e
             time.sleep(wait * (k + 1))
@@ -591,6 +595,8 @@ def article_records(fam, lang, d):
         return wiki_records(lang, d)
     if fam == "qa":
         return qa_records(lang, d)
+    if fam == "books":
+        return ws_records(lang, d) if lang == "zh" else pg_records(lang, d)
     raise SystemExit("这一族还没接：build %s" % fam)
 
 # ---------------------------------------------------------------- 族二：维基百科条目正文
@@ -851,6 +857,304 @@ def qa_records(lang, d):
                "fetched_at": r.get("fetched_at"), "sections": [("答案", txt)]}
 
 
+# ---------------------------------------------------------------- 族四：书籍（公版正文）
+#
+# 中文取维基文库（zh.wikisource）里已经标了公版模板的作品，英文取 Project Gutenberg。
+# 两边的许可都从作品页自己写的东西里读：维基文库读页面顶部的 PD 模板原文，
+#古登堡读 txt 文件头那一句"这本书任何人都可以使用"。带 Copyright/Non-PD 标记的一律丢。
+
+WS_HOST = "zh.wikisource.org"
+WS_LISTS = ["Category:鲁迅", "Category:老舍", "Category:朱自清", "Category:郁达夫", "Category:萧红",
+            "Category:许地山", "Category:庐隐", "Category:李劼人", "Category:废名", "Category:徐志摩",
+            "Category:闻一多", "Category:张恨水", "Category:柔石", "Category:洪深", "Category:田汉",
+            "Category:穆时英", "Category:殷夫", "Category:蒋光慈", "Category:王鲁彦", "Category:靳以",
+            "Category:PD-1923", "Category:PD-1996"]
+# 作者一律取逝于 1975 年及以前的（中国法人作品以外是作者身后 50 年进公版）；
+# 名单只是撒网，真正的门是每篇页面顶上的 PD 模板，缺模板或带 Copyright 标记的一律丢。
+WS_LIMIT = 900
+WS_OK_TPL = ("PD-author", "PD-ZH", "PD-old", "PD-China", "PD-1996", "PD-textarticle", "PD-art",
+             "Public domain", "PD-Show", "PD-Chess")
+WS_NO_TPL = ("Non-PD", "CopyrightReview", "Copyrighted", "Permission", "FOP", "DERIVATIVE",
+             "To be reviewed", "Copyvios", "Close copyright review request")
+
+
+def ws_api(h, params):
+    u = "https://%s/w/api.php?%s" % (WS_HOST, urllib.parse.urlencode(params))
+    last = None
+    for k in range(4):
+        try:
+            return json.loads(fetch(u, h, tries=2, timeout=60).decode("utf-8", "replace"), strict=False)
+        except Exception as e:
+            last = e
+            time.sleep(1.5 * (k + 1))
+    raise IOError("维基文库取不回：%s（%s）" % (u[:110], type(last).__name__))
+
+
+def ws_titles(h, d, redo=False):
+    out = os.path.join(d, "titles.json")
+    if os.path.exists(out) and not redo:
+        return json.load(io.open(out, encoding="utf-8"))
+    got = {}
+    for cat in WS_LISTS:
+        cont = None
+        n = 0
+        while True:
+            p = {"action": "query", "list": "categorymembers", "cmtitle": cat, "cmtype": "page",
+                 "cmlimit": 300, "converttitles": 1}
+            if cont:
+                p["cmcontinue"] = cont
+            j = ws_api(h, p)
+            ms = (j.get("query") or {}).get("categorymembers") or []
+            for m in ms:
+                t = m["title"]
+                if t.startswith(("作者:", "Author:", "Help:", "Wikisource:", "维基文库:")) or ":" in t[1:]:
+                    continue
+                got[t] = {"title": t, "pageid": m["pageid"], "cat": cat}
+            n += len(ms)
+            cont = (j.get("continue") or {}).get("cmcontinue")
+            time.sleep(0.3)
+            if not cont:
+                break
+        print("  %-22s 累计作品 %d" % (cat, n), flush=True)
+    rows = sorted(got.values(), key=lambda r: hashlib.md5(("ws|" + r["title"]).encode("utf-8")).hexdigest())
+    rows = rows[:WS_LIMIT]
+    json.dump(rows, io.open(out, "w", encoding="utf-8"), ensure_ascii=False)
+    print("作品清单落盘：%d 篇" % len(rows))
+    return rows
+
+
+def ws_fetch(h, d, redo=False):
+    rows = json.load(io.open(os.path.join(d, "titles.json"), encoding="utf-8"))
+    out = os.path.join(d, "wikitext.jsonl")
+    have = set()
+    if os.path.exists(out) and not redo:
+        for line in io.open(out, encoding="utf-8"):
+            have.add(json.loads(line)["title"])
+    todo = [r for r in rows if r["title"] not in have]
+    print("取 wikitext：还差 %d 篇（一次 20 篇）" % len(todo), flush=True)
+    with io.open(out, "a" if have else "w", encoding="utf-8", newline="") as f:
+        for k in range(0, len(todo), 20):
+            batch = todo[k:k + 20]
+            j = ws_api(h, {"action": "query", "prop": "revisions", "rvprop": "content|timestamp|ids",
+                           "rvslots": "main", "rvlimit": 1, "converttitles": 1, "formatversion": 2,
+                           "titles": "|".join(r["title"] for r in batch)})
+            pages = (j.get("query") or {}).get("pages") or []
+            by = dict((p.get("title"), p) for p in pages)
+            for r in batch:
+                p = by.get(r["title"]) or {}
+                rev = (p.get("revisions") or [{}])[0]
+                wt = ((rev.get("slots") or {}).get("main") or {}).get("content") or ""
+                if not wt:
+                    continue
+                f.write(json.dumps({"title": r["title"], "cat": r["cat"], "pageid": p.get("pageid"),
+                                    "wikitext": wt, "revid": rev.get("revid"), "rev_ts": rev.get("timestamp"),
+                                    "fetched_at": now()}, ensure_ascii=False) + "\n")
+            f.flush()
+            if k % 400 == 0:
+                print("  wikitext %-6d / %d" % (k + len(batch), len(todo)), flush=True)
+            time.sleep(0.25)
+
+
+TPL_STRIP = [(r"(?s)\{\{\s*(?:ref|note|footnote|NoteTag)\b.*?\}\}", " ")]
+
+
+def wikitext_to_text(wt):
+    t = wt
+    t = re.sub(r"(?s)<ref[^>]*/>", " ", t)
+    t = re.sub(r"(?s)<ref[^>]*>.*?</ref>", " ", t)
+    t = re.sub(r"(?s)<!--.*?-->", " ", t)
+    t = re.sub(r"(?s)\{\|.*?\|\}", " ", t)                       # 表格
+    t = re.sub(r"(?s)<(noinclude|includeonly|inputbox|div|gallery|imagemap|score|timeline)[^>]*>.*?</\1>", " ", t)
+    for _ in range(8):
+        t2 = re.sub(r"\{\{[^{}]*\}\}", " ", t)
+        if t2 == t:
+            break
+        t = t2
+    t = re.sub(r"(?s)\{\{.*?\}\}", " ", t)
+    t = re.sub(r"(?i)\[\[\s*(?:Image|File|图像|文件|Category|分类|Wikidata)\s*:[^\]]*\]\]", " ", t)
+    t = re.sub(r"\[\[[^\]|]*\|([^\]]*)\]\]", r"\1", t)
+    t = re.sub(r"\[\[([^\]]*)\]\]", r"\1", t)
+    t = re.sub(r"\[\s*https?://[^\s\]]+\s+([^\]]+)\]", r"\1", t)
+    t = re.sub(r"https?://\S+", " ", t)
+    t = re.sub(r"'+", "", t)
+    t = re.sub(r"(?m)^\s*[#!*:;]+", "", t)
+    t = re.sub(r"__[^_]+__", " ", t)
+    return t
+
+
+def wikitext_sections(wt):
+    """== 标题 == 当章节名，正文按空行分段。"""
+    t = wikitext_to_text(wt)
+    out, sec, para = [], "", []
+
+    def flush():
+        if para:
+            txt = " ".join(" ".join(para).split())
+            del para[:]
+            if txt:
+                out.append((sec, txt))
+
+    for line in t.split("\n"):
+        s = line.strip()
+        m = SEC_HEAD.match(s)
+        if m:
+            flush()
+            sec = m.group(2).strip()
+        elif not s:
+            flush()
+        else:
+            para.append(s)
+    flush()
+    return out
+
+
+def ws_records(lang, d):
+    for line in io.open(os.path.join(d, "wikitext.jsonl"), encoding="utf-8"):
+        r = json.loads(line)
+        wt = r["wikitext"]
+        head = wt[:2500]
+        bad = next((t for t in WS_NO_TPL if t.lower() in head.lower()), None)
+        ok = next((t for t in WS_OK_TPL if re.search(r"\{\{\s*" + re.escape(t), head, re.I)), None)
+        if bad or not ok:
+            lic, raw = ("CLOSED" if bad else "NONE"), head[:200]
+        else:
+            i = head.lower().find(ok.lower())
+            lic, raw = norm_license("PD"), " ".join(head[max(0, i - 30):i + 90].split())
+        yield {"pid": "ws:" + str(r.get("pageid") or r["title"]),
+               "url": "https://%s/wiki/%s" % (WS_HOST, urllib.parse.quote(r["title"].replace(" ", "_"))),
+               "doi": None, "journal": "维基文库（%s）" % r["cat"], "title": r["title"],
+               "year": (r.get("rev_ts") or "")[:4], "license": lic, "license_raw": raw,
+               "fetched_at": r["fetched_at"], "sections": wikitext_sections(wt)}
+
+
+# ---------------------------------------------------------------- 族四之二：Project Gutenberg（英文公版书）
+
+PG_PAGE = "https://gutendex.com/books"
+PG_N = 180
+
+
+def pg_json(h, params):
+    u = "%s?%s" % (PG_PAGE, urllib.parse.urlencode(params))
+    last = None
+    for k in range(4):
+        try:
+            return json.loads(fetch(u, h, tries=2).decode("utf-8", "replace"), strict=False)
+        except Exception as e:
+            last = e
+            time.sleep(2.0 * (k + 1))
+    raise IOError("gutendex 取不回：%s" % type(last).__name__)
+
+
+def pg_ids(h, d, redo=False):
+    out = os.path.join(d, "books.jsonl")
+    if os.path.exists(out) and not redo:
+        print("已有书目：%d 本" % sum(1 for _ in io.open(out, encoding="utf-8")))
+        return
+    want = "text/plain; charset=utf-8"
+    picked, page = [], 1
+    with io.open(out, "w", encoding="utf-8", newline="") as f:
+        while len(picked) < PG_N and page <= 12:
+            j = pg_json(h, {"languages": "en", "sort": "download_count", "mime_type": want,
+                            "page": page, "results_per_page": 100})
+            for b in j.get("results") or []:
+                url = (b.get("formats") or {}).get(want)
+                if not url:
+                    continue
+                rec = {"gencode": b.get("id"), "title": b.get("title"),
+                       "authors": "; ".join(a.get("name") or "" for a in (b.get("authors") or [])),
+                       "year": (b.get("copyright_year") or ""), "url": url,
+                       "downloads": b.get("download_count"), "fetched_at": now()}
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                picked.append(rec)
+                if len(picked) >= PG_N:
+                    break
+            print("  gutendex 第 %d 页：累计 %d 本" % (page, len(picked)), flush=True)
+            page += 1
+            time.sleep(0.3)
+    print("书目落盘：%d 本" % len(picked))
+
+
+def pg_fetch(h, d, redo=False):
+    recs = [json.loads(l) for l in io.open(os.path.join(d, "books.jsonl"), encoding="utf-8")]
+    cache = os.path.join(d, "txt")
+    os.makedirs(cache, exist_ok=True)
+    todo = [r for r in recs if not (os.path.exists(os.path.join(cache, "%s.txt" % r["gencode"])) and not redo)]
+    print("取正文：还差 %d 本" % len(todo), flush=True)
+    for n, r in enumerate(todo):
+        try:
+            raw = fetch(r["url"], h, tries=3, timeout=120)
+        except IOError as e:
+            print("  跳过 %s：%s" % (r["url"][:70], e))
+            continue
+        io.open(os.path.join(cache, "%s.txt" % r["gencode"]), "wb").write(raw)
+        if n % 20 == 0:
+            print("  txt %-5d / %d（%s）" % (n + 1, len(todo), r["title"][:40]), flush=True)
+        time.sleep(0.2)
+
+
+PG_HEAD = re.compile(r"\*\*\*\s*START OF TH[IE] PROJECT GUTENBERG.*?\*\*\*", re.I)
+PG_TAIL = re.compile(r"\*\*\*\s*END OF TH[IE] PROJECT GUTENBERG", re.I)
+PG_LIC = re.compile(r"(?i)(This eBook is for the use of anyone[^\n]*|Title:\s*.*|Produced by[^\n]*|Release Date:[^\n]*|\*\*\*[\s]*[A-Z ]{8,}[\s]*\*\*\*)")
+CHAPTER = re.compile(r"^(?:CHAPTER|Chapter\s|BOOK\s|Book\s|ACT\s|Act\s|CANTO|Volume\s|Vol\.\s|PART\s|Preface|INTRODUCTION|Introduction|EPILOGUE|Epilogue|APPENDIX|CONTENTS)\b")
+
+
+def pg_text(raw_bytes):
+    t = raw_bytes.decode("utf-8", "replace")
+    try:
+        t = t.encode("latin-1").decode("utf-8", "replace")
+    except Exception:
+        pass
+    m = PG_HEAD.search(t)
+    body = t[m.end():] if m else t
+    m2 = PG_TAIL.search(body)
+    if m2:
+        body = body[:m2.start()]
+    body = re.sub(r"(?m)^\s*\d{1,4}\s*$", "", body)                 # 页码行
+    body = re.sub(r"(?m)^\s*\[Illustration[^\]]*\]\s*$", "", body)
+    body = re.sub(r"[ \t]+", " ", body)
+    head_lic = " ;; ".join(x.group(0).strip()[:120] for x in list(PG_LIC.finditer(t[:2500]))[:4])
+    return body, head_lic
+
+
+def pg_sections(body):
+    out, sec, para = [], "", []
+
+    def flush():
+        if para:
+            txt = " ".join(" ".join(para).split())
+            del para[:]
+            if not txt:
+                return
+            if len(txt) <= 70 and CHAPTER.match(txt):
+                out.append((txt[:70], ""))
+            else:
+                out.append((sec, txt))
+
+    for line in body.replace("\r\n", "\n").split("\n"):
+        s = line.strip()
+        if not s:
+            flush()
+        else:
+            para.append(s)
+    flush()
+    return [(s, t) for s, t in out if t]
+
+
+def pg_records(lang, d):
+    cache = os.path.join(d, "txt")
+    for line in io.open(os.path.join(d, "books.jsonl"), encoding="utf-8"):
+        r = json.loads(line)
+        p = os.path.join(cache, "%s.txt" % r["gencode"])
+        if not os.path.exists(p):
+            continue
+        body, lic = pg_text(io.open(p, "rb").read())
+        yield {"pid": "pg:%s" % r["gencode"], "url": r["url"], "doi": None,
+               "journal": "Project Gutenberg（%s）" % (r.get("authors") or "")[:60],
+               "title": r["title"], "year": r.get("year"), "license": "公有领域",
+               "license_raw": (lic or "Project Gutenberg 电子文本，美国公版；文件头未抓到授权句")[:200],
+               "fetched_at": r["fetched_at"], "sections": pg_sections(body)}
+
+
 # ---------------------------------------------------------------- 按篇三分与清单
 
 SPLIT_RULE = "按篇：md5(family|pid) 稳定哈希，前 8%% 进 SPARE（备用样本位；原计划给机器改写，2026-10-09 那一路取消），其后 20%% 进 FIT（定阈值），余下进 HOLD（只量真人误报）"
@@ -867,6 +1171,9 @@ FAMILY_DOC = {
     "qa": {"name": "Stack Exchange 长答案（挑散文多的站：academia/history/philosophy/english/literature/"
                                    "worldbuilding/travel/politics；中文取 chinese 站）",
             "license_source": "逐条取 API 回的 content_license 字段，并把作者名与永久链接一起记进清单（CC BY-SA 的署名要求）"},
+    "books": {"name": "公版书正文：中文取维基文库（作者身后 50 年那批），英文取 Project Gutenberg",
+              "license_source": "维基文库取作品页顶上的 PD 模板原文，古登堡取 txt 文件头那一句授权；"
+                                "带 Copyright/Non-PD 标记的整篇丢"},
     "wiki": {"name": "维基百科条目正文（zh 取典范条目+优良条目，en 取 Featured+Good）",
              "license_source": "条目正文的授权在站点使用条款里：siteinfo.rightsinfo 的原文取一次存缓存，"
                                "逐篇再记取的是哪一号修订与时间，这两样一起进清单"},
@@ -976,6 +1283,9 @@ def main():
             wiki_titles(h, a.lang, fam_dir(a.family, a.lang), a.redo)
         elif a.family == "qa":
             qa_answers(h, a.lang, fam_dir(a.family, a.lang), a.redo)
+        elif a.family == "books":
+            (ws_titles(h, fam_dir(a.family, a.lang), a.redo) if a.lang == "zh"
+             else pg_ids(h, fam_dir(a.family, a.lang), a.redo))
         else:
             raise SystemExit("这一族还没接：ids %s" % a.family)
     elif a.stage == "fetch":
@@ -988,6 +1298,8 @@ def main():
             wiki_fetch(h, a.lang, d, a.redo, workers=a.workers)
         elif a.family == "qa":
             print("这一族的正文与题录是一次请求同时回的，fetch 无额外动作；直接跑 build")
+        elif a.family == "books":
+            (ws_fetch(h, d, a.redo) if a.lang == "zh" else pg_fetch(h, d, a.redo))
         else:
             raise SystemExit("这一族还没接：fetch %s" % a.family)
     elif a.stage == "build":
