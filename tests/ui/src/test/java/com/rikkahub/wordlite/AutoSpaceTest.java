@@ -50,9 +50,11 @@ public class AutoSpaceTest {
         p.format.autoSpaceDeSet = false;
         p.format.autoSpaceDnSet = false;
         Spanned text = (Spanned) DocxTextLayout.measure(p, 400).layout.getText();
-        assertEquals(0, text.getSpans(4, 5, ReplacementSpan.class).length);
-        assertTrue(text.getSpans(0, 1, ReplacementSpan.class).length > 0);
-        assertTrue(text.getSpans(3, 4, ReplacementSpan.class).length > 0);
+        assertEquals("three seams, one per CJK character that touches Latin or a digit", 3,
+                text.getSpans(0, text.length(), DocxTextLayout.AutoGap.class).length);
+        assertTrue(text.getSpans(0, 1, ReplacementSpan.class).length > 0);   // 中 | A
+        assertTrue(text.getSpans(2, 3, ReplacementSpan.class).length > 0);   // A | 中 and 中 | 1, one span
+        assertTrue(text.getSpans(4, 5, ReplacementSpan.class).length > 0);   // 1 | 中
     }
 
     @Test public void cjkPunctuationEdgesGetNoAutoGap() {
@@ -67,15 +69,27 @@ public class AutoSpaceTest {
         assertEquals(0, text.getSpans(0, text.length(), ReplacementSpan.class).length);
     }
 
-    @Test public void enabledAutoSpacePlacesGapAfterLeftBoundaryCharacter() {
+    /**
+     * Where the quarter em sits. It used to ride the character on the left of the seam, which put a
+     * ReplacementSpan edge inside the Latin run; StaticLayout reads a span edge as a break opportunity
+     * and cut the word in half -- "...SB/C" | "u 夹层结构" on page 8 of the phone, 10 lines of the thesis
+     * like that (tools/midword-audit.py on
+     * artifacts/agent-layout-verify/revert-linear/new/lines-all.tsv: token_cut=10, and 1 after the move).
+     * Word cuts 0 of its 238 real breaks inside a token (tools/break-class-truth.py) and the same phone
+     * breaks an untouched token before it (tools/breakiterator-probe.ps1 -Probe ScriptBreakProbe,
+     * variant A vs B/C). So every seam rides the Chinese character, and the Latin and digit sides stay
+     * span-free.
+     */
+    @Test public void everySeamRidesTheChineseCharacterOfTheBoundary() {
         DocxDocument.ParagraphBlock p = paragraph(true, true);
         Spanned text = (Spanned) DocxTextLayout.measure(p, 400).layout.getText();
-        // Boundaries are 中|A, A|中, 中|1 and 1|中. The gap belongs after
-        // the left character because ReplacementSpan adds width after itself.
-        assertTrue(text.getSpans(0, 1, ReplacementSpan.class).length > 0);
-        assertTrue(text.getSpans(1, 2, ReplacementSpan.class).length > 0);
-        assertTrue(text.getSpans(2, 3, ReplacementSpan.class).length > 0);
-        assertTrue(text.getSpans(3, 4, ReplacementSpan.class).length > 0);
-        assertEquals(0, text.getSpans(4, 5, ReplacementSpan.class).length);
+        // 中A中1中: seams 中|A, A|中, 中|1, 1|中 ride 中(0), 中(2), 中(2), 中(4).
+        assertTrue(text.getSpans(0, 1, DocxTextLayout.AutoGap.class).length > 0);
+        assertTrue(text.getSpans(2, 3, DocxTextLayout.AutoGap.class).length > 0);
+        assertTrue(text.getSpans(4, 5, DocxTextLayout.AutoGap.class).length > 0);
+        assertEquals("the A carries no seam of its own", 0,
+                text.getSpans(1, 2, ReplacementSpan.class).length);
+        assertEquals("neither does the 1", 0,
+                text.getSpans(3, 4, ReplacementSpan.class).length);
     }
 }

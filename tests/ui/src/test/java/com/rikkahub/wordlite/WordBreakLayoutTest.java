@@ -54,13 +54,18 @@ public class WordBreakLayoutTest {
     @Test public void kimPunctuationEdgesCarryNoAutoGap() throws Exception {
         Spanned text = (Spanned) layout(kim()).getText();
         int comma = kim().text.indexOf("Sn\uff0c\u4f5c\u8005") + 1; // the ， after Cu₃Sn
-        assertEquals(0, text.getSpans(comma - 1, comma, ReplacementSpan.class).length);
+        // Asked for any ReplacementSpan this now answers with the token span that owns "Cu6Sn5";
+        // the rule under test is that no autoSpace gap rides a punctuation edge, so ask for that.
+        assertEquals(0, text.getSpans(comma - 1, comma, DocxTextLayout.AutoGap.class).length);
         int dunhao = kim().text.indexOf("\u30010.1"); // 、 before 0.1
         assertTrue(dunhao > 0);
         assertEquals(0, text.getSpans(dunhao, dunhao + 1, ReplacementSpan.class).length);
-        // Positive control: the ideograph boundary "a|条" keeps its gap.
-        int mpaA = kim().text.indexOf("MPa\u6761\u4ef6") + 2;
-        assertTrue(text.getSpans(mpaA, mpaA + 1, ReplacementSpan.class).length > 0);
+        // Positive control: the ideograph boundary "a|条" keeps its gap, and it rides 条 -- the side Word
+        // bills it on and the only side that cannot cut a word (docs/layout-parity-target.md 第 24.2 节).
+        int tiao = kim().text.indexOf("MPa\u6761\u4ef6") + 3;
+        assertTrue(text.getSpans(tiao, tiao + 1, DocxTextLayout.AutoGap.class).length > 0);
+        assertEquals("the last Latin letter of MPa carries no seam", 0,
+                text.getSpans(tiao - 1, tiao, DocxTextLayout.AutoGap.class).length);
     }
 
     /** U+2086 renders as its real glyph at full size, not a scaled plain digit. */
@@ -70,11 +75,12 @@ public class WordBreakLayoutTest {
         DocxTextLayout.WordScriptSpan[] spans =
                 text.getSpans(at, at + 1, DocxTextLayout.WordScriptSpan.class);
         assertEquals(1, spans.length);
-        assertTrue(spans[0].isUnicode());
+        DocxTextLayout.WordScriptSpan span = spans[0];
+        assertTrue(span.isUnicode());
         android.graphics.Paint paint = new android.graphics.Paint();
         paint.setTextSize(16f);
         float expected = (float) Math.ceil(paint.measureText(text, at, at + 1));
-        assertEquals(expected, spans[0].getSize(paint, text, at, at + 1, null), 0.01f);
+        assertEquals(expected, span.getSize(paint, text, at, at + 1, null), 0.01f);
     }
 
     private StaticLayout layout(DocxDocument.ParagraphBlock paragraph) {

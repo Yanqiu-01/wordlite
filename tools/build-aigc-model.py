@@ -160,6 +160,14 @@ HOLDOUT_TIERS = [
     ("M-DOMAIN", "tests/corpus/aigc-label-machine-domain.txt", 1, "与 H1 同领域同主题逐段配对的机器稿"),
 ]
 TEMPLATE_TIERS = [("TPL-CARTOON", "tests/corpus/aigc-cartoon.txt"), ("TPL-FRAMES", "tests/corpus/aigc-frames.txt")]
+
+# 第二把尺子：段落级真人真稿（120~656 字/段，多篇、多作者、逐篇带许可）。
+# 上面那 995 句真稿基本出自一份稿子，真人侧只有 624 句——"误报 <= 2 句/千句"这条门槛在那么小的分母上
+# 量不准（2/1000 x 624 = 1.2 句，一句之差就翻盘）。新集把真人侧做到几千段，来源与许可逐篇记在
+# tests/corpus/aigc-holdout2-manifest.json，原文留在仓库外；构建与自审见 tools/build-holdout-corpus.py。
+HOLDOUT2_DEFAULT = os.path.join(DEFAULT_DATA, "holdout2", "segments.jsonl")
+BANDS = [(120, 199), (200, 319), (320, 479), (480, 656)]
+BAND_LABELS = ["120-199", "200-319", "320-479", "480-656"]
 # ---------------------------------------------------------------- 归一化与切句（口径抄 TextCorpus）
 
 BLANKS = {0x20, 0x09, 0x0A, 0x0D, 0x0C, 0x0B, 0x85, 0xA0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000}
@@ -475,6 +483,66 @@ def holdout_rows(repo, norm):
                 if scoreable(c):
                     rows.append((code, lab, i, sent, c))
     return rows
+
+
+def holdout2_rows(path, norm):
+    """段落级真人真稿：一行一段，整段算一个计分单位（应用侧对段落打分本来就没有 300 字上限，
+    MIN_SENT~300 那条是训练侧的口径）。返回 [(sid, paper_group, discipline, band, raw, compact, license)]。
+    文件不在就返回空表：新集缺了只影响新那一档，不许把老口径的量法悄悄改掉。"""
+    if not os.path.exists(path):
+        print("段落级真稿留出缺文件（%s）：只跑老的句级口径" % path)
+        return []
+    out = []
+    for line in io.open(path, encoding="utf-8"):
+        r = json.loads(line)
+        out.append((r["sid"], r["paper_group"], r["discipline"], int(r["band"]), r["text"],
+                    norm.compact(r["text"]), r.get("license") or ""))
+    return out
+
+
+def holdout2_stats(big, p_big, p_machine):
+    """段落级那一档：AUC(机器>真人)、真人误报，再按 学科 x 长度带 分格。
+    机器侧仍用真稿留出里那三个机器档的句子——新集只有真人侧，真人侧不许拿模型生成的东西补齐，
+    所以这一档的 AUC 是"几千段真人 对 那几百句机器"，两边条数不对称，看数的时候记住这一条。"""
+    hum = np.asarray(p_big, dtype=np.float64)
+    mac = np.asarray(p_machine, dtype=np.float64)
+    y = np.concatenate([np.zeros(len(hum)), np.ones(len(mac))])
+    sc = np.concatenate([hum, mac])
+    n = max(1, len(hum))
+    out = dict(n=int(len(hum)), auc=round(auc(y, sc), 4),
+               p_p50=round(float(np.percentile(hum, 50)), 4), p_p90=round(float(np.percentile(hum, 90)), 4),
+               fp_per_mille_at_045=round(1000.0 * float(np.sum(hum >= FLAG_GATE)) / n, 3),
+               fp_per_mille_at_050=round(1000.0 * float(np.sum(hum >= 0.5)) / n, 3),
+               machine_n=int(len(mac)),
+               machine_hit_percent_at_045=round(100.0 * float(np.sum(mac >= FLAG_GATE)) / max(1, len(mac)), 2))
+    need = int(math.ceil(len(hum) * (1.0 - GATE_FP_PER_MILLE / 1000.0))) - 1
+    thr = float(np.sort(hum)[max(0, min(need, len(hum) - 1))]) if len(hum) else 1.0
+    out["operating_point"] = dict(
+        threshold=round(thr, 4),
+        machine_hit_percent=round(100.0 * float(np.sum(mac >= thr)) / max(1, len(mac)), 2),
+        human_fp_per_mille=round(1000.0 * float(np.sum(hum >= thr)) / n, 3))
+
+    def cell(sel):
+        v = hum[sel]
+        if not len(v):
+            return None
+        yy = np.concatenate([np.zeros(len(v)), np.ones(len(mac))])
+        ss = np.concatenate([v, mac])
+        return dict(n=int(len(v)), flag_percent=round(100.0 * float(np.mean(v >= FLAG_GATE)), 2),
+                    fp_per_mille=round(1000.0 * float(np.sum(v >= FLAG_GATE)) / len(v), 2),
+                    p_p50=round(float(np.percentile(v, 50)), 4), p_p90=round(float(np.percentile(v, 90)), 4),
+                    auc_vs_machine=round(auc(yy, ss), 4))
+
+    disc = np.array([r[2] for r in big])
+    band = np.array([r[3] for r in big])
+    out["by_discipline_band"] = dict(
+        (d, dict([(BAND_LABELS[i], cell((disc == d) & (band == i))) for i in range(len(BANDS))] +
+                 [("合计", cell(disc == d))])) for d in sorted(set(disc)))
+    out["by_discipline"] = dict((d, cell(disc == d)) for d in sorted(set(disc)))
+    out["by_band"] = dict((BAND_LABELS[i], cell(band == i)) for i in range(len(BANDS)))
+    out["papers"] = len(set(r[1] for r in big))
+    out["licenses"] = dict(Counter(r[6] for r in big))
+    return out
 
 
 def template_rows(repo, norm):
@@ -881,6 +949,8 @@ def stage_compare(args):
     norm = Normalizer(load_trad_table())
     ho = holdout_rows(args.repo, norm)
     yh = np.array([r[1] for r in ho])
+    big = holdout2_rows(getattr(args, "holdout2", HOLDOUT2_DEFAULT), norm)
+    mach_mask = np.array([HOLDOUT_TIERS_ONLY_MACHINE(r[0]) for r in ho])
     out_rows = []
     wanted = set(args.configs.split(",")) if getattr(args, "configs", "") else None
     for cfg in CONFIGS:
@@ -912,14 +982,25 @@ def stage_compare(args):
                else dict(n=0, auc=None, fp_per_mille=None, machine_hit_percent=None))
         p = sigmoid(m2.decision_function(vectors([q[4] for q in ho], vec, cols)) + bias)
         real = side(p, yh)
+        big_st = None
+        if big:
+            p_big = sigmoid(m2.decision_function(vectors([q[5] for q in big], vec, cols)) + bias)
+            big_st = holdout2_stats(big, p_big, p[mach_mask])
         out_rows.append(dict(name=cfg["name"], n=r["n"], features=len(cols),
                              academic_proxy=academic_proxy(r), public=pub, academic=aca, holdout=real,
-                             modern_academic_proxy=modern_academic_proxy(r)))
+                             modern_academic_proxy=modern_academic_proxy(r), real_paragraph_scale=big_st))
         print("[%s] 句 %-7d  ① 公共 %.4f / 误报 %.2f  ② 学术 %s / 误报 %s  ③ 真稿 %.4f / 误报 %.2f / 机器过线 %.2f%%" %
               (cfg["name"], r["n"], pub["auc"], pub["fp_per_mille"],
                ("%.4f" % aca["auc"]) if aca["auc"] is not None else "  —  ",
                ("%.2f" % aca["fp_per_mille"]) if aca["fp_per_mille"] is not None else "  —  ",
                real["auc"], real["fp_per_mille"], real["machine_hit_percent"]), flush=True)
+        if big_st:
+            worst = sorted([(c["fp_per_mille"], d + " " + lab)
+                            for d, row in big_st["by_discipline_band"].items()
+                            for lab, c in row.items() if c and c["n"] >= 40], reverse=True)[:3]
+            print("        ③c 段落级真稿 %.4f / 误报 %.2f 段/千段（%d 段）  误报最高的格子：%s" %
+                  (big_st["auc"], big_st["fp_per_mille_at_045"], big_st["n"],
+                   "  ".join("%s %.1f" % (nm, f) for f, nm in worst)), flush=True)
 
     def pear(a, b):
         if len(a) < 3:
@@ -1139,6 +1220,20 @@ def stage_gate(args, cache=None):
     fp05 = 1000.0 * float(np.sum(p[yh == 0] >= 0.5)) / max(1, int((yh == 0).sum()))
     hit = 100.0 * float(np.sum(p[yh == 1] >= FLAG_GATE)) / max(1, int((yh == 1).sum()))
     sent_auc = round(auc(yh, p), 4)
+
+    # 新那把尺子：段落级真人真稿。机器侧仍用上面那三个机器档——真人侧不许用模型生成的东西补齐。
+    big = holdout2_rows(getattr(args, "holdout2", HOLDOUT2_DEFAULT), norm)
+    holdout_big = None
+    gates_big = None
+    if big:
+        p_big = sigmoid(model.decision_function(vectors([r[5] for r in big], vec, cols)) + bias)
+        mach = p[np.array([HOLDOUT_TIERS_ONLY_MACHINE(c) for c in codes])]
+        holdout_big = holdout2_stats(big, p_big, mach)
+        gates_big = dict(n=holdout_big["n"], auc=holdout_big["auc"],
+                         auc_pass=bool(holdout_big["auc"] >= GATE_AUC),
+                         fp_per_mille=holdout_big["fp_per_mille_at_045"],
+                         fp_pass=bool(holdout_big["fp_per_mille_at_045"] <= GATE_FP_PER_MILLE))
+        gates_big["calibrated"] = bool(gates_big["auc_pass"] and gates_big["fp_pass"])
     seg = {}
     for r, pv in zip(ho, p):
         seg.setdefault((r[0], r[2]), []).append(float(pv))
@@ -1261,7 +1356,7 @@ def stage_gate(args, cache=None):
                                  mean=round(float(np.mean(lodo_vals)), 4) if lodo_vals else None,
                                  worst=round(float(np.min(lodo_vals)), 4) if lodo_vals else None,
                                  note="轮流把整个域从拟合侧撤掉，只在被撤掉那个域的公共留出上量分；真稿留出全程没参与"),
-               domain_gap=domain_gap, length_norm_probe=norm_probe,
+               domain_gap=domain_gap, length_norm_probe=norm_probe, holdout_big=holdout_big,
                holdout=dict(n=int(len(ho)), auc=sent_auc, auc_paragraph=seg_auc,
                             per_file=per_file, pair_auc=pair_auc, length_only_auc=len_only_auc,
                             fp_per_mille_at_045=round(fp, 3), fp_per_mille_at_050=round(fp05, 3),
@@ -1279,6 +1374,8 @@ def stage_gate(args, cache=None):
                           auc_pass=sent_auc >= GATE_AUC, fp_pass=fp <= GATE_FP_PER_MILLE,
                           template_pass=tpl_hit >= GATE_TEMPLATE_HIT, human_window_pass=hum_hit <= GATE_HUMAN_WINDOW))
     out["gates"]["calibrated"] = bool(out["gates"]["auc_pass"] and out["gates"]["fp_pass"])
+    # 新那把尺子单独判一次：3.0.0 的门槛该认这一档（几千段真人），不是老的 995 句
+    out["gates_real_paragraph_scale"] = gates_big
     out["gates"]["window_calibrated"] = bool(out["gates"]["template_pass"] and out["gates"]["human_window_pass"])
     json.dump(out, io.open(os.path.join(ART, "gate.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     with open(os.path.join(ART, "freq-cache.pkl"), "wb") as f:
@@ -1291,6 +1388,19 @@ def stage_gate(args, cache=None):
               (academic["auc"], academic["fp_per_mille_at_045"], academic["machine_hit_percent_at_045"], academic["n"]))
     print("  ③ 真稿独立留出    AUC %.4f  真人误报 %.2f 句/千句  机器过线 %.2f%%（%d 句）  段级 %.4f" %
           (sent_auc, fp, hit, len(ho), seg_auc))
+    if holdout_big:
+        print("  ③c 段落级真稿      AUC %.4f  真人误报 %.2f 段/千段（%d 段 / %d 篇，机器侧仍用 ③ 那 %d 句）" %
+              (holdout_big["auc"], holdout_big["fp_per_mille_at_045"], holdout_big["n"],
+               holdout_big["papers"], holdout_big["machine_n"]))
+        cells = []
+        for d, row in holdout_big["by_discipline_band"].items():
+            for lab, c in row.items():
+                if c and c["n"] >= 40:
+                    cells.append((c["fp_per_mille"], d + " " + lab, c["n"], c["auc_vs_machine"]))
+        cells.sort(reverse=True)
+        print("      按 学科 x 长度带 排，真人误报最高的格子：")
+        for f, name, nn, au in cells[:6]:
+            print("        %-44s n=%-5d 误报 %-7.2f 段/千段  对机器 AUC %.4f" % (name[:44], nn, f, au))
     if lodo_vals:
         print("  跨域留出（撤掉整个域再考）均值 %.4f 最差 %.4f（%d 个域）" %
               (float(np.mean(lodo_vals)), float(np.min(lodo_vals)), len(lodo_vals)))
@@ -1517,6 +1627,8 @@ def main():
     ap.add_argument("--redo", action="store_true")
     ap.add_argument("--configs", default="", help="只跑这些配置，逗号分隔；空=全跑")
     ap.add_argument("--no-lodo", action="store_true", help="跳过跨域留出（只用于快速调试）")
+    ap.add_argument("--holdout2", default=HOLDOUT2_DEFAULT,
+                    help="段落级真人真稿留出（tools/build-holdout-corpus.py build 的产物，留在仓库外）")
     a = ap.parse_args()
     if a.stage in ("fetch", "all"):
         stage_fetch(a)
