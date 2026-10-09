@@ -245,6 +245,8 @@ git cat-file -t <那个号>
 
 
 **往用户机器上装东西这件事不许自己批**（2026-10-09 定的）：装软件、装运行时、拉大模型权重、任何几十 GB 的下载，一律先报上来等答复。造语料、跑基线优先用现成的网络接口与仓库里已缓存的数据；本机推理这条路对这个项目已取消，llama.cpp / Ollama / GGUF 这一族方案不再提。
+
+**快照目录里的 junction 在删之前必须先斩掉**（2026-10-09 午后踩的，代价是整套 Android 构建工具链消失一个多小时）：快照里 `artifacts\host-tools` 是指向 `Wordlite\artifacts\host-tools` 的 junction，`Remove-Item -Recurse` / `shutil.rmtree` 会穿过它去删目标，于是 `android-sdk\build-tools\35.0.0\`（aapt2 / zipalign / apksigner）被一起带走，所有出包直接斩掉。正纴法：删快照先 `cmd /c rmdir <快照>\artifacts\host-tools`（这句只斩链接、不碰目标），再删目录；或者根本别建 junction，直接给 `pwsh tools/build-host.ps1 -BuildTools E:\download\claude\Wordlite\artifacts\host-tools\android-sdk\build-tools\35.0.0`。工具链重装后实测：`tools/build-host.ps1` 走通（APK 202,313,032 字节，v1/v2/v3 签名验证通过），`tools/test-host.ps1` 42 套全绿。
 验不过就当它没提交。发版只从 `main` 走（`tools/release-version.ps1 -Isolated` 会开一棵 main 的干净副本），所以工作区里未提交的改动再多也不会被发出去——这是保险，不是省事：没进 `main` 的东西等于没做。
 
 ## 版本账（2.4.0 这轮对一次总数，免得各说各话）
