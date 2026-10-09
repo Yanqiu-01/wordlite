@@ -1806,8 +1806,9 @@ public final class DuplicateEngine {
             /* 还只有摘要可比、题录里又带着这三家的详情页 URL：配了过验证服务就再用浏览器取一次。
                检索协议给的是 128 字预览，浏览器渲染出来的同一页给的是完整摘要加万方那份全文精要，
                这是中文这一侧匿名唯一一条能拿到厚材料的路上。取不到就照旧按摘要比，不虚报。 */
-            if (!fetched && !cancelled(cancellation) && limits.solver != null
-                    && limits.solver.trim().length() > 0 && body.length() < BROWSER_BODY_FLOOR
+            if (!fetched && !cancelled(cancellation)
+                    && ChallengeSolver.resolve(limits.solver).length() > 0
+                    && body.length() < BROWSER_BODY_FLOOR
                     && deadline - System.currentTimeMillis() > limits.timeoutSeconds * 1000L + 1000L) {
                 String got = PaperSources.browserDetail(candidate, limits, cancellation);
                 if (got != null && !got.trim().isEmpty()) {

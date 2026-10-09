@@ -31,7 +31,7 @@ public final class EngineSettings {
      *  a phone on a network that resets these hosts needs one to retrieve anything at all. */
     public String proxy = "";
     /** 可选的过验证服务地址（FlareSolverr，写成 http://192.168.1.20:8191）。知网、万方、维普
-     *  回人机验证壳页时由它开一个真浏览器过一道，手机只当客户端。留空 = 不走过验证这条路。 */
+     *  回人机验证壳页时由它开一个真浏览器过一道，手机只当客户端。留空 = 自动试回环上的 8191，也就是电脑上那一台（跑过 tools/phone-gateway.ps1 之后它就在手边）。 */
     public String solver = "";
 
     public EngineSettings() {

@@ -29,6 +29,8 @@ public final class ChallengeSolverRegression {
     }
 
     public static void main(String[] args) throws Exception {
+        // 这台电脑上可能真开着 FlareSolverr：先关掉回环自动发现，否则没配地址那些断言会打到真服务上。
+        ChallengeSolver.overrideLoopback(0, 1);
         address();
         protocol();
         parsing();
@@ -39,6 +41,8 @@ public final class ChallengeSolverRegression {
         legacyKey();
         detailUrls();
         budget();
+        autodiscover();
+        ChallengeSolver.restoreLoopback();
         System.out.println("SUMMARY " + count + " solver assertions");
     }
 
@@ -254,6 +258,49 @@ public final class ChallengeSolverRegression {
                     "总额度封顶不许被突破：实际 " + stub.calls.get() + " 次，上限 "
                             + ChallengeSolver.MAX_SOLVE_PER_PASS + " 次");
         } finally {
+            stub.stop();
+        }
+    }
+
+    /**
+     * 手机自己跑不了浏览器，值钱的是电脑上那一台：设置留空时试一眼回环，有人听就用，
+     * 没人听当场冷却，绝不为一台不存在的服务反复花连接时间。
+     */
+    /**
+     * 手机自己跑不了浏览器，值钱的是电脑上那一台：设置留空时试一眼回环，有人听就用，
+     * 没人听当场冷却，绝不为一台不存在的服务反复花连接时间。
+     */
+    private static void autodiscover() throws Exception {
+        Stub stub = Stub.start(WITH_COOKIES);
+        java.net.ServerSocket spare = new java.net.ServerSocket(0);
+        int sparePort = spare.getLocalPort();
+        spare.close();
+        java.net.ServerSocket late = null;
+        try {
+            int port = stub.server.getAddress().getPort();
+            ChallengeSolver.overrideLoopback(port, 300);
+            check(("http://127.0.0.1:" + port).equals(ChallengeSolver.resolve("")),
+                    "设置留空也能找到回环上那一台：" + ChallengeSolver.resolve(""));
+            ChallengeSolver.reset();
+            LinkedHashMap<String, String> headers = new LinkedHashMap<String, String>();
+            check(ChallengeSolver.attach("", stub.url(), headers, 20, null, null)
+                            && stub.calls.get() == 1 && "cf_clearance=abc".equals(headers.get("Cookie")),
+                    "留空时检索请求照样贴上过验证的 cookie（服务由回环自动发现）");
+            check("http://127.0.0.1:18899".equals(ChallengeSolver.resolve("127.0.0.1:18899")),
+                    "用户自己填的地址永远压过自动发现");
+            ChallengeSolver.overrideLoopback(sparePort, 300);
+            check(ChallengeSolver.resolve("").length() == 0, "回环上没人听就回空串，检索照旧只按摘要比");
+            check(ChallengeSolver.autoDownUntil() > System.currentTimeMillis(),
+                    "没人听过这一次要记下冷却时间：" + ChallengeSolver.autoDownUntil());
+            late = new java.net.ServerSocket(sparePort);
+            check(ChallengeSolver.resolve("").length() == 0,
+                    "冷却期内即使有人刚站起来也不再探第二次");
+            ChallengeSolver.overrideLoopback(sparePort, 300);
+            check(("http://127.0.0.1:" + sparePort).equals(ChallengeSolver.resolve("")),
+                    "冷却过了就重新排队：拔线又插回来、FlareSolverr 刚开起来都算");
+        } finally {
+            if (late != null) late.close();
+            ChallengeSolver.restoreLoopback();
             stub.stop();
         }
     }

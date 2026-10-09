@@ -866,7 +866,7 @@ public final class ApiWorkflow {
         final EditText core = field(engine.coreKey, "CORE API Key（可留空）");
         final EditText proxy = field(engine.proxy, "HTTP 代理 host:port（海外检索源需经电脑代理时填写，可留空）");
         final EditText solver = field(engine.solver,
-                "过验证服务地址（FlareSolverr，例如 http://192.168.1.20:8191，可留空）");
+                "过验证服务地址（FlareSolverr，例如 http://192.168.1.20:8191；留空则自动试电脑上的 127.0.0.1:8191）");
         box.addView(perEngine); box.addView(timeout); box.addView(windows); box.addView(core);
         box.addView(proxy); box.addView(solver);
         ScrollView scroll = new ScrollView(activity); scroll.addView(box);

@@ -137,6 +137,75 @@ public final class ChallengeSolver {
                 : "检索页这一路的浏览器额度已用完（每轮 " + ceiling(false) + " 次，剩下的留给详情页）";
     }
 
+    /** 过验证服务在电脑上的默认端口：FlareSolverr 的默认值，USB 反代也指到这里。 */
+    public static final int LOOPBACK_PORT = 8191;
+    /** 回环上探过一次没人听，多久之内不再探。USB 反代随拔线一起消失，每扇窗口重探一次太贵。 */
+    static final long AUTO_PROBE_COOLDOWN_MILLIS = 5 * 60 * 1000L;
+    static final int AUTO_PROBE_CONNECT_MILLIS = 400;
+    /** 回归夹具注入点：跑完必须还原，做法参照 DuplicateEngine.searchMillis。 */
+    static int loopbackProbePort = LOOPBACK_PORT, autoProbeConnectMillis = AUTO_PROBE_CONNECT_MILLIS;
+    private static long autoDownUntil;
+    private static String autoHit = "";
+
+    /**
+     * 检索与详情页真正要用的服务地址：用户在设置里填了就用他的，留空时试一眼回环上那一台。
+     *
+     * <p>手机自己跑不了浏览器，值钱的是电脑上那一台，而 {@code tools/phone-gateway.ps1} 本来就把
+     * {@code adb reverse tcp:8191} 建好了——那之后应用里这一格还空着就等于视而不见。端口上有人在听
+     * 就用它，没人听记下时间冷却五分钟，检索照旧只按摘要比，一分钟也不为它多等。</p>
+     */
+    public static String resolve(String raw) {
+        String explicit = endpoint(raw);
+        if (explicit.length() > 0) return explicit;
+        long now = System.currentTimeMillis();
+        synchronized (ChallengeSolver.class) {
+            if (autoHit.length() > 0) return autoHit;
+            if (now < autoDownUntil) return "";
+        }
+        String found = listening() ? "http://127.0.0.1:" + loopbackProbePort : "";
+        synchronized (ChallengeSolver.class) {
+            if (found.length() > 0) autoHit = found;
+            else autoDownUntil = System.currentTimeMillis() + AUTO_PROBE_COOLDOWN_MILLIS;
+        }
+        return found;
+    }
+
+    private static boolean listening() {
+        java.net.Socket socket = new java.net.Socket();
+        try {
+            socket.connect(new java.net.InetSocketAddress("127.0.0.1", loopbackProbePort),
+                    Math.max(1, autoProbeConnectMillis));
+            return true;
+        } catch (IOException error) {
+            return false;
+        } finally {
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+                // 探听过而已，关不上也不影响结论。
+            }
+        }
+    }
+
+    /** 回归夹具：把冷却与命中的记忆清掉，并把探测端口换成假服务的端口。 */
+    static synchronized void overrideLoopback(int port, int connectMillis) {
+        loopbackProbePort = port;
+        autoProbeConnectMillis = connectMillis;
+        autoDownUntil = 0L;
+        autoHit = "";
+    }
+
+    static synchronized void restoreLoopback() {
+        loopbackProbePort = LOOPBACK_PORT;
+        autoProbeConnectMillis = AUTO_PROBE_CONNECT_MILLIS;
+        autoDownUntil = 0L;
+        autoHit = "";
+    }
+
+    static synchronized long autoDownUntil() {
+        return autoDownUntil;
+    }
+
     /**
      * 把设置里那一格变成能用的地址。允许只写 host:port（跟代理那一格同一个手感），
      * 也允许写全 http://host:8191/。空的一律回空串 = 这条路不走。
@@ -220,7 +289,7 @@ public final class ChallengeSolver {
     public static boolean attach(String endpoint, String targetUrl, Map<String, String> headers,
                                  int timeoutSeconds, java.net.Proxy via,
                                  ApiClient.Cancellation cancellation) {
-        String api = endpoint(endpoint);
+        String api = resolve(endpoint);
         if (api.length() == 0) return false;
         String host = hostOf(targetUrl);
         if (host.length() == 0 || headers == null) return false;
@@ -258,7 +327,7 @@ public final class ChallengeSolver {
      */
     public static String fetch(String endpoint, String url, int timeoutSeconds,
                                java.net.Proxy via, ApiClient.Cancellation cancellation) {
-        String api = endpoint(endpoint);
+        String api = resolve(endpoint);
         if (api.length() == 0 || url == null || url.length() == 0) return null;
         Session cached = PAGES.get(url);
         long now = System.currentTimeMillis();
