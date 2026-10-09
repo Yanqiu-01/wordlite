@@ -25,6 +25,14 @@ final class Routes {
     static final long LOOPBACK_COOLDOWN_MILLIS = 60000L;
     private static final LinkedHashMap<String, Long> DOWN_UNTIL = new LinkedHashMap<String, Long>();
     private static final LinkedHashMap<String, String> USED = new LinkedHashMap<String, String>();
+    /**
+     * 这个主机被拿到过的最真一句：某条路答了话（429/403/5xx 都算答了话），但整轮没走通。
+     * 真机 2026-10-09 09:38 的检索自检里，同一行前半句写着"代理 127.0.0.1:7897 答了 HTTP 429"，
+     * 后面那一栏却写"未走过"——答过话的路不能叫没走过。
+     */
+    private static final LinkedHashMap<String, String> ANSWERED = new LinkedHashMap<String, String>();
+    /** 这个主机的路停在连接层上的那一句（拒绝连接/超时/TLS 谈崩），用第一次量到的那条。 */
+    private static final LinkedHashMap<String, String> DEAD = new LinkedHashMap<String, String>();
     private static final LinkedHashMap<String, Proxy> KNOWN_GOOD = new LinkedHashMap<String, Proxy>();
     /** 这个主机的直连拨不上（连接被拒、超时、TLS 谈崩）。只用来把直连从队首挪到队尾，不做别的判断。 */
     private static final LinkedHashMap<String, Boolean> DIRECT_FAILED = new LinkedHashMap<String, Boolean>();
@@ -85,11 +93,35 @@ final class Routes {
     /**
      * 这个回环代理端口刚被当场拒回：没人监听，不是网络慢。记下冷却期，过后再试。
      * 只认自动发现的那两个端口——用户自己填的代理照原样再撞，那是他显式要的路。
+     *
+     * <p>「只认那两个端口」得真的在这一行也成立。用户在设置里填的是另一个回环端口时（实测填过
+     * 127.0.0.1:18899），旧写法把它也记进冷却表，于是 {@link #anyPortDown()} 从此说"回环上的代理
+     * 端口没人监听"，自检把用户支去跑 tools/phone-gateway.ps1，而真正在用的 7897 一直好着。</p>
      */
     static synchronized void portRefused(Proxy via) {
-        if (via == null || !isLoopbackProxy(via)) return;
+        if (!isAutodiscovered(via)) return;
         long until = System.nanoTime() / 1000000L + LOOPBACK_COOLDOWN_MILLIS;
         DOWN_UNTIL.put(address(via), Long.valueOf(until));
+    }
+
+    /**
+     * 这条路刚把请求送出去并拿到了答话（哪怕回的是一句 429）：端口上有人在听，冷却当场作废。
+     *
+     * <p>不记这一笔，一轮几十扇窗口里的一次抖动就够把一条活路藏起来六十秒。实测形状：Clash 重载
+     * 配置的那几秒钟里 7897 被拒回一次而进冷却，紧接着 OpenAlex 明明经它取回过 60 篇候选，后面几个
+     * 海外源的候选队列里却排不到它——那一路只剩 lastGood 一根独木，而 lastGood 是全局的，国内源
+     * 一次直连走通就把它换成直连了。</p>
+     */
+    static synchronized void proofOfLife(Proxy via) {
+        if (via != null) DOWN_UNTIL.remove(address(via));
+    }
+
+    /** 这条路是不是自动发现要排队的那两个回环端口之一。别的地址不归冷却表管，直连（null）也不。 */
+    private static boolean isAutodiscovered(Proxy via) {
+        if (via == null || !isLoopbackProxy(via)) return false;
+        int port = ((InetSocketAddress) via.address()).getPort();
+        for (int known : LOOPBACK_PORTS) if (known == port) return true;
+        return false;
     }
 
     /** 当前有没有一个自动发现的回环端口在冷却：自检的提示语要看它，才知道该让用户去建反代还是换网络。 */
@@ -181,6 +213,7 @@ final class Routes {
     /** 哪条路通了就记住它，下一次同类请求先走这条，省得每扇窗口都把死路重撞一遍。 */
     static synchronized void succeeded(Proxy via) {
         lastGood = via;
+        proofOfLife(via);
     }
 
     /**
@@ -189,14 +222,26 @@ final class Routes {
      * 一条死直连是同一种错。调用方只在「路本身不通」时进来，对方返回 403/429 不算（换条路也是同样答复）。
      */
     static synchronized void failed(String url, Proxy via) {
+        failed(url, via, null);
+    }
+
+    /**
+     * 同上，再带上这条路的下场（"拒绝连接"/"超时"/"TLS 握手失败"，与失败句子里同一套词，
+     * 同一行不出现两种说法）。这一笔只给自检那一栏看，选路判据一个字不沾。
+     */
+    static synchronized void failed(String url, Proxy via, String state) {
         String host = host(url);
         if (host.isEmpty()) return;
+        if (state != null) remember(DEAD, host, label(via) + " " + state);
         if (via == null) {
             DIRECT_FAILED.put(host, Boolean.TRUE);
             while (DIRECT_FAILED.size() > 32) DIRECT_FAILED.remove(DIRECT_FAILED.keySet().iterator().next());
             return;
         }
-        KNOWN_GOOD.remove(host);
+        /* 只有"为这台主机走通的那条路自己没通"才撤账。别的拨不上——用户在设置里填的死地址、
+           刚拔掉的另一条反代——不许顺手抹掉这条主机的 proven：抹掉之后这条活路在这个主机上只剩
+           lastGood 一根独木，而 lastGood 是全平台一个，国内源一次直连走通就把它换成直连了。 */
+        if (same(KNOWN_GOOD.get(host), via)) KNOWN_GOOD.remove(host);
     }
 
     /** 找过的路全列出来：自检失败时用户最需要知道的是"到底试过哪几条"，而不是又一句"网络失败"。 */
@@ -220,10 +265,36 @@ final class Routes {
         while (USED.size() > 32) USED.remove(USED.keySet().iterator().next());
     }
 
-    /** 这个主机最后走通了哪条路；没走过就直说没走过，不猜。 */
+    /**
+     * 哪条路把请求送出去并拿到了答话（429/403/5xx 都算答了话）：记一笔"这条路答了 429"。
+     * 真走通那一档仍归 {@link #note} 记，这一笔只补"答过话但整轮没走通"那一段。
+     */
+    static synchronized void answered(String url, Proxy via, int status) {
+        String host = host(url);
+        if (host.isEmpty() || status <= 0) return;
+        remember(ANSWERED, host, label(via) + " 答了 " + status);
+    }
+
+    /** 一笔主机账：留第一次量到的那句，同一主机后来的下场不改口；上限 32 台主机。 */
+    private static void remember(LinkedHashMap<String, String> ledger, String host, String text) {
+        if (ledger.containsKey(host)) return;
+        ledger.put(host, text);
+        while (ledger.size() > 32) ledger.remove(ledger.keySet().iterator().next());
+    }
+
+    /**
+     * 自检那一栏：这个主机这一轮到底怎么样。三档各说一句，谁真听谁。
+     * ①走通过：只写那条路（`代理 127.0.0.1:7897`）；②没走通但有路答过话：写那条路加它答的那一句
+     * （`代理 127.0.0.1:7897 答了 429`），这一档绝不能出现"未走过"；③一条都没答话：写拨不通的
+     * 那条路撞上了什么（`没走通：直连 拒绝连接`）。只有这台主机一次都没被碰过才写"未走过"。
+     */
     static synchronized String routeFor(String host) {
-        String text = USED.get(host);
-        return text == null ? "未走过" : text;
+        String used = USED.get(host);
+        if (used != null) return used;
+        String answer = ANSWERED.get(host);
+        if (answer != null) return answer;
+        String dead = DEAD.get(host);
+        return dead == null ? "未走过" : "没走通：" + dead;
     }
 
     static synchronized String summary() {
@@ -239,6 +310,8 @@ final class Routes {
 
     static synchronized void reset() {
         USED.clear();
+        ANSWERED.clear();
+        DEAD.clear();
         KNOWN_GOOD.clear();
         DIRECT_FAILED.clear();
         DOWN_UNTIL.clear();

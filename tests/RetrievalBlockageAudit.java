@@ -174,6 +174,8 @@ public final class RetrievalBlockageAudit {
             server.stop(0);
         }
 
+        System.out.println("== 「路没走通」与「没问这个源」是两句话 ==");
+        noteSentences();
         System.out.println("== 三档收尾互不相同 ==");
         check(!closingNoRoute.equals(closingNoComparable) && !closingNoRoute.equals(closingMeasured)
                         && !closingNoComparable.equals(closingMeasured),
@@ -184,6 +186,33 @@ public final class RetrievalBlockageAudit {
         System.out.println("断言失败 " + failures + " 项");
         if (failures > 0) throw new AssertionError(failures + " 项断言失败");
         System.out.println("SUMMARY 检索被挡三档各说一句话，逐字核过（基准 e9f5322）");
+    }
+
+    /**
+     * 屏幕上那两半句必须分得开：一句讲出口（去修网络/代理），一句讲设置（去勾选检索源、补密钥）。
+     * 真机 2026-10-09 那条「已跳过 Crossref：试过的路都没通：直连 拒绝连接」就长在这条线上——
+     * 它挂的是 IOException 那一路，而「已跳过 X：」这个说法同时也被 IllegalArgumentException
+     * 那一路用着，两种"没问成"在屏幕上是一个形状。
+     */
+    private static void noteSentences() {
+        ApiClient.Failure roads = new ApiClient.Failure("试过的路都没通：直连 拒绝连接", 0);
+        String route = DuplicateEngine.skippedNote("Crossref", roads, true);
+        check(route.startsWith("已跳过 Crossref：" + DuplicateEngine.ROAD_EXHAUSTED_NOTE),
+                "连接层没建成：注记第一句就讲路，读的人知道该去看出口：" + route);
+        check(!route.contains("没问"), "这一轮问过它，不许说成没问：" + route);
+
+        String config = DuplicateEngine.skippedNote("CORE",
+                new IllegalArgumentException("CORE 未配置 API Key"), false);
+        check(config.startsWith("没问 CORE：") && config.contains("未配置 API Key"),
+                "被设置挡下的源说「没问」，并把是哪一条设置写出来：" + config);
+        check(!config.contains("路都没走通") && !config.contains("试过的路"),
+                "这一类与网络无关，不许蹭「路没通」的说法：" + config);
+
+        String answered = DuplicateEngine.skippedNote("Crossref",
+                new ApiClient.Failure("检索源拒绝访问（HTTP 403）", 403), true);
+        check(answered.equals("已跳过 Crossref：检索源拒绝访问（HTTP 403）"),
+                "源答了话就照抄那句答复，不许说成一条路都没走通：" + answered);
+        check(!route.equals(config), "两种「没问成」是两句不同的话");
     }
 
     private static void line(DuplicateEngine.Report report) {
@@ -210,6 +239,10 @@ public final class RetrievalBlockageAudit {
                 "老那句在这一档丢掉：同屏两句都在解释同一片空白，用户两句都不读");
         check(!notesMention(report, "个检索源里通了"),
                 "数字不重复第二遍：注记里不再补一行通了几个源");
+        check(notesMention(report, DuplicateEngine.ROAD_EXHAUSTED_NOTE),
+                "注记说的是「" + DuplicateEngine.ROAD_EXHAUSTED_NOTE.replace("——", "") + "」这一档，不是设置那一档");
+        check(!notesMention(report, "没问 "),
+                "这一轮每个源都真发过请求，不许出现「没问 X」那种说法");
         String html = CheckReport.html("thesis.docx", report);
         check(!html.contains("<td>总相似度比</td>"), "报告里没有总相似度比那一格");
         check(!html.contains("检索源连通"), "报告那张表也不重复那个数");

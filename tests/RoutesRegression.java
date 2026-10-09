@@ -1,5 +1,6 @@
 package com.rikkahub.wordlite;
 
+import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
 import java.util.ArrayList;
@@ -41,6 +42,11 @@ public final class RoutesRegression {
             routeLedger();
             refusedLoopbackPort();
             everyRoadReported();
+            answeredRoadWins();
+            refusedExplicitPortIsNotAPortDown();
+            livedRoadStaysQueued();
+            routeColumn();
+            refusedRoadKeepsProvenRoad();
         } finally {
             Routes.reset();
             restore("http.proxyHost", savedHost);
@@ -271,6 +277,8 @@ public final class RoutesRegression {
             check(error.refused, "拒绝连接单独记一笔，不和\"网络失败\"混成一类");
             check(error.getMessage().startsWith("网络连接失败"),
                     "只有一条路时报它自己的那句话——汇总只在该换路而没路可换时才加：" + error.getMessage());
+            check(Routes.routeFor("127.0.0.1:" + closed).equals("没走通：直连 拒绝连接"),
+                    "一条路都没答话时那一栏写清是哪条路拨不通：" + Routes.routeFor("127.0.0.1:" + closed));
         } catch (java.io.IOException error) {
             throw new AssertionError("预期拿到 ApiClient.Failure，实际 " + error);
         }
@@ -285,6 +293,181 @@ public final class RoutesRegression {
         } catch (java.io.IOException error) {
             throw new AssertionError("预期拿到 ApiClient.Failure，实际 " + error);
         }
+    }
+
+    /**
+     * 一条路拿到了源的答复、另一条路拨不上：报出去的那句话必须是那句答复，不许由拨不上的路代笔。
+     *
+     * <p>真机 2026-10-09 00:51 那一轮（华为 CDY-AN90 / Android 10 / 2.6.3，样稿 input-liu.docx，
+     * 整篇联网查重 98 秒）实测：同一轮里 OpenAlex 经电脑上 adb reverse 进来的 Clash（127.0.0.1:7897）
+     * 走通并取回 60 篇候选，而报告里 Crossref 与 Semantic Scholar 各有一句
+     * 「已跳过 X：试过的路都没通：直连 拒绝连接」。那两句里没有那条代理——可它刚刚在同一轮里为
+     * 另一个源送走过 60 篇候选。旧写法把"最后一条拨不上的路"当成整轮的下场，把那条代理拿回来的
+     * HTTP 429（匿名配额按出口 IP 计）整句顶掉了，用户读到的是"这台手机没试过代理"。</p>
+     */
+    private static void answeredRoadWins() {
+        Routes.reset();
+        final java.util.concurrent.atomic.AtomicInteger hits =
+                new java.util.concurrent.atomic.AtomicInteger();
+        HttpServer stub = null;
+        try {
+            stub = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            stub.createContext("/", exchange -> {
+                hits.incrementAndGet();
+                exchange.sendResponseHeaders(429, -1);
+                exchange.close();
+            });
+            stub.start();
+            int proxyPort = stub.getAddress().getPort();
+            int dead = closedLoopbackPort();
+            ApiClient.Failure thrown = null;
+            try {
+                HttpTransport.get("http://127.0.0.1:" + dead + "/search", null, 2, 0, null,
+                        Routes.parse("127.0.0.1:" + proxyPort));
+            } catch (ApiClient.Failure error) {
+                thrown = error;
+            } catch (java.io.IOException error) {
+                throw new AssertionError("预期拿到 ApiClient.Failure，实际 " + error);
+            }
+            check(thrown != null, "代理回了 429、直连被当场拒回：这一轮照样要抛，不许当成成功");
+            check(hits.get() == 1, "没给 Retry-After 的 429 只打一次（实打 " + hits.get() + " 次）");
+            check(thrown.status == 429, "报的是源给的 429，不是最后那条拨不上的路的零状态码（实得 status="
+                    + thrown.status + "）");
+            check(thrown.getMessage().startsWith(DuplicateEngine.THROTTLED_PREFIX),
+                    "源答了话就说是限流，不许由直连那条死路代笔（实得：" + thrown.getMessage() + "）");
+            check(!thrown.getMessage().startsWith("试过的路都没通"),
+                    "有一条路答了话就不许说「试过的路都没通」——那句只留给一条路都没走通的轮次");
+            check(thrown.getMessage().contains("直连 拒绝连接"),
+                    "拨不上的那条路仍写在这句话里，用户看得见为什么没走直连");
+            check(thrown.getMessage().contains("代理 127.0.0.1:" + proxyPort),
+                    "走过的那条代理必须出现在这句话里——真机那句缺的就是这一条（实得："
+                            + thrown.getMessage() + "）");
+            check(DuplicateEngine.reachOf(thrown) > 0,
+                    "答过话的源不许被记成「这一轮没通」：它答了，只是匿名配额到顶");
+            check(!Routes.anyPortDown(), "把包送出去的那条路不进冷却，429 不是「没人监听」");
+            /* 真机 2026-10-09 09:38 的检索自检里，同一行前半句写"代理 127.0.0.1:7897 答了 HTTP 429"，
+               后面那一栏写"未走过"。这一条钉的就是这两半句不许再打架。 */
+            String column = Routes.routeFor("127.0.0.1:" + dead);
+            check(column.equals("代理 127.0.0.1:" + proxyPort + " 答了 429"),
+                    "自检那一栏与同一行的前半句同档：答过话就写那条路加那一句（实得 " + column + "）");
+            check(!column.contains("未走过"), "答过话的那一栏里没有「未走过」三个字（实得 " + column + "）");
+            ApiClient.Failure solo = null;
+            try {
+                HttpTransport.get("http://127.0.0.1:" + proxyPort + "/search", null, 2, 0, null);
+            } catch (ApiClient.Failure error) {
+                solo = error;
+            }
+            check(solo != null && "检索源限流（HTTP 429），本次跳过".equals(solo.getMessage()),
+                    "只有一条路时那句话一个字都不改写——走过的路只在多条路之间才说得通（实得："
+                            + (solo == null ? "(没抛)" : solo.getMessage()) + "）");
+        } catch (java.io.IOException error) {
+            throw new AssertionError("桩服务起不来：" + error);
+        } finally {
+            if (stub != null) stub.stop(0);
+            Routes.reset();
+        }
+    }
+
+    /**
+     * 用户在设置里填的那个端口被当场拒回，只说明那一个端口没人听。它不许进「回环上的代理端口
+     * 没人监听」那本账——那本账管的是自动发现要排队的 7897/7890，填进来的是别的端口（实测有人填过
+     * 127.0.0.1:18899），一旦记进去，自检就把用户支去跑 phone-gateway，而 7897 那条路其实好着。
+     */
+    private static void refusedExplicitPortIsNotAPortDown() {
+        Routes.reset();
+        Routes.portRefused(Routes.parse("127.0.0.1:18899"));
+        check(!Routes.anyPortDown(),
+                "用户填的死端口进不了「回环端口没人监听」那本账：它不是自动发现要排队的端口");
+        check(contains(Routes.order("api.crossref.org", null), Routes.parse("127.0.0.1:7897")),
+                "别的回环端口被拒过一次，不许把 7897 挤出海外源的候选队列");
+        Routes.reset();
+    }
+
+    /**
+     * 刚刚为别的源走通过的那条路不许从候选里消失。真机上一轮要跑 98 秒、几十个窗口，
+     * Clash 中途重载配置就能让 7897 被拒回一次而进冷却；紧接着 OpenAlex 明明经它取回了 60 篇候选，
+     * 下一个海外源却可能再也排不到它——那一路只剩 lastGood 一根独木，而 lastGood 是全局的，
+     * 国内源一次直连成功就把它换成直连了。
+     */
+    private static void livedRoadStaysQueued() {
+        Routes.reset();
+        Proxy tunnel = Routes.parse("127.0.0.1:7897");
+        Routes.portRefused(tunnel);
+        check(!contains(Routes.order("api.crossref.org", null), tunnel),
+                "刚被拒回的端口先进冷却，这一段规矩不变");
+        Routes.succeeded(tunnel);
+        check(contains(Routes.order("api.crossref.org", null), tunnel),
+                "走通过一次就当场回到候选队列，不等那六十秒");
+        Routes.succeeded(null);
+        check(contains(Routes.order("api.crossref.org", null), tunnel),
+                "lastGood 被一次直连成功换掉之后，刚刚为别的源走通的那条代理还得在候选里（实得 "
+                        + labels(Routes.order("api.crossref.org", null)) + "）");
+        check(!Routes.anyPortDown(), "走通过的端口不许还算在冷却里");
+        Routes.reset();
+    }
+
+    /**
+     * 一条拨不上的路只结自己的账。用户在设置里填的死地址撞一次，就把这台主机「上次为它走通的那条路」
+     * 抹掉，等于让一条没试过的路替一条活路做生死判断。
+     */
+    private static void refusedRoadKeepsProvenRoad() {
+        Routes.reset();
+        Proxy tunnel = Routes.parse("192.168.1.20:7897");
+        Proxy deadExplicit = Routes.parse("127.0.0.1:18899");
+        Routes.succeeded(tunnel);
+        Routes.note("https://api.crossref.org/works?query=x", tunnel);
+        check(Routes.order("api.crossref.org", null).get(0) == tunnel,
+                "为这台主机走通过的路排在它自己头上");
+        Routes.failed("https://api.crossref.org/works?query=x", deadExplicit);
+        Routes.succeeded(null);
+        check(contains(Routes.order("api.crossref.org", null), tunnel),
+                "一条拨不上的显式代理不许抹掉这台主机刚为它走通的那条路（实得 "
+                        + labels(Routes.order("api.crossref.org", null)) + "）");
+        Routes.failed("https://api.crossref.org/works?query=x", tunnel);
+        check(!contains(Routes.order("api.crossref.org", null), tunnel),
+                "走通过的那条路自己拨不上时照旧撤账——USB 反代随拔线一起消失");
+        Routes.reset();
+    }
+
+    private static String labels(List<Proxy> order) {
+        StringBuilder out = new StringBuilder();
+        for (Proxy proxy : order) {
+            if (out.length() > 0) out.append("、");
+            out.append(Routes.label(proxy));
+        }
+        return out.toString();
+    }
+
+    /**
+     * 自检那一栏的三档：走通 / 答过话 / 拨不通。真机 2026-10-09 09:38 那一屏（9/9 个源可用）里
+     * OpenAlex 那行长这样：前半句「检索源限流，约 3600 秒后恢复，本次跳过（这一轮走过的路：
+     * 代理 127.0.0.1:7897 答了 HTTP 429；直连 拒绝连接）」，最后一栏「未走过」——同一行自己打自己。
+     */
+    private static void routeColumn() {
+        Routes.reset();
+        String openalex = "https://api.openalex.org/works?q=x";
+        Proxy tunnel = Routes.parse("127.0.0.1:7897");
+        check(Routes.routeFor("api.openalex.org").equals("未走过"), "一次都没被碰过才写未走过");
+        Routes.failed(openalex, null, "拒绝连接");
+        check(Routes.routeFor("api.openalex.org").equals("没走通：直连 拒绝连接"),
+                "直连拨不上：那一栏写出是哪条路、撞上什么（实得 " + Routes.routeFor("api.openalex.org") + "）");
+        Routes.failed(openalex, Routes.parse("127.0.0.1:7890"), "超时");
+        check(Routes.routeFor("api.openalex.org").equals("没走通：直连 拒绝连接"),
+                "同一台主机留第一次量到的那句下场，不会被后一条路改口");
+        Routes.answered(openalex, tunnel, 429);
+        check(Routes.routeFor("api.openalex.org").equals("代理 127.0.0.1:7897 答了 429"),
+                "有一条路答过话就升到答话那一档（实得 " + Routes.routeFor("api.openalex.org") + "）");
+        check(!Routes.routeFor("api.openalex.org").contains("未走过"),
+                "答过话的那一栏里没有「未走过」三个字");
+        check(!Routes.routeFor("api.openalex.org").contains("没走通"),
+                "答过话的那一栏也不说「没走通」——它答了话，只是配额到顶");
+        Routes.note(openalex, tunnel);
+        check(Routes.routeFor("api.openalex.org").equals("代理 127.0.0.1:7897"),
+                "真的走通之后回到只有路名，不带答话后缀");
+        check(Routes.summary().equals("api.openalex.org 代理 127.0.0.1:7897"),
+                "走通那本账不变：答话与拨不通两档只进那一栏，不混进 summary");
+        Routes.reset();
+        check(Routes.routeFor("api.openalex.org").equals("未走过"), "reset 把三档一起清掉");
     }
 
     /** 确定没人监听的回环端口：让系统发一个，立刻关掉。 */

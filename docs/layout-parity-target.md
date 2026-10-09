@@ -18,15 +18,15 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 量不出来按没过算。这一节是验收线，谁改排版引擎都拿它复核；复核由常驻的排版对账子代理执行，
 每轮改动重跑一遍，结果贴回本文与 `docs/edge-parity-baseline.md`。
 
-| # | 指标 | 量法（真值来源） | HEAD 复采（tag `breakfix3`，2026-10-09；engine head_sha `e30c376` + 工作树 DocxTextLayout.java sha `BCEAA603`；第 1~4 条与 tag `revert-linear` 一字不差，第 5、6 条是本轮改动后的数，见第 24 节） | 验收线 |
+| # | 指标 | 量法（真值来源） | HEAD 复采（改后 tag `hang2`，2026-10-09；改前基线 tag `hangbase2`，engine head_sha `e1e77bc`；两列同一台手机同一次会话，见第 28.3 节） | 验收线 |
 | --- | --- | --- | --- | --- |
-| 1 | 段落页归属 | `tools/word-parity.ps1`（Word 28 页真值 `artifacts/word/pages.tsv`） | 7 段错页 / 206（exact 96.6%，页差全是 -1，首个 para 121；28/28 页） | exact >= 99%，错页 <= 2 段 |
-| 2 | 逐行行高误差中位 | `artifacts/agent-typeset/line-height-rows.ps1`（Word 相邻基线距离，COM） | -0.767 px（n=91，Word 26.267 px） | 绝对值 <= 0.10 px |
-| 3 | 逐行行高误差 p90 | 同上（取 \|误差\| 的 p90） | 2.533 px（max 3.467） | <= 0.50 px |
-| 4 | 每页累计高度误差 | 同上 x 每页行数（Word 每页 27-35 行） | 0.79 行（最差队列 sz12 line300 snap=false 2.55 行） | <= 0.25 行 |
-| 5 | 逐行换行点一致率（**旧口径**） | `tools/line-break-delta.ps1 -Stage report` | 115/165 = 69.7%（`breakfix3`；`autospace1` 114/165 = 69.1%，最早 103/165 = 62.4%）。**旧口径：对我们自己的行序逐行号对，不可与第 7 条并列引用** | >= 90% |
-| 6 | 两端对齐右边界超出 1px 的行数 | `tools/edge-parity.ps1 -Impl new` | **1 / 33（本轮退步：见第 24.4 节，退 1 行 = para 160 第 14 行 563.00 px 对 Word 564.53 px）** | 0 / 32（守住，不许为了行高牺牲它） |
-| 7 | 断点一致率（**Word 导出 PDF 真值**，新口径） | `py tools/break-agreement.py -Capture <tag>`（真值 = Word 自己导出的 PDF `artifacts/agent-typeset/pdf-truth/input-liu.pdf`，sha256 `AB298AC416DCFC72855645E5AD8E472ABDA3DFFC9A6B10925A4FAA1396E761A1`，逐行读回原文） | 225/355 = **63.4%**（102 段；我们多断 65 处、少断 65 处；同一份真值算出错页 6/102 段；采样 `main251`，`lines-all.tsv` sha `5F714EE762A78345`） | >= 90% |
+| 1 | 段落页归属 | `tools/word-parity.ps1`（Word 28 页真值 `artifacts/word/pages.tsv`） | 7 段错页 / 206（exact 96.6%，页差全是 -1，首个 para 121；28/28 页。改前 `hangbase2` 同为 7 段，本轮没动它） | exact >= 99%，错页 <= 2 段 |
+| 2 | 逐行行高误差中位 | `artifacts/agent-typeset/line-height-rows.ps1`（Word 相邻基线距离，COM） | -0.767 px（n=91，Word 26.267 px；改前同值。归因见第 28.6 节） | 绝对值 <= 0.10 px |
+| 3 | 逐行行高误差 p90 | 同上（取 \|误差\| 的 p90） | 2.533 px（max 3.467；改前同值。这 12 行落在哪几段见第 28.6 节） | <= 0.50 px |
+| 4 | 每页累计高度误差 | 同上 x 每页行数（Word 每页 27-35 行） | 0.79 行（最差队列 sz12 line300 snap=false 2.55 行；改前同值） | <= 0.25 行 |
+| 5 | 逐行换行点一致率（**旧口径**） | `tools/line-break-delta.ps1 -Stage report` | 115/165 = 69.7%（`hang2` 与 `hangbase2` 同值；`breakfix3`；`autospace1` 114/165 = 69.1%，最早 103/165 = 62.4%）。**旧口径：对我们自己的行序逐行号对，不可与第 7 条并列引用** | >= 90% |
+| 6 | 两端对齐右边界超出 1px 的行数 | `tools/edge-parity.ps1 -Impl new` | **1 / 33（改后 `hang2` 与改前 `hangbase2` 同一格：退的那 1 行仍是 para 160 第 14 行 563.00 px 对 Word 564.53 px，见第 24.4 节）。另加一个墨迹口径：我们越版心的 1 行，Word 自己那行也越版心，比 Word 多越 1px 以上的行数 0（第 28.3 节）** | 0 / 32（守住，不许为了行高牺牲它） |
+| 7 | 断点一致率（**Word 导出 PDF 真值**，新口径） | `py tools/break-agreement.py -Capture <tag>`（真值 = Word 自己导出的 PDF `artifacts/agent-typeset/pdf-truth/input-liu.pdf`，sha256 `AB298AC416DCFC72855645E5AD8E472ABDA3DFFC9A6B10925A4FAA1396E761A1`，逐行读回原文） | 227/353 = **64.3%**（102 段；我们多断 63 处、少断 63 处；同一份真值算出错页 6/102 段；改前 `hangbase2` 225/355 = 63.4%（多断 65 / 少断 65）；采样 `hang2`，`lines-all.tsv` sha `11241D5CED2CA4A5`；分类与页效应见第 28.7 节） | >= 90% |
 
 一条命令复采这七条（前六条的结构与口径一字不动，第 7 条是本轮加上去的断点一致率，尺子见第 27 节；单跑第 7 条：`py tools/break-agreement.py -Capture artifacts/agent-layout-verify/<tag>`）：`pwsh tools/parity-six.ps1 -Tag <tag>`（真机采样 + 行高探针 + 三条对比，只调已有脚本、不重新定义量法；Word 真值走缓存，不重开 Word 会话；结果写 `<tag>/six.tsv`、`<tag>/six.txt`，带 head_sha 与 `lines-all.tsv` 的 sha）。第 0 节的六个数每一轮都以这条命令的输出为准，第 17 节记下本轮的复采与指纹。
 
@@ -41,6 +41,19 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 下一版和"西文行的宽度多收"放在同一轮改。六个数因此仍是上表那一列。
 
 再后一轮（第 26 节）先把"引擎到底收到了什么"量死：全篇只有封面第 0 段写了 w:lineRule="exact" w:line="380"（19 磅），没有任何 20 磅 / 16 磅的行距声明；Word 自己的读数是 Exactly 0 段、AtLeast 0 段、相邻基线正好 20.0pt 的段落 0 个。该改的还是改了：exact 当一把绝对长度算（真机量到 1pt=1.333333px、12pt 的 em=16.0000px，比例 1.000，不是 1.0741），画整像素行盒、小数那一截走 lineCarry。六条一个没动（两边 `lines-all.tsv` 同一个 sha `5F714EE762A78345`），页数 28=28，7 段错页全是 -1，见第 26.4 节。
+
+最近一轮（第 28 节，改后 tag `hang2`，改前基线 tag `hangbase2`）把 Word 的 `w:overflowPunct` 按它自己导出
+PDF 的真值改了：一个收尾标点挤不进本行时不再被整行挤下去，而是只占版心里剩下的那点位置、其余画在版心外
+（第 28.1、28.2 节）。七条里第 7 条 63.4% -> **64.3%**（多断 65 -> 63、少断 65 -> 63），第 1 条 7 段错页、
+第 2/3/4 条行高、第 5 条旧口径、第 6 条 1/33 一项没退。顺带把两件事量死：第 3 条 p90 = 2.533 px 全部来自
+12 行、两类声明（第 28.6 节），"我们多断"的 63 处里真正属于"字母数字串内部"的只剩 1 处，而且就是上下标
+span 那处 `Ag3|Sn`（第 28.7 节）。这一轮还逮到量台自己的一次假数：探针表头少写一个换行符，所有按列名取值的
+脚本静默读出 0（第 28.5 节）。
+
+发版后复采（第 29.1 节，tag `265-release`）：手机上装的是 2.6.5 发布包（`versionName=2.6.5 versionCode=54`，
+`adb shell dumpsys package`），探针跑的源码 = `head_sha 6c96dc705ab2`（出 2.6.5 那条提交，快照 overlay=0），
+七个数与上表**一字不差**，`lines-all.tsv` 同一个 sha `11241D5CED2CA4A5`：页数 28 = Word 28、页归属 7 段错页（全 -1）、
+行高 -0.767 / 2.533 px、每页 0.79 行、旧口径 69.7%、右边界 1/33、第 7 条 227/353 = 64.3%。
 
 三条规矩：
 
@@ -1334,3 +1347,334 @@ git log --all --oneline                 -> 没有任何一节的标题或正文�
    本轮它读到 0 行——判定规则（一段里没有空格、连续拉丁 ≥ 10 字）在真值段落上不成立，
    参考文献条目里是带空格的。这条得换个判法（按段落落在参考文献区 `word_para >= 300` 判），
    换完之前那 13 处的说法先不要引。
+---
+
+## 28. 悬挂末行标点按 Word 自己导出的 PDF 改准（第 7 条 63.4% -> 64.3%）；行高 p90 与"我们多断"逐处量死
+
+本轮只动一族：`w:overflowPunct`。行高 p90 的归因（28.6）与"我们多断"的分类（28.7）是量出来的结论，
+没有跟着改引擎。改前基线 tag `hangbase2`（引擎 = HEAD `e1e77bc` 的私有快照 `artifacts/privtree/headbase`），
+改后 tag `hang2`（工作树引擎），同一台手机（`EAMUT20528011355`）、同一次采样会话、同一份 Word 导出 PDF 真值。
+
+### 28.1 真值：Word 让 22 行把最后一个整宽标点画在版心外，一行只挂一个
+
+```
+py tools/hang-truth.py     # 真值 artifacts/agent-typeset/pdf-truth/input-liu.pdf，sha256 AB298AC4...96E761A1
+body lines at the left margin drawn at 12.0 pt: 370
+ending more than 1.0 pt past Word's own right margin: 22
+  how far past (pt): min 11.42  median 12.01  max 12.44
+  which character hangs: ， x7, 。 x7, 、 x4, ℃ x2, ； x2
+```
+
+版心 = 85.1 -> 510.3 pt = 425.2 pt = 566.93 px。12 pt 的一个整宽字框正好 12.00 pt，所以"越界
+11.42~12.44 pt"就是这个字框整个画在版心外，且一行最多挂一个（22 行里没有一行挂两个）。
+`℃` 那 2 行 Word 也挂，但 `℃` 不是收尾标点，本轮没进符号集，是写进引擎注释的已知剩下误差。
+
+声明侧（数 `word/document.xml` / `word/styles.xml` 里的 `<w:overflowPunct>`）：段落自己声明 105 处
+（空标签即 true），显式 false 0 处，样式表 0 处。也就是说该开的段落都开着，这条规则不需要猜缺省。
+
+### 28.2 引擎改了什么（只 `DocxTextLayout.java` 一个文件）
+
+1. 删掉旧的"按墨迹宽挤进本行"（`hangInkFraction()` + `ceilInk()`）。它对中文两端对齐行永远触发不了：
+   `justifyEastAsian()` 已把整行铺到版心右边界，再要求标点的墨迹也在版心里 = 要求第 37 个整宽字挤进
+   只装得下 36 个的列，于是那一行只能少装一个字。
+2. 换成 Word 的规则：`isHangingPunctuation()` 收 。 ， 、 ； ： ？ ！ ” 八个收尾符号；`hangSplit()`
+   让这个符号只用掉"本行在版心里还剩的位置"，剩下的 `overhangPx` 画在版心外，行内其它位置一个都不动。
+3. `dropMarksThatMoved()`：悬挂符号是按剩余位置量的（可能是 0 宽），只有当它确实是本行最后一个字时才安全，
+   所以每次重排后把已经不在行尾的 span 撤掉。
+4. `Paragraph.lineOverhang`（逐行 px）把越界量交给画图与右边界对账；探针多写一列 `hangOverPx`。
+5. 断言 `tests/HangPunctuationRegression.java`（4 组：8 px 宽的符号要悬挂整 8 px、版心 566.93 px 的落点、
+   剩余位置不足、非收尾符号不许挂）已挂进 `tools/test-host.ps1`。本轮主机测试：
+   `pwsh tools/run-suites-private.ps1 -Tree . -OutDir tmp/hang-out9 -Suite HangPunctuationRegression,Regression,`
+   `WordLineHeightRegression,ScriptRegression,TableGeometryRegression,PageTextRegression` -> 全部 PASS，failed=0。
+
+### 28.3 七条前后
+
+```
+pwsh tools/parity-six.ps1 -Tag hangbase2 -Tree artifacts/privtree/headbase/app/src/main/java   # 改前
+pwsh tools/parity-six.ps1 -Tag hang2     -Tree app/src/main/java                               # 改后
+```
+
+| # | 指标 | 改前 `hangbase2` | 改后 `hang2` |
+| --- | --- | --- | --- |
+| 1 | 段落页归属 | 7 段错页 / 206（exact 96.6%，全是 -1，para 121 起；28/28 页） | 7 段错页 / 206（同一组段，一字不差） |
+| 2 | 逐行行高误差中位 | -0.767 px（n=91，Word 26.267） | -0.767 px |
+| 3 | 逐行行高误差 p90 | 2.533 px（max 3.467） | 2.533 px |
+| 4 | 每页累计高度误差 | 0.79 行 | 0.79 行 |
+| 5 | 换行点一致率（旧口径，不可与第 7 条并列） | 115/165 = 69.7% | 115/165 = 69.7% |
+| 6 | 右边界超出 1px 的行数 | 1 / 33 | 1 / 33（同一行：para 160 第 14 行 563.00 对 Word 564.53） |
+| 7 | 断点一致率（Word 导出 PDF 真值） | 225/355 = 63.4%（多断 65、少断 65） | **227/353 = 64.3%**（多断 63、少断 63） |
+
+指纹：`hangbase2` `lines-all.tsv` sha `2D96481F8488F0B7`、dex `1d07bffd…`；`hang2` `lines-all.tsv` sha
+`11241D5CED2CA4A5`、dex `ad3f11ff…`；两边 `pages.tsv` sha 不同（`E23F59E8C409EF4C` / `7809FC19F6A92CA7`），
+因为 3 段的行内容与跨页位置挪了一行，但第 1 条的读数和页差直方图完全相同。
+
+第 6 条再加一个把墨迹算进去的口径（`pwsh tools/edge-parity.ps1 -Impl <tag>/new -Out <tag>/edge.tsv`）：
+
+```
+改前  within 1 px of the right margin: 32/33    ink past the right margin: 0/33
+改后  within 1 px of the right margin: 32/33    ink past the right margin: 1/33
+      Word 自己那行也越版心的：1 行；我们比 Word 多越 1px 以上的：0 行
+```
+
+改后确实有 1 行挂着收尾标点越出版心，而 Word 的同一行也越版心，所以它不算新的越界；旧的 32/33 口径没动，
+两条一起看。
+
+### 28.4 那 22 行逐行对：像 Word 一样挂着的从 3 行变 5 行
+
+`py tools/hang-truth.py -Capture artifacts/agent-layout-verify/<tag>`
+
+| 每行的结局 | 改前 `hangbase2` | 改后 `hang2` |
+| --- | --- | --- |
+| 与 Word 同一行、同一串字 | 3 | **5** |
+| 标点被挤到下一行（本行少一个字） | 1 | 1 |
+| 我们的断点根本不在这里 | 18 | 16 |
+
+改后真机上有 8 行带越界量：`p15 blk130 。15.00`、`p19 blk161 ，15.00`、`p5 blk69 、9.00`、`p5 blk72 、9.00`、
+`p19 blk164 、3.00`、`p20 blk195 ，2.00` 等。15.00 px 对 Word 的 11.42 pt x 4/3 = 15.23 px，一致。
+剩下那 16 行"断点不在这里"说明这 22 行主要不是悬挂问题，而是每行少装 1~2 个整宽字（28.7 的 `cjk|cjk`）。
+
+### 28.5 量台自己的一次假数：表头少一个换行符
+
+`DeviceCapture` 上一次加 `hangOverPx` 那一列时把表头字符串结尾的 `\n` 吃掉了，表头和第一条数据粘成一行。
+所有按列名取值的脚本（`csv.DictReader`、`Import-Csv`）不报错，只把这一列读成 0，于是"真机上一行都没有悬挂"
+这个结论看着干净、其实是假的；同一份采样里第 5 条也报成 `0/0`。修好之后同样的引擎、同样的稿子量出 8 行
+悬挂、第 5 条 115/165。
+
+两条后果：1）本轮之前的 `hang1`、`hangbase` 两份采样作废（表头坏），本轮用 `hangbase2`/`hang2`；
+2）探针进了版本库（`tools/device-probe/DeviceCapture.java`，`tools/capture-device.ps1` 默认用它，
+`-Probe` 可覆盖），文件头写明"加列之后必须把打印出来的表头和第一行数据对一遍"。
+
+### 28.6 第 3 条 p90 = 2.533 px 落在哪几段（只定性，没调常数）
+
+```
+py tools/line-height-tail.py -Capture artifacts/agent-layout-verify/pdfgate1
+rows=91  median|delta|=0.767 px  p90|delta|=2.533 px  max=3.467 px
+```
+
+尾巴正好 12 行，两类声明，全部是 `snapToGrid=false` + `lineRule=auto` + 本行只有西文/数字：
+
+| 声明 | 尾巴行数 | Word 行高 | 我们行高 | 中位误差 | 段号（设备 blockIndex） | 占尾巴误差总量 |
+| --- | --- | --- | --- | --- | --- | --- |
+| sz12 line300 auto snap=false grid=false 本行无汉字 | 8 | 26.267 px | 23.00 px | -3.267 | 115, 122, 132, 139, 196, 339 | 70.3% |
+| sz12 line276 auto snap=false grid=false 本行无汉字 | 4 | 23.533 px | 21.00 px | -2.533（最差 -3.467） | 78 | 29.7% |
+
+全篇对照（同一支脚本）：`sz12 line300 auto snap=true` 有汉字的 62 行 Word 26.267 / 我们 25.50（-0.767）；
+`sz12 line284 auto snap=true` 8 行 Word 24.467 / 我们 25.50（**+1.033**，这一族是我们多收）。
+
+定性：五类队列的声明各自完全相同，Word 却在不同行给出不同行高（同一份 `line=300 auto` 声明下出现
+26.267 与 25.400 两种），而我们对一段只给一个值。**Word 是按这一行实际用到的那张脸的 ascent+descent 乘行距
+重算行高，我们是按段算一次。** 那两类"本行没有汉字"的尾巴行 Word 给的是 26.267 / 23.533（和汉字行的值同一档），
+我们给 23.00 / 21.00（西文脸自己的行高），说明 Word 用的还是这一段声明的中文字脸，而不是本行出现过的那张脸。
+下一轮该做的是把行高从"按段一个值"改成"按行一个值"，动的是 `WordLineHeights` 那条链（已有
+`tests/WordLineHeightRegression.java` 69 条断言兜着），不是去调那两个像素。
+
+### 28.7 "我们多断"的 63 处：分类、页效应、逐处实例
+
+```
+py tools/break-agreement.py -Capture artifacts/agent-layout-verify/hang2
+```
+
+| 断点落在什么上面 | 处数 | 牵动几个错页段 | \|chars_off\| 中位 | 差 1 个字的占比 | 判词 |
+| --- | --- | --- | --- | --- | --- |
+| 两个汉字之间 | 36 | 0 / 6 | 2 | 18/36 | 宽度：Word 一行多装 1~2 个整宽字 |
+| 一个真空格上 | 12 | 1 / 6 | 5 | 1/12 | 24~28 页英文参考文献，两边选的空格不同 |
+| 中文标点之后 | 3 | 0 / 6 | 1 | 2/3 | 悬挂那一族的边角，本轮之后从 3 处起继续看 |
+| 汉字与数字之间 | 3 | 0 / 6 | 2 | 1/3 | 宽度 |
+| 斜杠之后 | 2 | 0 / 6 | 9 | 0/2 | 见下面两条实例，方向相反 |
+| 中西文交界 | 2 | 0 / 6 | 4 | 0/2 | 宽度 |
+| 标点之前 / 西文与汉字 / 数字与汉字 | 各 1 | 0 / 6 | 1 | 1/1 | 宽度，差一个字 |
+| **连续字母数字串内部** | **1** | 0 / 6 | 3 | 0/1 | 上下标 span 那处，见下 |
+
+（`chars_off > 0` = Word 的最近断点在我们后面，即我们的行早断、少装了字；`< 0` = Word 更早断，
+它把某个整串挪到了下一行而我们把它留在本行。）
+
+几条决定改法的实例（前 8 字 + 断点 + 后 8 字，`para/blk/Word 页码/Word 行号`）：
+
+1. `para 159 blk 160 第 19 页 5/5 行 off -3`：`厚度、孔洞率、Ag3|Sn分布、剪切强度保`。
+   Word 把 `Ag3Sn` 整串挪到下一行，我们在 `3|Sn` 之间断了。这就是上下标 span 那一族，也是全部剩余
+   的"字母数字串内部断行"唯一一处（第 24 节记的 10 行 -> 第 27 节 1 处 -> 本轮仍 1 处）。
+2. `para 86 blk 87 第 8 页 1/7 行 off +2`：`B/P-Cu/SB/|Cu夹层结构，并在甲`。
+   Word 把 `Cu` 留在本行、断在 `Cu` 之后，我们的行止于斜杠。也就是这一处是"我们少装两个字"，
+   不是"我们在斜杠后多断了一个字"。
+3. `para 113 blk 114 第 13 页 2/3 行 off -9`：`建CuO/NaCl/|Ag体系的成形、还原`。
+   Word 早 9 个字就断了。两处斜杠方向相反，所以"斜杠后面到底能不能断"这一条还没量死，
+   不能按猜的改。
+4. `para 371 blk 375 第 28 页 off -22`：`on, 2018, |144: 469-4`。英文参考文献行，Word 比我们的断点早 22 个字。
+
+页效应这一列是本轮新量的，结论直接否掉一个假设：**这 63 处"我们多断"和 6 个错页段几乎不相干**
+（只有 `at a space` 那一类牵到 1 段），所以"先修断点最多的那类，错页就会往下掉"在这篇稿子上不成立；
+`cjk|cjk` 36 处一个错页段都不带动。错页要单独找原因（`word para 114 / device blk 115：Word 第 14 页、手机第 13 页`
+是其中一段，方向与其它 5 段一样都是手机早一页）。
+
+另外第 27.2 节那条规矩仍然有效：一段之内第一处错点会带着后面每一行一起挪，本轮 32 段有错点、
+后面被带偏的后续点 94 处。上表是按"处数"排的，真要排修法顺序，看脚本里 "First divergence per paragraph"
+那张表：第一处错点里 `cjk|cjk` 6 段、`at a space` 6 段并列最多。
+
+### 28.8 更正第 27.3 节第 3 条
+
+第 27.3 节第 3 条记的是"一条整行最多装 35 个整宽字……汉字数最多的桶只到 34（再算上不落在
+`\u4e00-\u9fff` 的全角标点正好 35~36 字）"。这句在悬挂标点那一族上要加限定：`py tools/hang-truth.py`
+新打印的那一行显示，Word 自己越版心的那 22 行字符数是 **min 36 / 中位 37 / max 49**，而越出去的那一个
+标点也算行上的一个字符。真机改后同一批里的 `p15 blk130` 第 5 行、`p19 blk161` 第 3 行都是 37 个字符，
+`StaticLayout` 报的行宽 567.00 px（正好版心），其中最后一个标点的 15.00 px 画在版心外，Word 的同一行
+也是 37 个字符并越版心 11.42~12.16 pt。判据要写成"**版心里**的整宽字不超过 36 个"，否则合法的悬挂行
+会被当成越界行处理。
+
+### 28.9 剩下什么（不在本轮）
+
+1. 第 2/3/4 条：行高从"按段一个值"改成"按行一个值"（28.6 的定性），这是三项一起的根因。
+2. `cjk|cjk` 那 36 处 = 每行少装 1~2 个整宽字，属宽度模型（和 `autoSpace` 那族同源），下一轮单独量。
+3. `℃` 悬挂 2 行；para 160 第 14 行右边界差 1.53 px；斜杠断点 Word 口径未定。
+
+## 29. 2.6.5 装机版复采；"我们多断"的拉丁/数字那批：`/` 不能断、`-` 能断，量死了
+
+本轮没动排版引擎（`git status` 里 `app/src/main/java` 一字未改），落地的只有三张量台与这一节记录。
+
+### 29.1 复采口径（手机装的就是发布包，不是快照改动）
+
+```
+pwsh tools/tree-snapshot.ps1 -Out artifacts/privtree/release265 -Base 6c96dc7   # 87 个 .java，overlay=0，manifest 全 base
+pwsh tools/parity-six.ps1 -Tag 265-release -Tree artifacts/privtree/release265/app/src/main/java
+```
+
+手机 `CDY-AN90`、android 10、sdk 29、1080x2400、480dpi；`adb shell dumpsys package com.rikkahub.wordlite`：
+`versionName=2.6.5 versionCode=54`。探针跑的源码 = `head_sha 6c96dc705ab20d8b200ce4f8cea55122481d0113`
+（= 出 2.6.5 那条提交），`layout_dirty=False`，dex `f84d7f6e9829323ebe1653857080fc3927560b0124d3128df605d34832ed66f3`，
+`lines-all.tsv` sha `11241D5CED2CA4A5`、`pages.tsv` sha `7809FC19F6A92CA7`、字体表指纹 `AB3B592E304F`。
+
+| # | 指标 | 2.6.5 真机读数（tag `265-release`） | 与 tag `hang2` 比 |
+| --- | --- | --- | --- |
+| 1 | 段落页归属 | 7 段错页 / 206（exact 96.6%，页差直方图 `-1=>7  0=>199`，首个错页 para 121），**页数 28 = Word 28** | 一字不差 |
+| 2 | 逐行行高误差中位 | -0.767 px（n=91，Word 26.267 px） | 一字不差 |
+| 3 | 逐行行高误差 p90 | 2.533 px（max 3.467） | 一字不差 |
+| 4 | 每页累计高度误差 | 0.79 行（最差队列 sz12 line300 snap=false 2.55 行） | 一字不差 |
+| 5 | 断点一致率（旧口径，对我们自己的行序） | 115/165 = 69.7% | 一字不差 |
+| 6 | 两端对齐右边界超出 1px | 1 / 33 | 一字不差 |
+| 7 | 断点一致率（Word 导出 PDF 真值） | 227/353 = 64.3%（102 段；多断 63 / 少断 63；同一份真值算出错页 6 段） | 一字不差 |
+
+`lines-all.tsv` 的 sha 与 `hang2` 相同，所以"2.6.5 那几笔检索/下载改动没动到一个换行点"这句是被行序指纹证死的，不是推断。
+第 7 项单跑：`py tools/break-agreement.py -Capture artifacts/agent-layout-verify/265-release -Out <tsv>`。
+
+### 29.2 "我们多断"的 63 处按断点字符分类，两边一起数（`artifacts/agent-layout-verify/265-release/break-agreement.tsv`）
+
+| 断点落在什么上面 | 两边都断 | 只有我们断 | 只有 Word 断 |
+| --- | --- | --- | --- |
+| 两个汉字之间 | 137 | 36 | 32 |
+| 一个真空格上 | 47 | 12 | 11 |
+| 汉字标点之后 | 16 | 3 | 6 |
+| 汉字与数字之间 | 7 | 3 | 1 |
+| 汉字与拉丁之间 | 8 | 2 | 4 |
+| 斜杠之后 | 0 | **2** | **0** |
+| 连字符之后 | 0 | 0 | **2** |
+| 连续字母数字串内部 | 0 | 1 | 0 |
+| 数字与汉字之间 | 1 | 1 | 3 |
+| 拉丁与汉字之间 | 9 | 1 | 3 |
+| 标点之前 | 2 | 1 | 0 |
+| 其它 | 0 | 1 | 1 |
+
+这张表把上一轮没量死的两条规则口径直接钉住：
+
+1. **`/` 不是 Word 的断点。** 全篇 102 段里我们在斜杠后断了 2 次，Word 一次都没有。实例：`para 113 blk 114 第 13 页`——
+   Word 第一行断在 `需要建|CuO/NaCl/Ag`（整串 `CuO/NaCl/Ag` 挪到下一行），我们断在 `建CuO/NaCl/|Ag`。
+2. **`-` 是 Word 的断点，我们反倒不断。** `after -` 两边都断 0、只有我们断 0、只有 Word 断 2。方向与斜杠正好相反。
+3. 字母数字串内部只剩 1 处：`para 159 blk 160 第 19 页第 5 行`，断点 `Ag3|Sn`，下标缩放 span 的右边界（第 24 节那条，本轮没动）。
+
+数清楚谁该先修：**拉丁/数字边界那批一共 10 处**（`cjk|digit 3 + cjk|latin 2 + after "/" 2 + latin|cjk 1 + digit|cjk 1 + 串内 1`），
+其中真正的规则问题只有 3 处（2 个斜杠 + 1 个下标 span），另外 7 处与最大的 `cjk|cjk 36` 是同一件事：我们的行早断 1~4 个字，属宽度模型。
+所以"先修拉丁/数字边界"能拿到的上限是 3 处；剩下 60 处的钥匙在宽度那一族。
+
+### 29.3 那 10 处逐条（断在哪两个字符、Word 同一行自己断在哪一类、段里声明了什么）
+
+```
+py tools/break-rule-source.py -Rows artifacts/agent-layout-verify/265-release/break-agreement.tsv \
+   -Capture artifacts/agent-layout-verify/265-release \
+   -Classes "inside alnum run,after '/',cjk|latin,latin|cjk,cjk|digit,digit|cjk"
+```
+
+工具每条打印：段号（docx 与设备块）、我们第几页第几行、Word 第几页第几行、断点两侧字符与码位、前后各 8 字、
+`word_cut_chars_off`（正=Word 的最近断点在我们后面，即我们的行少装了字；负=Word 更早断，它把整串挪走了）、
+本段 pPr 声明的 `wordWrap/kinsoku/adjustRightInd/autoSpaceDE/autoSpaceDN/overflowPunct/snapToGrid/widowControl`、
+以及 Word 在这一行自己用的是哪一类断点。10 条的判定：**宽度 8 / 规则 2 / 同点不同类 0**。
+
+声明口径也量死了（不是猜的继承）：`word/document.xml` 里 `<w:wordWrap/>` 出现 105 次、从不写 `w:val="0"`；
+`word/styles.xml` 里 `wordWrap` 0 次、`kinsoku` 0 次；`docDefaults` 的 `pPrDefault/pPr` 是空的。
+所以对这几个开关，"pPr 里看到的"就是"引擎收到的"，`None` 只表示"全篇没说，走 Word 默认"。
+
+### 29.4 第 3 条 p90 = 2.533 px 在 2.6.5 上落在哪几段
+
+```
+py tools/line-height-tail.py -Capture artifacts/agent-layout-verify/265-release
+rows=91  median|delta|=0.767 px  p90|delta|=2.533 px  max=3.467 px
+```
+
+尾巴正好 12 行，两类声明，都是 `snapToGrid=false + lineRule=auto + 本行没有汉字`：
+
+| 声明 | 行数 | Word 行高 | 我们行高 | 中位误差 | 设备块 → docx 段号 | 占尾巴误差总量 |
+| --- | --- | --- | --- | --- | --- | --- |
+| sz12 line300 auto snap=false Latin-only | 8 | 26.267 px | 23.00 px | -3.267 | 115=para114、122=para121、132=para131、339=para335（另 139、196 没进对比行） | 70.3% |
+| sz12 line276 auto snap=false Latin-only | 4 | 23.533 px | 21.00 px | -2.533（最差 -3.467） | 78 | 29.7% |
+
+对照全篇同族：`sz12 line300 snap=true` 有汉字 62 行 Word 26.267 / 我们 25.50（-0.767）；`sz12 line284 snap=true` 8 行
+Word 24.467 / 我们 25.50（**+1.033**，这一族是我们多收）。段号翻译用 `line-height-tail.py -Map <break-agreement.tsv>`，
+默认读捕获目录里的那份，覆盖 102 段（没覆盖的块只是没有可比的行）。
+
+### 29.5 行高能不能压到 2.0 px 以下：能（0.934 px），但页归属从 7 段崩到 71 段
+
+`WordLineHeights.APPLIED_TO_LAYOUT=true`（表里宋体 1.31335 em、Times 1.17665 em 真用到排版上）在真机复采
+（tag `lh-apply2`，引擎 = `f0956ce` + 这一行改动，`lines-all.tsv` sha `5D3D6C473904F641`）：
+
+| # | 关掉（= 出厂 / 2.6.5） | 打开 | 判定 |
+| --- | --- | --- | --- |
+| 2 行高中位 | -0.767 px | **0.000 px** | 过 |
+| 3 行高 p90 | 2.533 px | **0.934 px** | 满足"压到 2.0 以下"，仍不到 0.50 |
+| 4 每页累计 | 0.79 行 | 0.00 行 | 过 |
+| 1 页归属 | 7 段错页（全 -1），28 页 | **71 段错页（全 +1），29 页** | 崩 |
+| 5/6/7 | 69.7% / 1 对 33 / 64.3% | 69.7% / 1 对 33 / 64.3%（错页 6 → 51 段） | 断点没动，页归属跟着崩 |
+
+按第 0 节第 3 条规矩（有一条退步就不算过），开关保持关掉。这一轮把"行高之外那一笔到底在哪"往前推了三步：
+
+1. **不在页顶。** `py tools/page-height-split.py -Capture artifacts/agent-layout-verify/265-release`：我们每一页第一行的
+   line top 正好落在版心上边界 143.60 px，Word 的是 144.00~146.73 px，也就是我们比 Word **还早** 0.4~3.1 px 起行。
+2. **不在版心。** Word 自己吐回来的 SECTION 行 `top=107.7pt bottom=85.05pt` = 143.60 / 113.40 px，与我们
+   `page-geo.tsv` 的 `marginTop/marginBottom` 一字不差，两边都是 865.53 px 的版心。
+3. **按页号硬对不可比，必须按内容对。** 同一个页号两边装的东西不同：Word 第 11 页第一行文字在 562.40 px（上面压着一张图），
+   我们那一页第 1 行在 165.60 px。`tools/page-height-split.py` 因此只用来量"每页第一行/版心/末行余量"这类不跨页的量；
+   跨页的对账走 `tools/height-debt-fit.py`（按文本把两边段落对齐，再解 `delta = a*行数 + b*段数`）。
+   这台量台目前对到 105~152 段、残差中位 10.85 px（p90 26.23 px）——图的位置两边不同会把残差抬高，**还不够定案**，
+   下一轮要先把图/表占的垂直高度单独摘出来再解。
+4. **Word 在同一族声明下给两种行高。** 打开开关后剩下的 19 行尾巴全是 +0.934 px：`sz12 line300 snap=true` 有汉字
+   16 行（设备块 62、68、74、88、95、98、109、149…）Word 给 25.333 px、我们给 26.27 px；`sz12 line276` Latin-only
+   4 行 Word 23.533 / 我们 24.17（+0.633）。也就是说"一个常数比值"追不上 Word 的两档行高（第 13 节第 1 条记过西文那两档，
+   这是中文这一档的第二处）。要真过 0.50 px 那条线，得按行取脸与两档判据，判据从真值来，不许在这张表里调常数。
+
+### 29.6 下一轮（按页数 > 断点 > 行高的顺序）
+
+1. `cjk|cjk` 36 处 + 拉丁数字那 7 处 = 同一个宽度问题：我们的行少装 1~4 个字。先量死一行到底装几个整宽字
+   （`tools/width-bill.py` 已经给出"123 行里 3 行装不下"这个量级，说明大头不在逐字宽度上，得去查行末的撑缝与
+   自动空隙是不是又收了一遍）。
+2. `/` 不可断、`-` 可断这两条规则要落地：平台不接受我们递断行表（第 24.3 节），只能像第 24 节那样在 span 摆放上做，
+   目标 3 处；动它必须同时盯第 6 条（右边界）。
+3. 行高改成按行一个值，并把图/表占的垂直高度从对账里摘干净，再解一次 `height-debt-fit`。
+
+### 29.7 "少装一个字"还是"断在别处"：把这 43 处拆开量（新增量台 `tools/line-capacity.py`）
+
+```
+py tools/line-capacity.py -Capture artifacts/agent-layout-verify/265-release
+lines compared 43   每行字符数 我们减 Word：中位 -1.00  最少 -4  最多 +2
+  我们少装：24 行    字数一样但断点不同：17 行    我们多装：2 行
+Word 在这些行上的逐字墨迹步长：中位 15.302 px（12 pt 中文自然 advance 16.00 px、版心 566.93 px）
+```
+
+同一份 Word 导出 PDF、同一套段落匹配（`line-capacity.py` 直接 import `break-agreement.py` 的读取器，不重写第二套），
+取"我们多断"那一侧的 43 行（`cjk|cjk 36` + 拉丁/数字交界 7），逐行数字数：
+
+1. **24 行是真少装**（中位少 1 个字，最多少 4 个）——属宽度模型，与第 29.2 节那 7 处拉丁/数字同一件事。
+2. **17 行两边字数一样，只是断在别的字符上**——这不是容量问题，是断点选择：同一串拉丁/数字挂在行尾还是行首。
+   实例（第 29.3 节的 para 86）：Word 那一行 `...P-Cu/SB/Cu | 夹`，我们 `...B/P-Cu/SB/ | Cu夹`，
+   字数一样，差在 `Cu` 归到哪一边。这一族跟第 29.2 节的"斜杠不是 Word 的断点"是同一条规则，
+   **不需要动宽度模型就能拿下来**，而且是 17 处，不是 3 处。
+3. Word 在这些行上的逐字步长中位 15.302 px 是两端对齐撑开之后的墨迹步长（撑开的行会高于 16.00），
+   这一列只用来证明"Word 的行确实是被撑满的"，不用来对字库 advance 表。
+
+所以下一轮的顺序改了：**先做断点选择那一族（17 处：斜杠不可断 + 拉丁/数字整块归行首还是行尾）**，
+再动宽度模型（24 处 + 拉丁/数字那 7 处）。页数 > 断点 > 行高这条不动，改哪一族都要先把第 1 条与第 6 条复采贴上来。

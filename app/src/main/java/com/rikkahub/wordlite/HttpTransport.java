@@ -88,6 +88,8 @@ public final class HttpTransport {
         public boolean capped;
         public long millis;
         public String via = "";
+        /** 这一份是跟了几跳跳转才落定的：0 = 一击命中。下载口常常先 302 到对象存储。 */
+        public int hops;
     }
 
     /**
@@ -100,29 +102,71 @@ public final class HttpTransport {
                                  ApiClient.Cancellation cancellation, java.net.Proxy proxy,
                                  boolean allowPlainHttp) throws IOException {
         int limit = maxBytes <= 0 ? MAX_PDF_BODY : Math.min(maxBytes, MAX_PDF_BODY);
+        /* 取文件这一路要跟着跳转走：期刊与机构库的下载口十有八九先 302 到对象存储或镜像。实测
+           https://ritsumei.repo.nii.ac.jp/record/18320/files/ir_35_4_ka.pdf 回 302 + Location，
+           跟一跳到 oraclecloud 对象存储，落回一份 2,051,962 B、开头是 %PDF-1.6 的真 PDF；
+           不追跳转时这份材料在账上只是"检索源发生重定向"，用户看到的是"下载 0 篇"。
+           检索那一路（JSON/gRPC-web）照旧一跳不追：跳转后拿 HTML 换 JSON 没有意义。
+           跟错了对象也不脏：是不是 PDF 由 %PDF- 头判，跟到网页就落成 not-a-pdf 并带上字节数。 */
         boolean[] capped = new boolean[1];
-        ApiClient.Response response = send(url, headers, timeoutSeconds, limit, cancellation, proxy,
-                null, null, capped, allowPlainHttp);
-        Fetched fetched = new Fetched();
-        fetched.status = response.status;
-        fetched.bytes = response.raw == null ? new byte[0] : response.raw;
-        fetched.capped = capped[0];
-        fetched.millis = response.elapsedMillis;
-        fetched.via = response.via == null ? "" : response.via;
-        return fetched;
+        String target = url;
+        int hops = 0;
+        while (true) {
+            String[] location = new String[1];
+            capped[0] = false;
+            ApiClient.Response response;
+            try {
+                response = send(target, headers, timeoutSeconds, limit, cancellation, proxy,
+                        null, null, capped, allowPlainHttp, location);
+            } catch (ApiClient.Failure error) {
+                String next = redirect(error.status, location[0], target, hops, allowPlainHttp);
+                if (next == null) throw error;
+                target = next;
+                hops++;
+                continue;
+            }
+            Fetched fetched = new Fetched();
+            fetched.status = response.status;
+            fetched.bytes = response.raw == null ? new byte[0] : response.raw;
+            fetched.capped = capped[0];
+            fetched.millis = response.elapsedMillis;
+            fetched.via = response.via == null ? "" : response.via;
+            fetched.hops = hops;
+            return fetched;
+        }
+    }
+
+    /** 最多跟三跳：实测一站到底的下载口一跳就够，超过三跳的都是把人往登录页上绕。 */
+    private static final int MAX_PDF_REDIRECTS = 3;
+
+    /**
+     * 这一跳该不该跟。只有"源答了 3xx + 给了 Location + 还没跟满次数"才跟；
+     * Location 是相对地址也接得住。跳完之后协议规矩照旧——不许借跳转把下载落到 http 上。
+     */
+    private static String redirect(int status, String location, String from, int hops, boolean allowPlainHttp) {
+        if (location == null || location.trim().isEmpty()) return null;
+        if (status < 300 || status >= 400) return null;
+        if (hops >= MAX_PDF_REDIRECTS) return null;
+        try {
+            java.net.URL next = new java.net.URL(new java.net.URL(from.trim()), location.trim());
+            parse(next.toString(), allowPlainHttp);
+            return next.toString();
+        } catch (Exception invalid) {
+            return null;
+        }
     }
 
     private static ApiClient.Response send(String url, Map<String, String> headers, int timeoutSeconds,
                                            int maxBytes, ApiClient.Cancellation cancellation,
                                            java.net.Proxy proxy, byte[] form, String contentType)
             throws IOException {
-        return send(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, form, contentType, null, false);
+        return send(url, headers, timeoutSeconds, maxBytes, cancellation, proxy, form, contentType, null, false, null);
     }
 
     private static ApiClient.Response send(String url, Map<String, String> headers, int timeoutSeconds,
                                            int maxBytes, ApiClient.Cancellation cancellation,
                                            java.net.Proxy proxy, byte[] form, String contentType,
-                                           boolean[] cappedOut, boolean allowPlainHttp)
+                                           boolean[] cappedOut, boolean allowPlainHttp, String[] locationOut)
             throws IOException {
         /* 一条请求可能同时有直连和经电脑代理两条路，而哪条通取决于用户此刻的网络：国内库直连快，
            海外源往往非得借代理才出得去。按主机名把候选路排个先后逐条试——只有"连不上"才值得换路，
@@ -136,12 +180,16 @@ public final class HttpTransport {
            "我代理是不是填错了"，真正的原因是这台手机在自己的网络上出不去。谁撞了什么就都列出来。 */
         StringBuilder burned = new StringBuilder();
         boolean roadDown = false;
+        /* 有没有哪条路从源拿到了答话（429/403/302 都算答了话）。答了话的那一句才是这一轮的真相，
+           后面任何一条拨不上的路都不许替它改写。 */
+        ApiClient.Failure answered = null;
+        java.net.Proxy answeredVia = proxy;
         for (int i = 0; ; ) {
             java.net.Proxy via = order.get(i);
             try {
                 ApiClient.Response reached = once(url, headers,
                         Routes.connectSeconds(proxy, via, timeoutSeconds), maxBytes, cancellation,
-                        via, form, contentType, cappedOut, allowPlainHttp);
+                        via, form, contentType, cappedOut, allowPlainHttp, locationOut);
                 Routes.succeeded(via);
                 Routes.note(url, via);
                 reached.via = Routes.label(via);
@@ -161,15 +209,48 @@ public final class HttpTransport {
                    换路也不把它记成"这条路不通"——那条路本身是好的，下一次还得走它。 */
                 boolean reroutable = error.status == 429;
                 if (roadDown) {
-                    Routes.failed(url, via);
+                    Routes.failed(url, via, brief(error));
                     if (error.refused) Routes.portRefused(via);
                     if (burned.length() > 0) burned.append("；");
                     burned.append(Routes.label(via)).append(' ').append(brief(error));
+                } else if (error.status > 0) {
+                    /* 源答了话：这条路把包送出去了，它的冷却当场作废；先答的那一条留着当这一轮的说法。 */
+                    Routes.proofOfLife(via);
+                    Routes.answered(url, via, error.status);
+                    if (answered == null) {
+                        answered = error;
+                        answeredVia = via;
+                    }
                 }
                 if (++i >= order.size() || (!roadDown && !reroutable)) break;
             }
         }
 
+        /* 有一条路从源拿到了答话，这一轮的说法就是那句答话，拨不上的路只能排在它后面；两种都要
+           把走过的路原样列出来，"这条代理到底被试过没有"不许让用户去猜。
+           真机 2026-10-09 00:51 那一轮实测：Crossref 与 Semantic Scholar 经电脑上 adb reverse 进来的
+           Clash（127.0.0.1:7897）各拿到一次 HTTP 429（匿名配额按出口 IP 计，同一条代理在同一轮里为
+           OpenAlex 送回来 60 篇候选），换直连被当场拒回，旧写法把整句改写成"试过的路都没通：直连
+           拒绝连接"——屏幕上读起来像那条代理从没被试过。宿主同形状复现：status=0、reachOf=-1。 */
+        StringBuilder walked = new StringBuilder();
+        /* 只有一条路时一个字都不改写：那时候"源答了什么"已经是全部信息，而下游按整句比对的判据
+           （DetectRegression 认 404/429 那两句原话）照旧要认它。"走过哪几条路"只在多条路之间说得通。 */
+        if (order.size() > 1) {
+            if (answered != null)
+                walked.append(Routes.label(answeredVia)).append(" 答了 HTTP ").append(answered.status);
+            if (burned.length() > 0) {
+                if (walked.length() > 0) walked.append("；");
+                walked.append(burned);
+            }
+        }
+        String roads = walked.length() > 0 ? "（这一轮走过的路：" + walked + "）" : "";
+        if (answered != null) {
+            failure = new ApiClient.Failure(answered.getMessage() + roads, answered.status);
+            failure.refused = answered.refused;
+            failure.retryAfterSeconds = answered.retryAfterSeconds;
+            failedVia = answeredVia;
+            roadDown = false;
+        }
         if (roadDown && burned.length() > 0 && order.size() > 1) {
             /* 路是全烧完的，不是某一条坏了：报"哪几条路各撞了什么"，而不是只报最后一条的下场。
                只有一条路时不改写：那时候"请求超时"已经是全部信息，而下游按前缀分类的判据照旧要认它。 */
@@ -182,11 +263,11 @@ public final class HttpTransport {
         /* 对方报了时限就等它说的这么久（有上限），没报就立刻重试只是撞在同一个窗口里：
            实测 Semantic Scholar 的匿名共享配额连续五次都不带 Retry-After，七百毫秒后再打一次必然还是 429。 */
         if (failure.retryAfterSeconds <= 0)
-            throw new ApiClient.Failure("检索源限流（HTTP 429），本次跳过", failure.status);
+            throw new ApiClient.Failure("检索源限流（HTTP 429），本次跳过" + roads, failure.status);
         long wait = failure.retryAfterSeconds * 1000L;
         if (wait > MAX_RETRY_WAIT_MILLIS)
             throw new ApiClient.Failure("检索源限流，约 " + failure.retryAfterSeconds
-                    + " 秒后恢复，本次跳过", failure.status);
+                    + " 秒后恢复，本次跳过" + roads, failure.status);
         try {
             Thread.sleep(wait);
         } catch (InterruptedException interrupted) {
@@ -194,7 +275,7 @@ public final class HttpTransport {
             throw failure;
         }
         ApiClient.Response retry = once(url, headers, timeoutSeconds, maxBytes, cancellation, failedVia,
-                form, contentType, cappedOut, allowPlainHttp);
+                form, contentType, cappedOut, allowPlainHttp, locationOut);
         retry.attempts = 2;
         retry.via = Routes.label(failedVia);
         return retry;
@@ -224,7 +305,7 @@ public final class HttpTransport {
     private static ApiClient.Response once(String url, Map<String, String> headers, int timeoutSeconds,
                                            int maxBytes, ApiClient.Cancellation cancellation,
                                            java.net.Proxy proxy, byte[] form, String contentType,
-                                           boolean[] cappedOut, boolean allowPlainHttp)
+                                           boolean[] cappedOut, boolean allowPlainHttp, String[] locationOut)
             throws IOException {
         /* 上限的天花板：要整份响应的源最多 MAX_BODY，愿意"读满就收工"的那一路（PDF）到 MAX_PDF_BODY。 */
         int ceiling = cappedOut == null ? MAX_BODY : MAX_PDF_BODY;
@@ -255,6 +336,8 @@ public final class HttpTransport {
             }
             if (form != null) writeForm(connection, form, cancellation);
             int status = connection.getResponseCode();
+            /* Location 要先抄下来再抛：跳转本身是失败（检索那一路不追），但下载那一路要靠它续下去。 */
+            if (locationOut != null) locationOut[0] = connection.getHeaderField("Location");
             if (status >= 300 && status < 400) throw new ApiClient.Failure("检索源发生重定向", status);
             if (status < 200 || status >= 300) {
                 ApiClient.Failure failure = new ApiClient.Failure(statusMessage(status), status);

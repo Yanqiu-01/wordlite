@@ -682,10 +682,12 @@ public final class DetectRegression {
                 "主机名解析取端口与查询串之前的部分，坏链接回空");
         check(PaperSources.pdfUrlRank("http://www.cjmenet.com.cn/CN/x.do") == 0
                         && PaperSources.pdfUrlRank("https://random-host.example.org/a.pdf") == 1
-                        && PaperSources.pdfUrlRank("http://random-host.example.org/a.pdf") == 2
+                        && PaperSources.pdfUrlRank("http://random-host.example.org/a.pdf") == 4
                         && PaperSources.pdfUrlRank("https://doi.org/10.1000/abc") == 3
                         && PaperSources.pdfUrlRank("") == 9,
-                "白名单期刊官网 > 其它 https > 其它 http > doi.org 跳转壳");
+                "白名单期刊官网 > 其它 https > doi.org 跳转壳；白名单外的 http 单独一档 4——"
+                        + "传输层按规矩不下它（实测 http://sioc-journal.cn 那条被\"检索源必须使用 HTTPS\"挡下，"
+                        + "同一条改 https 是 403），既不许花全文额度也不许进\"可以下进自建库\"那一屏");
         check(PaperSources.plainHttpAllowed("http://www.cjmenet.com.cn/CN/x.do")
                         && !PaperSources.plainHttpAllowed("http://evil.example.org/a.pdf")
                         && !PaperSources.plainHttpAllowed("http://127.0.0.1:1/a.pdf"),

@@ -39,6 +39,14 @@ public final class DocxTextLayout {
          * 而整行行盒装进版心只装得下 32 行。与 lineCarry 同一条门槛：没量过行高的字体这里是 0。
          */
         public float lineHang;
+        /**
+         * 每行末尾被"悬挂到版心外"的那个标点，画出来比 StaticLayout 报的行宽多出去的那几像素。
+         * 悬挂的标点在版心里只占它剩下的那点位置，字形却按整宽画在版心外（Word 真值：11.42~12.44pt，
+         * 工具 tools/hang-truth.py），所以 StaticLayout 说这行正好止于右边界，墨却到了右边界之外。
+         * 画图与 tools/edge-parity.ps1 都要把这一段加回去，否则 Word 那行右边界在版心外 16px，
+         * 我们却报成贴着右边界。没有悬挂标记的行是 0。
+         */
+        public float[] lineOverhang = new float[0];
         Paragraph(DocxDocument.ParagraphBlock source, StaticLayout layout, float x,
                   DocxFieldEngine.DisplayMap displayMap) {
             this.source = source; this.layout = layout; this.x = x; this.displayMap = displayMap;
@@ -145,9 +153,41 @@ public final class DocxTextLayout {
         Paragraph out = new Paragraph(paragraph, layout, x, display);
         out.lineCarry = spacing == null ? 0f : spacing.lineCarry;
         out.lineHang = spacing == null ? 0f : spacing.lineHang;
+        out.lineOverhang = lineOverhangPx(layout);
         return out;
     }
 
+    /**
+     * A hanging mark is measured at zero or near-zero width, which is only safe while it really is
+     * the last character of its line: mid-line it would slide everything after it to the left. A
+     * later pass can move one, so every pass gives back the advance of any mark that moved.
+     */
+    private static void dropMarksThatMoved(SpannableStringBuilder text, StaticLayout layout) {
+        for (PunctInkWidth span : text.getSpans(0, text.length(), PunctInkWidth.class)) {
+            int start = text.getSpanStart(span);
+            if (start < 0 || layout.getLineEnd(layout.getLineForOffset(start)) != start + 1)
+                text.removeSpan(span);
+        }
+    }
+
+    /**
+     * Per line, how far the drawn glyphs pass the width StaticLayout reports. Only a hanging mark
+     * that really ends the line counts: if a later pass moved it mid-line it is no longer an
+     * overflow, and counting it would move the right edge of a line that never hung.
+     */
+    private static float[] lineOverhangPx(StaticLayout layout) {
+        CharSequence text = layout.getText();
+        float[] over = new float[layout.getLineCount()];
+        if (!(text instanceof Spanned)) return over;
+        Spanned spanned = (Spanned) text;
+        for (int i = 0; i < over.length; i++) {
+            int end = layout.getLineEnd(i);
+            if (end <= 0 || end > text.length()) continue;
+            for (PunctInkWidth span : spanned.getSpans(end - 1, end, PunctInkWidth.class))
+                if (spanned.getSpanStart(span) == end - 1) over[i] += span.overhangPx;
+        }
+        return over;
+    }
     private static StaticLayout build(Spannable text, TextPaint paint, int width,
                                       Layout.Alignment alignment, boolean justify, boolean wordWrap) {
         StaticLayout.Builder builder = StaticLayout.Builder.obtain(text, 0, text.length(), paint, width)
@@ -190,18 +230,45 @@ public final class DocxTextLayout {
     }
 
     /**
-     * Second pass emulating Word's hanging punctuation. A line whose greedy
-     * fill stopped before a "CJK char + hangable punctuation" pair (Android
-     * kinsoku pulled the pair down) gets the punctuation pulled back up if its
-     * ink would fit, exactly like Word's overflowPunct. Measured ink fractions
-     * come from the bundled SimSun glyphs (ink / em).
+     * Word's w:overflowPunct, measured on the PDF Word exported rather than assumed.
+
+     * Of the 370 body lines that start on the left margin and are drawn at 12 pt, 22 end with the
+     * last character's box 11.42 to 12.44 pt PAST Word's own right margin (tools/hang-truth.py over
+     * artifacts/agent-typeset/pdf-truth/input-liu.pdf, pymupdf rawdict per-character boxes). That is
+     * one full em of a full-width mark, never more than one mark per line. The marks Word was
+     * actually seen hanging here are ，×7 。×7 、×4 ；×2 and ℃×2. The first
+     * four are closing marks our set covers; ℃ is not a mark we hang, so those 2 lines stay a
+     * known remaining error.
+
+     * So a closing mark that no longer fits is not pushed down (Word's kinsoku forbids a closing
+     * mark starting a line): it stays at the end of this line, spends only the room the line still
+     * has INSIDE the margin, and draws the rest of its advance outside.
+
+     * The rule this replaces asked for the mark's INK to fit inside the column. That can never fire
+     * on a justified Chinese line, because justifyEastAsian() has already spread such a line to the
+     * column, so on every one of those 22 lines we simply dropped the mark to the next line and ran
+     * one character short.
      */
+    /**
+     * Where a hanging mark lands: it may only claim the room the line still has INSIDE the column,
+     * and the rest of its advance is drawn outside. Returns {roomInsidePx, overhangPx}.
+
+     * Pinned by tests/HangPunctuationRegression.java against Word's own PDF: a justified Chinese line
+     * spread to the 566.93 px column plus a 16 px full-width mark must end 583 px from the column's
+     * left, which is the 522.3 pt Word puts its right edge at (11.42 to 12.44 pt of one full mark
+     * outside the margin, tools/hang-truth.py).
+     */
+    static float[] hangSplit(float lineRight, float width, float markAdvance) {
+        float room = Math.max(0f, width - lineRight);
+        return new float[]{room, Math.max(0f, markAdvance - room)};
+    }
     private static StaticLayout hangTrailingPunctuation(SpannableStringBuilder text, TextPaint paint,
                                                          StaticLayout layout, int width,
                                                          Layout.Alignment alignment, boolean wordWrap,
                                                          boolean platformJustify) {
         for (int pass = 0; pass < 3; pass++) {
             ArrayList<Integer> marks = new ArrayList<Integer>();
+            ArrayList<Float> inside = new ArrayList<Float>();
             int lines = layout.getLineCount();
             for (int k = 0; k + 1 < lines; k++) {
                 int head = layout.getLineStart(k + 1);
@@ -209,31 +276,33 @@ public final class DocxTextLayout {
                 if (text.getSpans(head, head + 1, ReplacementSpan.class).length > 0) continue;
                 char first = text.charAt(head);
                 float lineRight = layout.getLineWidth(k);
-                float inkHead = hangInkFraction(first);
-                if (inkHead > 0) {
-                    // Punctuation pushed to the next line's start; hang it when its ink fits.
-                    if (lineRight + ceilInk(charAdvance(text, paint, head), inkHead) <= width + 0.5f)
-                        marks.add(head);
+                if (isHangingPunctuation(first)) {
+                    marks.add(head);
+                    inside.add(hangSplit(lineRight, width, charAdvance(text, paint, head))[0]);
                     continue;
                 }
                 if (!isCjk(first) || isCjkPunctuation(first)) continue;
                 if (head + 2 > text.length()
                         || text.getSpans(head + 1, head + 2, ReplacementSpan.class).length > 0) continue;
-                char punct = text.charAt(head + 1);
-                float fraction = hangInkFraction(punct);
-                if (fraction <= 0) continue;
+                if (!isHangingPunctuation(text.charAt(head + 1))) continue;
                 float advanceFirst = charAdvance(text, paint, head);
-                float inkPunct = ceilInk(charAdvance(text, paint, head + 1), fraction);
-                // Word takes "first + hanging punct" when that fits the line;
-                // the follower keeps its full width on the next line.
-                if (lineRight + advanceFirst + inkPunct <= width + 0.5f)
-                    marks.add(head + 1);
+                // Only the mark may cross the margin; the plain character in front of it still has
+                // to land inside, which is what Word's measured one-em overflow means.
+                if (lineRight + advanceFirst > width + 0.5f) continue;
+                marks.add(head + 1);
+                inside.add(hangSplit(lineRight + advanceFirst, width,
+                        charAdvance(text, paint, head + 1))[0]);
             }
             if (marks.isEmpty()) return layout;
-            for (int at : marks)
-                text.setSpan(new PunctInkWidth(hangInkFraction(text.charAt(at))),
+            for (int i = 0; i < marks.size(); i++) {
+                int at = marks.get(i);
+                float room = inside.get(i);
+                float markAdvance = charAdvance(text, paint, at);
+                text.setSpan(new PunctInkWidth(room, Math.max(0f, markAdvance - room)),
                         at, at + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
             layout = build(text, paint, width, alignment, platformJustify, wordWrap);
+            dropMarksThatMoved(text, layout);
         }
         return layout;
     }
@@ -635,10 +704,6 @@ public final class DocxTextLayout {
         return total;
     }
 
-    private static float ceilInk(float advance, float fraction) {
-        return (float) Math.ceil(advance * fraction);
-    }
-
     private static float charAdvance(Spannable text, TextPaint base, int offset) {
         TextPaint paint = new TextPaint(base);
         for (MetricAffectingSpan span : text.getSpans(offset, offset + 1, MetricAffectingSpan.class))
@@ -646,18 +711,25 @@ public final class DocxTextLayout {
         return paint.measureText(text, offset, offset + 1);
     }
 
-    /** Ink fraction (ink / em) of punctuation Word allows to hang past the margin. */
-    private static float hangInkFraction(char c) {
+    /**
+     * The marks Word lets hang. Read off its own PDF (tools/hang-truth.py): 20 of the 22 overflowing
+     * body lines end on one of these closing marks. The other 2 end on ℃, which is deliberately
+     * not here yet -- hanging a unit sign is a different rule from hanging a sentence mark, and
+     * guessing it would move a right edge on a line where Word may not have moved one.
+     */
+    private static boolean isHangingPunctuation(char c) {
         switch (c) {
-            case '\u3002': return 0.356f; // 。
-            case '\uff0c': return 0.278f; // ，
-            case '\u3001': return 0.351f; // 、
-            case '\uff1b': return 0.264f; // ；
-            case '\uff1a': return 0.269f; // ：
-            case '\uff1f': return 0.474f; // ？
-            case '\uff01': return 0.371f; // ！
-            case '\u201d': return 0.516f; // ”
-            default: return -1f;
+            case '\u3002': // 。
+            case '\uff0c': // ，
+            case '\u3001': // 、
+            case '\uff1b': // ；
+            case '\uff1a': // ：
+            case '\uff1f': // ？
+            case '\uff01': // ！
+            case '\u201d': // ”
+                return true;
+            default:
+                return false;
         }
     }
 
@@ -1556,16 +1628,23 @@ public final class DocxTextLayout {
     }
 
     /**
-     * Word's hanging punctuation: the trailing mark is measured by its ink so
-     * the line can also hold the character before it; drawing shows the full
-     * glyph, so mid-line positions are unchanged.
+     * A trailing mark Word hangs past the margin: it is measured by only the room still open inside
+     * the column, while drawing shows the glyph at its full advance, so the rest hangs outside and
+     * no other position on the line moves. `overhangPx` is that outside part, which the renderer and
+     * the right-edge measurement have to add back: StaticLayout reports the line ending at the
+     * margin, while the ink visibly ends overhangPx past it -- exactly where Word's own line ends
+     * (11.42 to 12.44 pt of it, measured).
      */
     private static final class PunctInkWidth extends ReplacementSpan {
-        private final float inkFraction;
-        PunctInkWidth(float inkFraction) { this.inkFraction = inkFraction; }
+        private final int roomInsidePx;
+        public final float overhangPx;
+        PunctInkWidth(float roomInside, float overhangPx) {
+            this.roomInsidePx = Math.max(0, (int) Math.floor(roomInside));
+            this.overhangPx = overhangPx;
+        }
         @Override public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
             if (fm != null) paint.getFontMetricsInt(fm);
-            return Math.max(1, (int) Math.ceil(paint.measureText(text, start, end) * inkFraction));
+            return roomInsidePx;
         }
         @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
                                    float x, int top, int y, int bottom, Paint paint) {

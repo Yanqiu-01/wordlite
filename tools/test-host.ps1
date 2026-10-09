@@ -51,6 +51,8 @@ function Add-Suite([string]$name, $argv) { [void]$suites.Add([pscustomobject]@{ 
 Add-Suite "Regression"             @("tests/fixture.docx", "$out/roundtrip")
 Add-Suite "ScriptRegression"       @()
 Add-Suite "WordLineHeightRegression" @()
+# Word 悬挂末行标点的落点算术：真值是 Word 导出 PDF 里那 22 行越界的行（tools/hang-truth.py）。
+Add-Suite "HangPunctuationRegression" @()
 Add-Suite "TextCorpusRegression"   @()
 Add-Suite "SourceLedgerRegression" @()
 Add-Suite "CharLedgerRegression"   @()

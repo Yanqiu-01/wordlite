@@ -226,6 +226,12 @@ def x_of(raw_offset, w):
     return sum(1 for c in w["raw"][:raw_offset] if c not in SPACEISH)
 
 
+def span_chars(raw, a, b):
+    """How many real (non-space) characters sit between two break offsets."""
+    lo, hi = sorted((a, b))
+    return sum(1 for c in raw[lo:hi] if c not in SPACEISH)
+
+
 def page_at(blk, x):
     acc = 0
     for line in blk["lines"]:
@@ -310,6 +316,12 @@ def main():
         dset_raw = set()
         for x in sorted(dset):
             dset_raw.add(canon(raw, order[x - 1] + 1) if x - 1 < len(order) else len(raw))
+        wcut_sorted = sorted(wset)
+
+        def word_line_of(off):
+            """1-based index of Word's line that holds the character at raw offset `off`."""
+            return 1 + sum(1 for e in wcut_sorted if e < off)
+
         for k in sorted(wset | dset_raw):
             inw, ind = k in wset, k in dset_raw
             both += 1 if inw and ind else 0
@@ -324,7 +336,17 @@ def main():
                          "cut_class": cls, "prev_char": raw[k - 1] if k else "",
                          "next_char": raw[k] if k < len(raw) else "",
                          "word_page": wpage, "device_page": blk["start_page"],
+                         "word_line": word_line_of(k),
+                         "word_lines": len(w["lines"]),
+                         "nearest_word_cut": "", "word_cut_chars_off": "",
                          "context": raw[max(0, k - 10):k] + "|" + raw[k:k + 10]})
+            if side == "phone_only" and wcut_sorted:
+                near = min(wcut_sorted, key=lambda e: (abs(e - k), e))
+                rows[-1]["nearest_word_cut"] = near
+                rows[-1]["word_cut_chars_off"] = (span_chars(raw, k, near)
+                                                  if near != k else 0) * (1 if near > k else -1)
+            elif side == "phone_only":
+                rows[-1]["word_cut_chars_off"] = ""
             if side == "word_only" and is_citation(raw, k):
                 citation_rows.append(rows[-1])
         if w["page"] != blk["start_page"]:
@@ -378,6 +400,29 @@ def main():
         print("  " + label + " by class:")
         for cls, n in cnt.most_common():
             print("      %-20s %4d" % (cls, n))
+    print("")
+    print("phone_only, class by class, with how far Word's nearest break sits.")
+    print("  chars_off > 0 means Word broke LATER than us -- our line ended short (a width/advance gap).")
+    print("  chars_off < 0 means Word broke EARLIER -- Word moved something down that we kept.")
+    print("  A class whose instances are almost all |chars_off| = 1 is a width problem, not a break rule.")
+    mispaged = set(pi for pi, _blk, _wp, _dp in page_diff)
+    for cls, n in collections.Counter(r["cut_class"] for r in rows
+                                      if r["side"] == "phone_only").most_common():
+        ins = [r for r in rows if r["side"] == "phone_only" and r["cut_class"] == cls
+               and r["word_cut_chars_off"] != ""]
+        offs = sorted(abs(int(r["word_cut_chars_off"])) for r in ins)
+        one = sum(1 for o in offs if o == 1)
+        med = offs[len(offs) // 2] if offs else 0
+        drags = len(set(r["word_para"] for r in rows
+                        if r["side"] == "phone_only" and r["cut_class"] == cls
+                        and r["word_para"] in mispaged))
+        print("  %-20s %3d  drags %d of %d mis-paged paragraphs  |chars_off| median %2d, exactly 1 char: %3d/%3d  -> %s"
+              % (cls, n, drags, len(mispaged), med, one, len(ins),
+                 "width, one character" if offs and one >= len(ins) * 0.7 else "break rule"))
+        for r in ins[:a.Top]:
+            print("        para %3d blk %3d %s line %s/%s  off %+4d  %r"
+                  % (r["word_para"], r["device_block"], r["word_page"], r["word_line"],
+                     r["word_lines"], int(r["word_cut_chars_off"]), r["context"]))
     print("")
     print("page assignment from this same truth file: %d of %d compared paragraphs start on a "
           "different page (%.1f%%)" % (len(page_diff), len(pairs),

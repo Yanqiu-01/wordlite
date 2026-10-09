@@ -3,7 +3,10 @@
 #
 # Usage:  pwsh tools/device-probe.ps1 [[-Query <text>] [-Engines a,b] [-Proxy host:port]
 #         [-Reverse] [-Serial <sn>] [-Per N] [-Timeout s] [-IncludeCnki] [-Keep]
-#         [-Mode engines|fulltext] [-Fetch N] [-Budget N]     (fulltext: see EngineProbe's BODY/EMPTY lines)
+#         [-Mode engines|fulltext|scan] [-Fetch N] [-Budget N] [-Windows N] [-Doc <本地正文.txt>]
+#         scan = 应用那一路的整轮：稿件以纯文本推进 DuplicateEngine.scan（参数 per=12 windows=6
+#         fullTexts=6 timeout=20 与手机上那次查重一致），报"可比正文 N 篇"与下载那一屏的逐篇形状。
+#         fulltext: see EngineProbe's BODY/EMPTY lines
 #
 # Which classes the probe needs (deliverable 4, resolved automatically by javac via -sourcepath and
 # printed as "closure:" on every run):
@@ -40,13 +43,15 @@ param(
     [int]$Per = 5,
     [int]$Timeout = 25,
     [switch]$IncludeCnki,
-    [ValidateSet("engines","fulltext")][string]$Mode = "engines",
+    [ValidateSet("engines","fulltext","scan")][string]$Mode = "engines",
     [int]$Fetch = 3,
     [int]$Budget = 6,
     [switch]$Keep,
     [switch]$BuildOnly,
     [switch]$NoTcp,
-    [string]$JavaHome = ""
+    [string]$JavaHome = "",
+    [int]$Windows = 0,
+    [string]$Doc = ""
 )
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false
@@ -63,6 +68,7 @@ $probeSrc = Join-Path $root "tests/android/EngineProbe.java"
 $cnkiReal = Join-Path $appJava "com/rikkahub/wordlite/CnkiSearch.java"
 $remoteDex   = "/data/local/tmp/wordlite-engine-probe.dex"
 $remoteQuery = "/data/local/tmp/wordlite-probe-query.txt"
+$remoteDoc   = "/data/local/tmp/wordlite-probe-doc.txt"
 $remoteClass = "com.rikkahub.wordlite.EngineProbe"
 
 function Invoke-Checked {
@@ -163,6 +169,10 @@ try {
     Write-Host "== push =="
     Invoke-Checked $adb @("-s", $device, "push", $localDex, $remoteDex)
     Invoke-Checked $adb @("-s", $device, "push", $localQuery, $remoteQuery)
+    if ($Mode -eq "scan") {
+        if (-not $Doc) { throw "-Mode scan 要配 -Doc <稿件正文.txt>：手机上的 app_process 没有 DocxParser，稿件以纯文本进同一条 scan" }
+        Invoke-Checked $adb @("-s", $device, "push", $Doc, $remoteDoc)
+    }
 
     if ($Reverse) {
         Write-Host ("== adb reverse tcp:{0} tcp:{0} ==" -f $ReversePort)
@@ -177,6 +187,8 @@ try {
     if ($Engines) { $argv[-1] += (" --only=" + $Engines) }
     if ($Proxy)   { $argv[-1] += (' --proxy=' + $Proxy) }
     if ($NoTcp)   { $argv[-1] += ' --no-tcp' }
+    if ($Windows -gt 0) { $argv[-1] += (' --windows=' + $Windows) }
+    if ($Mode -eq "scan") { $argv[-1] += (' --doc=' + $remoteDoc) }
     Write-Host ("> adb -s <sn> shell " + $argv[-1]) -ForegroundColor DarkGray
     Write-Host ("   remote: CLASSPATH=" + $remoteDex + " app_process / " + $remoteClass + " ...")
     & $adb @argv
@@ -191,7 +203,7 @@ try {
     }
     if (-not $Keep) {
         Write-Host "== cleanup =="
-        & $adb -s $device shell rm -f $remoteDex $remoteQuery 2>&1 | Out-Null
+        & $adb -s $device shell rm -f $remoteDex $remoteQuery $remoteDoc 2>&1 | Out-Null
     } else {
         Write-Host ("kept " + $remoteDex + " on the device (-Keep)")
     }

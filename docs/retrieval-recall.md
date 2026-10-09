@@ -289,6 +289,49 @@
 4188/19967 字 · 总相似度比 0.13% · 知网、万方、维普只回摘要 · 可比正文 0 篇。
 两个数不是同一个口径，谁也不许顶替谁。
 
+**手机侧第一次报出非零的可比正文**（2026-10-09 当天晚些时候，`EAMUT20528011355` / Android 10，
+`tools/device-probe.ps1 -Mode scan`：在 `app_process` 上跑**同一条** `DuplicateEngine.scan`，
+稿件是 `tests/corpus/real-prose.txt`（从 `tests/samples/input-liu.docx` 逐段抽出的正文，
+20,935 字 / 125 段），参数与手机上那次查重一致 `perEngine=12 windows=6 fullTexts=6 timeout=20`，
+代理 `127.0.0.1:7897`（`adb reverse`））：
+
+| 指标 | 手机这一轮 |
+| --- | --- |
+| 候选 / 入库 | 60 / 49（跨源合并 2 篇） |
+| **可比正文（抓到开放获取全文）** | **1 篇** |
+| 只有摘要可比 / 只有题录 | 48 / 11 |
+| 检索窗口 / 覆盖 | 6 / 42 窗口，3,724 / 19,483 字（19.11%） |
+| 总相似度比 | 0.14% |
+| 用时 | 86.8 秒 |
+
+抓到那 1 篇的是开放获取源，**不是知网、万方、维普**：这一轮万方、国家哲社、arXiv 各自
+"未命中相关文献"，Semantic Scholar 因为手机只有代理这一条出海路而整源跳过。
+所以"手机可比正文 > 0"这一条成立；如果 4.0.0 要的是"知网的正文"，那条仍然没有。
+
+同一轮里那一屏"可以下进自建库"的逐篇形状（`hops` = 跟了几跳跳转才落定）：
+
+| # | 来源 | 状态 | 字节 | 解出字数 | 形状 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | openalex | 200 | 2,017,480 | 5,454 | `pdf-body-partial` |
+| 2 | openalex | 拨不通 | 0 | 0 | `fetch-failed`（直连 拒绝连接） |
+| 3 | openalex | 200 | 1,479,630 | 7,676 | `pdf-body` |
+| 4 | openalex | 拨不通 | 0 | 0 | `fetch-failed`（直连 拒绝连接） |
+| 5 | openalex | 200 | 1,537,271 | 5,073 | `pdf-body` |
+| 6 | openalex | 200 | 23,682 | 0 | `not-a-pdf` |
+
+屏上那句标题行因此是 `导入 3 篇，失败 3 个（没打通 2 个、回来的不是 PDF 1 个）`；
+改之前同一轮只会说 `导入 0 篇，失败 N 个`，逐篇回执统一是"没下载到内容"。
+电脑侧同一篇稿子同一参数（`tests/DownloadableProbe.java`）跑出来的 10 条是：
+`needs-entitlement` 5 条（全是 `europepmc.org/articles/PMC…?pdf=render`，五次全 **403 / 0 字节**，
+换浏览器 UA 与 Referer 照旧，`ptpmcrender.fcgi` 那条老口也 403）、`redirect-not-followed` 1 条、
+被 `检索源必须使用 HTTPS` 挡下的白名单外 http 2 条、真解出字 2 条（7,676 / 5,454 字）。
+`pdfUrlRank` 现在把渲染口与白名单外的 http 记 4，那一屏不再承诺我们根本下不来的东西。
+
+**跟跳转是这一轮唯一买到新字节的改动**（`HttpTransport.getPdf`；检索那一路照旧一跳不追）：
+`https://ritsumei.repo.nii.ac.jp/record/18320/files/ir_35_4_ka.pdf` 回 302 + Location，
+跟一跳到 oraclecloud 对象存储 → 200、2,051,962 B、开头 `%PDF-1.6`。
+同一句地址换成桌面 Chrome 的 UA 是 **406 / 558 B**——UA 不是病因，`HttpTransport.USER_AGENT` 别动。
+
 同一天在 PC 上逐条量"候选的全文链接到底从哪来、抓回来是什么"（检索式
 "多孔铜 瞬态液相连接 制备"，perEngine=5，代理 `127.0.0.1:7897`；编号都是当轮检索真回出来的）：
 
@@ -299,7 +342,7 @@
 | 万方 | 0 / 2 | 详情页是 Vue 壳（165,089 B，`摘要`/`全文精要` 零命中）；详情 RPC `getDetailInFormation` 3,931 B / 591 汉字 = 摘要 + 题录 | 匿名 RPC 只到摘要级 |
 | 维普 | 0 / 5 | `www.cqvip.com/doc/<id>` 302 到营销页（147,820 B / 1,568 汉字）；`qikan.cqvip.com/Qikan/Article/Detail?id=…` 412（带 warm cookie + 桌面 UA 也一样） | 未通 |
 | OpenAlex | 3 / 3 | 两条是 `doi.org` 跳转壳，一条是 `opticsjournal.net` 的 PDF 直链；三条的 BM25 全是 0 分 | 是错配，被零分闸门挡下，没花额度 |
-| Semantic Scholar | 2 / 5（另一轮实测） | 唯一带回字的是 `https://pdf.hanspub.org/MS20170300000_52023950.pdf`：`%PDF-1.5`、1,481,589 B → 12,853 字 | 中文 OA 站真给正文 |
+| Semantic Scholar | 2 / 5（另一轮实测） | 当时唯一带回字的是 `https://pdf.hanspub.org/MS20170300000_52023950.pdf`：`%PDF-1.5`、1,481,589 B → 12,853 字。**2026-10-09 复量：同一条两种 UA 都 302 → `https://www.hanspub.org/404.htm`（399 B，跟过去是 1,000 B 的 HTML）——这条已经死了，账上按 `not-a-pdf` 记，别再引那 12,853 字当凭据** | 中文 OA 站给过正文，这条链接现在不给 |
 | Europe PMC | 改前 5 / 5，改后 0 / 5 | 改前那 5 条是解析器拿 pmcid 自己拼的 `.../rest/MED/<pmcid>/fullTextXML`。实测两种拼法共六次全 **404 / 143 B** 的 JSON 报错，其中一条既是 `isOpenAccess=Y` 又是 `inEPMC=Y` 也照样 404；源自己在 `fullTextUrlList` 里给的 4 条中，NCBI 那条要追 301（追过去是 1,817 B 的 HTML 桩，传输层不追跳转），`europepmc.org` 那条 **403 / 5,485 B** | 匿名拿不到正文，只贡献摘要 |
 
 另有一件会伪装成"这个源没货"的事：同一条 OpenAlex 请求经 Clash 出口是 **429**（响应体明写

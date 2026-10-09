@@ -421,9 +421,10 @@ public final class CandidateRankerRegression {
 
         check(CandidateRanker.fetchWeight(shell) == 0d && CandidateRanker.fetchWeight(journal) == 1d
                         && CandidateRanker.fetchWeight(plainHttps) == 0.9d
-                        && CandidateRanker.fetchWeight(plainHttp) == 0.7d
+                        && CandidateRanker.fetchWeight(plainHttp) == 0d
                         && CandidateRanker.fetchWeight(candidate("cnki", "U1", "标题", TOPIC[0], "l", "")) == 0d,
-                "链接分量：白名单期刊官网 1.0、其它 https 0.9、其它 http 0.7、doi.org 跳转壳与没链接 0");
+                "链接分量：白名单期刊官网 1.0、其它 https 0.9、doi.org 跳转壳与没链接 0；"
+                        + "白名单外的 http 也是 0——那条我们根本不下（pdfUrlRank 记 4）");
 
         /* 池子里只有一个真正能花额度的候选时，那一次必须落在它身上，而不是落在排它前面的跳转壳或零分条目上。 */
         ArrayList<CandidateRanker.Selection> one = CandidateRanker.plan(QUERY,
