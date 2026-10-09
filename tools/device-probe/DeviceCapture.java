@@ -79,6 +79,7 @@ public final class DeviceCapture {
         write(new File(out, "page-geo.tsv"), pageGeo(result));
         write(new File(out, "superscript-inventory.txt"), inventory(doc));
         write(new File(out, "superscript-lines.txt"), lines(result, true));
+        write(new File(out, "script-width.tsv"), scriptWidth(result));
         write(new File(out, "paragraphs-wordformat.tsv"), paragraphPages(result, doc));
         write(new File(out, "span-edges.tsv"), spanEdges(result));
         write(new File(out, "run-fit.tsv"), runFit(result));
@@ -547,6 +548,11 @@ public final class DeviceCapture {
                     + "\tlineStretchPx\tlineNaturalPx\tlineRoomPx\tlayoutWidthPx"
                     + "\tnextCharPx\tnextRunPx\tnextRunChars"
                     + "\tlineInkPx\tlineTailPx"                    + "\tlineTailChars\tlineTailFree\n");
+        else
+            sb.append("paragraph\tline\tfirst8\tlast8\tlineChars\tlineWidthPx\tlineStretchPx"
+                    + "\tlineNaturalPx\tlineRoomPx\tscriptChars\tscriptLaidPx\tscriptSpanPx"
+                    + "\tscriptPlainPx\tscriptCeilTaxPx\tscriptScale\texpectScale\tscriptRanges"
+                    + "\n");
         for (int p = 0; p < result.totalPages(); p++) {
             for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
                 if (pl.text == null) continue;
@@ -586,8 +592,20 @@ public final class DeviceCapture {
                     float[] ink = inkEnd(l, i);
                     float inkPx = ink[0], tailPx = ink[1];
                     if (scriptsOnly) {
+                        // Width columns here, not just the text: a script-bearing line is exactly the
+                        // line whose width is in dispute, and until now this file could only say which
+                        // characters sat on it. scriptSpanPx is the price the breaker paid, scriptLaidPx
+                        // what the platform placed, scriptPlainPx the same range at base size.
+                        float[] agg = scriptAgg(l, i);
                         sb.append(pl.blockIndex).append('\t').append(i + 1).append('\t')
-                          .append(edge(text, true)).append('\t').append(edge(text, false)).append('\n');
+                          .append(edge(text, true)).append('\t').append(edge(text, false)).append('\t')
+                          .append(text.length()).append('\t').append(r2(l.getLineWidth(i))).append('\t')
+                          .append(r2(stretch)).append('\t').append(r2(natural)).append('\t')
+                          .append(r2(room)).append('\t').append((int) agg[0]).append('\t')
+                          .append(r2(agg[1])).append('\t').append(r2(agg[2])).append('\t')
+                          .append(r2(agg[3])).append('\t').append(r2(agg[2] - agg[4])).append('\t')
+                          .append(r2(agg[5])).append('\t').append(r2(agg[6])).append('\t')
+                          .append(scriptRanges(l, i)).append('\n');
                     } else {
                         sb.append(p + 1).append('\t').append(pl.blockIndex).append('\t').append(i)
                           .append('\t').append(edge(text, true)).append('\t')
@@ -1015,6 +1033,201 @@ public final class DeviceCapture {
                     if (r.style.superscript || r.style.subscript) { blocks.add(Integer.valueOf(pl.blockIndex)); break; }
             }
         return blocks;
+    }
+
+    // ---------- what a script run costs a line ----------
+
+    /** One script span clipped to the line it was measured on. */
+    private static final class ScriptRun {
+        final DocxTextLayout.WordScriptSpan span;
+        final int from, to;
+        ScriptRun(DocxTextLayout.WordScriptSpan span, int from, int to) {
+            this.span = span; this.from = from; this.to = to;
+        }
+        String kind() {
+            return span.isUnicode() ? "uni" : (span.isSuperscript() ? "sup" : "sub");
+        }
+    }
+
+    /**
+     * Script spans touching one line, outermost only, clipped to that line. ScriptTokenSpan is a
+     * container that swallows the script spans of its own token, so a plain getSpans over the line
+     * would bill the same characters twice; a span sitting inside another span of the same text is
+     * dropped, and two spans with byte-identical ranges are kept (neither contains the other).
+     */
+    private static java.util.List<ScriptRun> scriptRunsOn(StaticLayout l, int line) {
+        java.util.List<ScriptRun> out = new java.util.ArrayList<ScriptRun>();
+        CharSequence t = l.getText();
+        if (!(t instanceof android.text.Spanned)) return out;
+        android.text.Spanned sp = (android.text.Spanned) t;
+        int s = l.getLineStart(line), e = l.getLineEnd(line);
+        DocxTextLayout.WordScriptSpan[] found =
+                sp.getSpans(s, e, DocxTextLayout.WordScriptSpan.class);
+        for (DocxTextLayout.WordScriptSpan a : found) {
+            boolean swallowed = false;
+            for (DocxTextLayout.WordScriptSpan b : found) {
+                if (a == b) continue;
+                if (sp.getSpanStart(b) > sp.getSpanStart(a) || sp.getSpanEnd(b) < sp.getSpanEnd(a))
+                    continue;
+                if (sp.getSpanStart(b) == sp.getSpanStart(a) && sp.getSpanEnd(b) == sp.getSpanEnd(a))
+                    continue;
+                swallowed = true;
+                break;
+            }
+            if (swallowed) continue;
+            int from = Math.max(s, sp.getSpanStart(a)), to = Math.min(e, sp.getSpanEnd(a));
+            if (to > from) out.add(new ScriptRun(a, from, to));
+        }
+        return out;
+    }
+
+    /** WordScriptSpan.value is private and decides what is actually drawn (plain digits for vertAlign). */
+    private static final java.lang.reflect.Method SCRIPT_VALUE = scriptValueMethod();
+
+    private static java.lang.reflect.Method scriptValueMethod() {
+        try {
+            java.lang.reflect.Method m = DocxTextLayout.WordScriptSpan.class
+                    .getDeclaredMethod("value", CharSequence.class, int.class, int.class);
+            m.setAccessible(true);
+            return m;
+        } catch (Throwable absent) {
+            return null;
+        }
+    }
+
+    private static String scriptText(DocxTextLayout.WordScriptSpan span, CharSequence t,
+                                     int from, int to) {
+        if (SCRIPT_VALUE != null && !span.isUnicode()) {
+            try {
+                Object drawn = SCRIPT_VALUE.invoke(span, t, Integer.valueOf(from), Integer.valueOf(to));
+                if (drawn != null) return drawn.toString();
+            } catch (Throwable unreadable) { }
+        }
+        return t.subSequence(from, to).toString();
+    }
+
+    /** The run's advance at the size the span really renders at, before getSize rounds it up. */
+    private static float scriptExactPx(StaticLayout l, ScriptRun r) {
+        try {
+            android.text.TextPaint paint = l.getPaint();
+            String drawn = scriptText(r.span, l.getText(), r.from, r.to);
+            if (r.span.isUnicode()) return paint.measureText(drawn);
+            android.text.TextPaint copy = new android.text.TextPaint(paint);
+            copy.setTextSize(r.span.renderedSize(paint));
+            return copy.measureText(drawn);
+        } catch (Throwable failed) {
+            return -1f;
+        }
+    }
+
+    /** The scale the font asks for: OS/2 ySuper/ySub ratio, or 1.0 for a Unicode super/subscript glyph. */
+    private static float scriptExpectScale(DocxTextLayout.WordScriptSpan span) {
+        if (span.isUnicode()) return 1f;
+        try {
+            return FontManager.metrics(span.family()).scale(span.isSuperscript());
+        } catch (Throwable unreadable) {
+            return -1f;
+        }
+    }
+
+    /**
+     * One line's script accounting: { code units, px the platform placed, px the breaker paid,
+     * px the same range costs at base size, px before the ceil, placed/base, scale the font asks for }.
+     * laidOverPlain is the figure to read against Word: the breaker charges a script run one width, and
+     * every px of excess over what Word charges for the same run is a line that ends earlier than Word's.
+     */
+    private static float[] scriptAgg(StaticLayout l, int line) {
+        float chars = 0f, laid = 0f, paid = 0f, plain = 0f, exact = 0f, expect = 0f;
+        android.text.TextPaint paint = l.getPaint();
+        for (ScriptRun r : scriptRunsOn(l, line)) {
+            chars += r.to - r.from;
+            float[] pair = primaryPair(l, r.from, r.to);
+            if (pair[1] >= pair[0])
+                laid += (pair[1] - pair[0]) - widenExtraSum(l.getText(), r.from, r.to);
+            plain += paint.measureText(l.getText(), r.from, r.to);
+            try {
+                paid += r.span.getSize(paint, l.getText(), r.from, r.to, null);
+            } catch (Throwable unreadable) { }
+            exact += scriptExactPx(l, r);
+            expect += scriptExpectScale(r.span) * (r.to - r.from);
+        }
+        return new float[] { chars, laid, paid, plain, exact,
+                plain > 0f ? laid / plain : -1f, chars > 0f ? expect / chars : -1f };
+    }
+
+    /** "from-to/chars+from-to/chars", so a row can be tied back to the character indices Word numbers. */
+    private static String scriptRanges(StaticLayout l, int line) {
+        StringBuilder out = new StringBuilder();
+        for (ScriptRun r : scriptRunsOn(l, line)) {
+            if (out.length() > 0) out.append('+');
+            out.append(r.from).append('-').append(r.to).append('/')
+               .append(r.kind()).append('/')
+               .append(one(clean(l.getText().subSequence(r.from, r.to).toString()), 12));
+        }
+        return out.length() == 0 ? "-" : out.toString();
+    }
+
+    /**
+     * One row per script run per line, with the line's own width in front of it. Everything here is the
+     * engine's own arithmetic in the same 96-DPI units as lines-all.tsv, so a Word number read off COM
+     * (pt * 4/3) subtracts directly: span_size_px is what the breaker charged, exact_px the same charge
+     * before getSize rounds up, laid_px what the line breaker ended up placing, plain_px the range at
+     * body size, and ceil_tax_px the rounding that a merged ScriptTokenSpan was supposed to remove.
+     */
+    private static String scriptWidth(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page").append(TAB).append("paragraph").append(TAB).append("line").append(TAB)
+          .append("lineChars").append(TAB).append("lineWidthPx").append(TAB)
+          .append("lineStretchPx").append(TAB).append("lineNaturalPx").append(TAB)
+          .append("lineRoomPx").append(TAB).append("run_from").append(TAB).append("run_to").append(TAB)
+          .append("run_chars").append(TAB).append("kind").append(TAB).append("family").append(TAB)
+          .append("span_size_px").append(TAB).append("laid_px").append(TAB).append("exact_px").append(TAB)
+          .append("plain_px").append(TAB).append("ceil_tax_px").append(TAB)
+          .append("laid_over_plain").append(TAB).append("expect_scale").append(TAB)
+          .append("base_size_px").append(TAB).append("rendered_size_px").append(TAB)
+          .append("run_text").append(NL);
+        for (int p = 0; p < result.totalPages(); p++) {
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null) continue;
+                StaticLayout l = pl.text.layout;
+                for (int i = pl.startLine; i < pl.endLine && i < l.getLineCount(); i++) {
+                    java.util.List<ScriptRun> runs = scriptRunsOn(l, i);
+                    if (runs.isEmpty()) continue;
+                    int s = l.getLineStart(i), e = l.getLineEnd(i);
+                    float stretch = widenExtraSum(l.getText(), s, e);
+                    float natural = l.getLineWidth(i) - stretch;
+                    String lineHead = String.valueOf(p + 1) + TAB + pl.blockIndex + TAB + i + TAB
+                            + clean(l.getText().subSequence(s, e).toString()).length() + TAB
+                            + r2(l.getLineWidth(i)) + TAB + r2(stretch) + TAB + r2(natural) + TAB
+                            + r2(l.getWidth() - l.getLineLeft(i) - natural) + TAB;
+                    android.text.TextPaint paint = l.getPaint();
+                    for (ScriptRun r : runs) {
+                        float paid = -1f, exact = scriptExactPx(l, r);
+                        try {
+                            paid = r.span.getSize(paint, l.getText(), r.from, r.to, null);
+                        } catch (Throwable unreadable) { }
+                        float[] pair = primaryPair(l, r.from, r.to);
+                        float laid = pair[1] < pair[0] ? -1f
+                                : (pair[1] - pair[0]) - widenExtraSum(l.getText(), r.from, r.to);
+                        float plain = paint.measureText(l.getText(), r.from, r.to);
+                        sb.append(lineHead).append(r.from).append(TAB).append(r.to).append(TAB)
+                          .append(r.to - r.from).append(TAB).append(r.kind()).append(TAB)
+                          .append(one(r.span.family(), 24)).append(TAB)
+                          .append(r2(paid)).append(TAB).append(r2(laid)).append(TAB)
+                          .append(r2(exact)).append(TAB).append(r2(plain)).append(TAB)
+                          .append(r2(paid - exact)).append(TAB)
+                          .append(r2(plain > 0f && laid >= 0f ? laid / plain : -1f)).append(TAB)
+                          .append(r2(scriptExpectScale(r.span))).append(TAB)
+                          .append(r2(r.span.baseSizePx())).append(TAB)
+                          .append(r2(r.span.isUnicode() ? paint.getTextSize()
+                                  : r.span.renderedSize(paint))).append(TAB)
+                          .append(one(clean(l.getText().subSequence(r.from, r.to).toString()), 24))
+                          .append(NL);
+                    }
+                }
+            }
+        }
+        return sb.toString();
     }
 
     private static String inventory(DocxDocument doc) {
