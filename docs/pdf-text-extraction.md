@@ -86,6 +86,68 @@ PyMuPDF 之所以读得出，是它自己带了 Adobe 公开的字符集定义�
 
 回执与留档行都说得出这两件事（多少字 / 几个字读不出 / 哪个字体），不是一个光秃秃的"抓取失败"。
 
+## 1,846 对 9,414 这一条结案：是解析漏字，不需要 OCR（2026-10-09 复算）
+
+PyMuPDF 1.28.2（本机 python 3.12）逐份取文本、按**非空白字符**数当分母；app 侧同口径
+（`tests/PdfExtractProbe.java` 与一次性探针 `UndecodableProbe`，都数非空白字符）：
+
+| 文件 | PyMuPDF | 改前的解析器 `f878f64` | 现在，不装表 | 现在 + 随包 Adobe-GB1 |
+| --- | --- | --- | --- | --- |
+| `scichina.pdf` | 9,414 | **1,846**（lost 7,978） | 4,313（lost 5,073） | **9,386**（lost 0，随包表补 5,073） |
+| `zidong-cjmenet.pdf` | 20,263 | 18,977（lost 263） | 20,130（lost 7） | 20,130（lost 7） |
+| `frontsci.pdf` | 7,664 | 7,664 | 7,664 | 7,664 |
+| `viserdata.pdf` | 6,600 | 6,600 | 6,600 | 6,600 |
+| 四份合计 | 43,941 | 35,087 | 38,707 | **43,780（99.6%）** |
+
+"改前"那一列不是抄旧文档：把 `f878f64`（`ab84d0a` 的前一版）的 `PdfFile.java` 单独编出来跑同一份
+`scichina.pdf`，落点是 **1,846 字**，与 2.3.0 记下的数一字不差；同一版对 `zidong-cjmenet.pdf`
+是 18,977 字，也和当时记下的数一样。两处对上，说明这一列量的确实是当时那台解析器。
+
+**漏掉的那些字在 PDF 里是什么**：
+
+- 大头是那五个方正字体（`FZXBSJW--GB1-0` / `FZHTJW--GB1-0` / `FZSSJW--GB1-0` / `FZKTJW--GB1-0` /
+  `FZFSJW--GB1-0`）：`Subtype=Type0`、`/Encoding=/Identity-H`、**未内嵌**（`FontDescriptor` 里没有
+  `FontFile2`，也没有 `FontFile3`）、**没有 `/ToUnicode`**，`/CIDSystemInfo` 写 `/Adobe /GB1`。
+  文件里只有字形码，没有码到字的表。这一档 5,073 字，被随包那张 62,370 字节 / 30,774 条的
+  `app/src/main/assets/cmaps/adobe-gb1.cid` 精确补回（装表后 `随包表=5,073`、`lost=0`、
+  卡住的字体清单为空）。
+- 第二档是解析器自己的两处 bug，跟字体无关：① 字体缓存按资源名（`/C2_1`）而不是按解析到的字体对象缓存，
+  同名跨页串用，后一页整页丢掉——1,846 主要是这么来的（同一版解析器同一份文件，
+  光这两处修完不装表也能读到 4,313）；② `TrueTypeCmap.format4` 少读 `endCode[]` 与 `startCode[]`
+  之间那 2 字节 `reservedPad`，整张表错位。
+- **没有 Type3**：`scichina.pdf` 的字体清单只有 `TrueType`（Times/Arial/Trebuchet 族，
+  `WinAnsiEncoding`，未内嵌）与 `Type0`（`Identity-H`）两类。
+- **不是扫描件**：六页里最大的一张图只占页面面积 0.03，`textOps=4,735`。
+  所以这条验收的答案是：解析漏字 + 缺一张码表，**不需要 OCR**。
+
+还剩多少、卡在哪（同口径逐字对照，`Counter(真值) - Counter(app)`，两份文件 **app 多出来的字都是 0 个**——
+解析器不造字）：
+
+- `scichina.pdf` 差 28 字（0.30%），`zidong-cjmenet.pdf` 差 133 字（0.66%）。
+- `zidong` 那 7 个字形认得清清楚楚：`DLHKGM+Symbol` 与 `DLICEB+EuclidExtra`（数学符号字体，无 ToUnicode），
+  `undecodableGlyphs` 按个数记了这 7 个并留下字体名。
+- 剩下那些是另一种形状：在中英交替的行里，那一小段 FZ*-GB1 整段没进文本，例如
+  "中国科学技术大学化学系"（p1 bbox `[176.0, 176.2, 266.0, 184.2]`）、
+  "不仅仅可以作为电荷传导"（p1 bbox `[396.6, 556.8, 511.0, 567.5]`）、
+  "如导电和物质输运等"（p1 bbox `[327.2, 282.8, 417.3, 292.8]`）。
+  装表之后这份文件 `lost=0` 且 `undecodable=false`，也就是说这**不是缺表、不是缺 ToUnicode**，
+  而是那几次 `Tj`/`TJ` 的字节压根没走到 `show()`。占 0.3%-0.7%，是一个还没定位到具体算子序列的解析缺口。
+- 顺着这条记一个可改进项：`PdfFile.show()` 在 `font == null` 那一支只置 `undecodable=true`，
+  不把丢掉的字数记进 `undecodableGlyphs`，于是"整段掉了"在账上和"一个没掉"长得一样。
+  上面那个缺口要定位，先补这个计数最省事。
+
+复现命令（本机 python 有 pymupdf 1.28.2）：
+
+    # PyMuPDF 真值
+    py -c "import pymupdf,glob;[print(p, sum(1 for c in ''.join(pg.get_text() for pg in pymupdf.open(p)) if not c.isspace())) for p in glob.glob(r'artifacts/agent-corpus/corpus/*.pdf')]"
+    # app 侧：不装表 / 装表
+    java -cp "<test-classes>;<classes>;tools/android-35.jar" com.rikkahub.wordlite.PdfExtractProbe -no-cmap <四份 pdf>
+    java -cp "<test-classes>;<classes>;tools/android-35.jar" com.rikkahub.wordlite.PdfExtractProbe -cmap app/src/main/assets/cmaps/adobe-gb1.cid <四份 pdf>
+    # 改前那一版解析器
+    git show f878f64:app/src/main/java/com/rikkahub/wordlite/PdfFile.java > <旧目录>/com/rikkahub/wordlite/PdfFile.java
+    javac -cp "<classes>;tools/android-35.jar" -sourcepath app/src/main/java -d <旧 classes> <旧目录>/com/rikkahub/wordlite/PdfFile.java
+    java -cp "<旧 classes>;<classes>;tools/android-35.jar" ...   # 旧 classes 放前面
+
 ## 断言在哪
 
 - `tests/PdfRegression.java` 29 条：Identity-H + Adobe-GB1 三种夹具（`fixture-gb1-gb1.pdf`、
@@ -95,7 +157,10 @@ PyMuPDF 之所以读得出，是它自己带了 Adobe 公开的字符集定义�
 
 ## 量不到的
 
-- **手机上的这一层没量**：本轮全部在 host JVM 上跑。APK 里那张 62,370 字节的表能不能被
+- **手机 APK 里从 assets 装表这一层没量**：本轮全部在 host JVM 上跑。APK 里那张 62,370 字节的表能不能被
   `ApiWorkflow` 正常从 assets 装进 `CidUnicodeTables`，只验过 host 侧同一个入口（探针从文件装），
-  设备侧本轮没跑，所以这一条量不到。
-- 手机 `app_process` 那条路开不了 socket（十个源全部 ECONNREFUSED），设备侧联网取字这一层也量不到。
+  所以这一条量不到。
+- 旧结论"手机 `app_process` 那条路开不了 socket"作废（2026-10-09 复跑）：把 `adb reverse tcp:7897`
+  挂上之后，`tools/device-probe.ps1` 在 `app_process` 里跑得通真网，一轮查重取回 60 条候选、
+  抓到 1 篇开放获取全文（见 `docs/retrieval-recall.md`）。之前那十个 ECONNREFUSED 是**没有出口**，
+  不是 `app_process` 开不了 socket。取字这一层在手机上仍未单独量（PDF 解析没有设备侧差异的代码）。
