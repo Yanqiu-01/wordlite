@@ -30,6 +30,9 @@ public final class EngineSettings {
     /** Optional HTTP proxy for the built-in sources, written as host:port and empty by default:
      *  a phone on a network that resets these hosts needs one to retrieve anything at all. */
     public String proxy = "";
+    /** 可选的过验证服务地址（FlareSolverr，写成 http://192.168.1.20:8191）。知网、万方、维普
+     *  回人机验证壳页时由它开一个真浏览器过一道，手机只当客户端。留空 = 不走过验证这条路。 */
+    public String solver = "";
 
     public EngineSettings() {
         for (String engine : DEFAULT_ENGINES) engines.add(engine);
@@ -47,6 +50,7 @@ public final class EngineSettings {
         out.autoPdfs = autoPdfs;
         out.coreKey = coreKey;
         out.proxy = proxy;
+        out.solver = solver;
         return out;
     }
 
@@ -67,14 +71,20 @@ public final class EngineSettings {
             catch (NumberFormatException error) { throw new IllegalArgumentException("代理端口无效"); }
             if (port < 1 || port > 65535) throw new IllegalArgumentException("代理端口无效");
         }
+        String wanted = solver == null ? "" : solver.trim();
+        solver = ChallengeSolver.endpoint(wanted);
+        if (wanted.length() > 0 && solver.length() == 0)
+            throw new IllegalArgumentException("过验证地址需写成 http://host:8191");
+        if (solver.length() > 300) throw new IllegalArgumentException("过验证地址过长");
     }
 
     public static String serialize(EngineSettings value) {
         LinkedHashMap<String, Object> out = new LinkedHashMap<String, Object>();
-        out.put("version", 4); out.put("web", value.web); out.put("engines", value.engines);
+        out.put("version", 5); out.put("web", value.web); out.put("engines", value.engines);
         out.put("perEngine", value.perEngine); out.put("timeout", value.timeoutSeconds);
         out.put("windows", value.windows); out.put("coreKey", value.coreKey);
         out.put("proxy", value.proxy);
+        out.put("solver", value.solver);
         out.put("autoPdf", value.autoPdf);
         out.put("autoPdfs", value.autoPdfs);
         return ApiJson.stringify(out);
@@ -112,6 +122,8 @@ public final class EngineSettings {
         out.autoPdfs = integer(ApiJson.path(root, "autoPdfs"), out.autoPdfs);
         Object via = ApiJson.path(root, "proxy");
         out.proxy = via instanceof String ? ((String) via).trim() : "";
+        Object helper = ApiJson.path(root, "solver");
+        out.solver = helper instanceof String ? ((String) helper).trim() : "";
         return out;
     }
 

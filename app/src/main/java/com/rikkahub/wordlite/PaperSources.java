@@ -34,6 +34,8 @@ public final class PaperSources {
         public String coreKey = "";
         /** host:port of an HTTP proxy for this retrieval pass, empty to dial out directly. */
         public String proxy = "";
+        /** 过验证服务（FlareSolverr）的地址，空 = 撞到人机验证就按"被挡"记账，不开浏览器。 */
+        public String solver = "";
         /**
          * 每一次检索请求的响应留档出口（A4）。null = 不留档；写了它，这一轮每一次请求都要落一行
          * entries / declaredTotal / 响应形状，**成功也要落**。以前只在失败时留档，于是
@@ -57,6 +59,7 @@ public final class PaperSources {
             out.autoFullTexts = autoFullTexts;
             out.coreKey = coreKey;
             out.proxy = proxy;
+            out.solver = solver;
             out.shapes = shapes;
             return out;
         }
@@ -308,30 +311,41 @@ public final class PaperSources {
         /* 万方走 gRPC-web：请求体和响应都不是文本，编解码在 WanfangProtocol 里，
            这条路上没有查询串，检索式整个装在 protobuf 消息里发出去。 */
         if (name.equals("wanfang")) {
+            ChallengeSolver.attach(safe.solver, endpoint(name), headers, safe.timeoutSeconds,
+                    proxyFor(safe), cancellation);
             return searchWanfang(phrase, per, safe, headers, cancellation);
         }
         /* 知网这个检索口只认 POST 表单，而且要看一眼浏览器样的请求头，回来的还是带高亮标签的 HTML，
            所以它不进下面那套 JSON 解析，整个交给 CnkiSearch。 */
         if (name.equals("cnki")) {
+            LinkedHashMap<String, String> cnkiHeaders = CnkiSearch.headers();
+            ChallengeSolver.attach(safe.solver, endpoint(name), cnkiHeaders, safe.timeoutSeconds,
+                    proxyFor(safe), cancellation);
             ApiClient.Response page = HttpTransport.post(endpoint(name), CnkiSearch.form(phrase, 1),
-                    CnkiSearch.headers(), safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation,
+                    cnkiHeaders, safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation,
                     proxyFor(safe));
             try {
                 ArrayList<Candidate> found = CnkiSearch.parse(page.body, per);
                 /* 知网这个口不在响应里写命中总数，declaredTotal 就留 -1（=源没说），不替它编一个。 */
-                recordShape(safe, name, phrase, page, found.size(), -1L,
-                        shapeOf(page.body, found.size(), -1L), "", false);
+                String shape = shapeOf(page.body, found.size(), -1L);
+                recordShape(safe, name, phrase, page, found.size(), -1L, shape, "", false);
+                if (isChallengeShape(shape)) ChallengeSolver.invalidate(endpoint(name));
                 return found;
             } catch (RuntimeException error) {
                 /* 解不出条目同样要留档，而且形状必须交给 shapeOf：挡人页就长在这一行里，
                    以前这里只把"无法解析"四个字抛上去，页面上写着"请输入验证码"也没人看得见。 */
-                recordShape(safe, name, phrase, page, 0, -1L, shapeOf(page.body, 0, -1L), "响应无法解析", true);
+                String shape = shapeOf(page.body, 0, -1L);
+                recordShape(safe, name, phrase, page, 0, -1L, shape, "响应无法解析", true);
+                if (isChallengeShape(shape)) ChallengeSolver.invalidate(endpoint(name));
                 throw new IOException("知网检索响应无法解析");
             }
         }
         /* OpenAlex 这一路单独走：中文稿先按"更可能带正文"的收敛式问一次，一条都没回来才补问一次宽式。 */
         if (name.equals("openalex"))
             return searchOpenAlex(phrase, per, safe, headers, cancellation).found;
+        if (shellProne(name))
+            ChallengeSolver.attach(safe.solver, endpoint(name), headers, safe.timeoutSeconds,
+                    proxyFor(safe), cancellation);
         ApiClient.Response response = name.equals("ncpssd")
                 ? HttpTransport.post(endpoint(name), formFor(phrase, per), headers,
                         safe.timeoutSeconds, HttpTransport.MAX_BODY, cancellation, proxyFor(safe))
@@ -361,8 +375,9 @@ public final class PaperSources {
                     "检索响应格式无效", true);
             throw new IOException("检索响应格式无效");
         }
-        recordShape(safe, name, phrase, response, found.size(), declared,
-                shapeOf(response.body, found.size(), declared), "", false);
+        String shape = shapeOf(response.body, found.size(), declared);
+        recordShape(safe, name, phrase, response, found.size(), declared, shape, "", false);
+        if (shellProne(name) && isChallengeShape(shape)) ChallengeSolver.invalidate(endpoint(name));
         if (name.equals("europepmc")) recordNoAccessEvidence(safe, name, phrase, response, found);
         return found;
     }
@@ -481,6 +496,129 @@ public final class PaperSources {
      * the brackets, which java.net.InetSocketAddress does not accept, and anything unusable
      * means "dial out directly" rather than a failed retrieval.
      */
+    /**
+     * 会回人机验证壳页的只有这四家中文站：海外那几家是公开 API，拿浏览器去解它们既没必要
+     * 也白白花掉一轮里仅有的几次开浏览器额度。
+     */
+    static boolean shellProne(String name) {
+        return name.equals("cnki") || name.equals("cqvip") || name.equals("wanfang")
+                || name.equals("ncpssd");
+    }
+
+    /** 这一份响应是挡人的壳页吗：被明着挡与只有壳没有货都算。 */
+    static boolean isChallengeShape(String shape) {
+        return "blocked".equals(shape) || "js-shell".equals(shape);
+    }
+
+    /**
+     * 只有这三家的详情页值得开浏览器：它们匿名给出的东西比检索协议里那 128 字摘要预览厚
+     * （docs/endpoints-access.md 第二节，2026-10-09 活体量：同一张万方详情页裸 HTTP 只剩 494 个可读
+     * 汉字，浏览器渲染后 3,331 个，含完整摘要、万方自己从全文生成的"全文精要"和整条参考文献表）。
+     * 海外那几家是公开 API，把它们放进来只会白白吃掉一轮里仅有的几次开浏览器额度。
+     */
+    private static final String[] BROWSER_HOSTS = { "search.cnki.com.cn", "kns.cnki.net", "wap.cnki.net",
+            "chn.oversea.cnki.net", "www.cqvip.com", "qikan.cqvip.com", "d.wanfangdata.com.cn",
+            "www.wanfangdata.com.cn", "s.wanfangdata.com.cn" };
+    /** 剥完脚本与样式之后至少要剩下这么多可读汉字才算一页内容：过了验证的壳页也还是壳。 */
+    static final int BROWSER_MIN_READABLE_CHARS = 200;
+
+    /** 这条候选的题录里有没有带着一张三家的详情页 URL（locator 装的就是详情页）。 */
+    static String browserDetailUrl(Candidate candidate) {
+        String url = candidate == null || candidate.source == null
+                || candidate.source.locator == null ? "" : candidate.source.locator.trim();
+        if (!url.startsWith("http")) return "";
+        String host = ChallengeSolver.hostOf(url);
+        for (String allowed : BROWSER_HOSTS) if (allowed.equals(host)) return url;
+        return "";
+    }
+
+    /**
+     * 用浏览器把详情页取回来并剥成可读文本。回 null 的每一种情况都该按摘要继续比：没配服务地址、
+     * 这一轮浏览器额度用完、题录里的 URL 不是这三家的、或者剥完剩下没几个字（壳页）。
+     */
+    static String browserDetail(Candidate candidate, Limits limits,
+                                 ApiClient.Cancellation cancellation) {
+        String url = browserDetailUrl(candidate);
+        if (url.length() == 0 || limits == null) return null;
+        String html = ChallengeSolver.fetch(limits.solver, url, limits.timeoutSeconds, proxyFor(limits),
+                cancellation);
+        if (html == null || html.length() == 0) return null;
+        String text = readablePage(html);
+        return readableChinese(text) < BROWSER_MIN_READABLE_CHARS ? null : text;
+    }
+
+    /** 拆掉 script/style 与标签：挡人的壳页与给内容的页面，分界就在这个数上。 */
+    /**
+     * 拆掉 script/style 与标签：挡人的壳页与给内容的页面，分界就在这个数上。
+     *
+     * 2026-10-09 在万方的活体页面上栽过一次：那张渲染完的详情页里有 36 段脚本，旧写法跳完一段脚本
+     * 之后把指针停在 </script> 上，下一轮又把它当成新的 <script> 开标签，于是一路跳到下一段脚本的
+     * 结尾，两段脚本之间那些真正文被整块吞掉，3,368 个可读汉字一个不剩，整页被判成壳页。
+     * 现在跳过闭合标签本身，并认住正文里的裸 <（P<0.05 不许当开标签）与 </SCRIPT> 这种大写写法。
+     */
+    static String readablePage(String html) {
+        String value = html == null ? "" : html;
+        String lower = value.toLowerCase(Locale.ROOT);
+        StringBuilder out = new StringBuilder(value.length() / 2 + 16);
+        int i = 0;
+        while (i < value.length()) {
+            char at = value.charAt(i);
+            if (at != '<') {
+                out.append(at);
+                i++;
+                continue;
+            }
+            char next = i + 1 < value.length() ? value.charAt(i + 1) : 0;
+            if (next != '/' && next != '!' && next != '?' && !isAsciiLetter(next)) {
+                out.append(' ');
+                i++;
+                continue;
+            }
+            int end = value.indexOf('>', i);
+            if (end < 0) break;
+            String tag = value.substring(i + 1, end).trim().toLowerCase(Locale.ROOT);
+            boolean closing = tag.startsWith("/");
+            String name = closing ? tag.substring(1).trim() : tag;
+            int space = name.indexOf(' ');
+            if (space > 0) name = name.substring(0, space);
+            if (!closing && (name.equals("script") || name.equals("style") || name.equals("noscript"))) {
+                int close = lower.indexOf("</" + name, end + 1);
+                if (close < 0) {
+                    i = value.length();
+                } else {
+                    int gt = value.indexOf('>', close);
+                    i = gt < 0 ? value.length() : gt + 1;
+                }
+                out.append(' ');
+                continue;
+            }
+            out.append(' ');
+            i = end + 1;
+        }
+        String text = out.toString().replace("&nbsp;", " ").replace("&amp;", "&").replace("&quot;", "\"")
+                .replace("&lt;", "<").replace("&gt;", ">");
+        StringBuilder lines = new StringBuilder(text.length());
+        for (String line : text.split("\n")) {
+            String one = line.trim();
+            while (one.indexOf("  ") >= 0) one = one.replace("  ", " ");
+            if (one.length() > 0) lines.append(one).append('\n');
+        }
+        return lines.toString().trim();
+    }
+
+    /** 只有 ASCII 字母开头的尖括号才算标签：正文里的中文与数字紧跟的 &lt; 一律当文字。 */
+    private static boolean isAsciiLetter(char c) {
+        return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z';
+    }
+
+
+    /** 可读汉字数：壳页也有一两百个拉丁字母的脚本残留，汉字数才是那把尺。 */
+    static int readableChinese(String text) {
+        int n = 0;
+        for (int i = 0; text != null && i < text.length(); i++)
+            if (text.charAt(i) >= 0x4E00 && text.charAt(i) <= 0x9FFF) n++;
+        return n;
+    }
     static java.net.Proxy proxyFor(Limits limits) {
         return Routes.parse(limits == null ? "" : limits.proxy);
     }

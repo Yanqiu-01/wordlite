@@ -271,6 +271,7 @@ public final class ApiWorkflow {
                 limits.autoFullTexts = options.autoPdf ? options.autoPdfs : 0;
                 limits.coreKey = options.coreKey;
                 limits.proxy = options.proxy;
+                limits.solver = options.solver;
                 ArrayList<String> engines = new ArrayList<String>();
                 if (wantWeb) for (String id : options.engines) engines.add(id);
                 final DuplicateEngine.Report result = DuplicateEngine.scan(selection, corpus, wantWeb,
@@ -488,6 +489,7 @@ public final class ApiWorkflow {
                 PaperSources.Limits limits = new PaperSources.Limits();
                 limits.timeoutSeconds = options.timeoutSeconds;
                 limits.proxy = options.proxy;
+                limits.solver = options.solver;
                 ArrayList<CorpusImport.Pick> items = new ArrayList<CorpusImport.Pick>();
                 for (int i = 0; i < picks.size(); i++)
                     items.add(new CorpusImport.Pick(picks.get(i).title, picks.get(i).url));
@@ -714,6 +716,7 @@ public final class ApiWorkflow {
             limits.perEngine = 3;
             limits.coreKey = options.coreKey;
             limits.proxy = options.proxy;
+                limits.solver = options.solver;
             final StringBuilder lines = new StringBuilder();
             int usable = 0;
             for (int i = 0; i < wanted.size(); i++) {
@@ -862,7 +865,10 @@ public final class ApiWorkflow {
         box.addView(autoPdfs);
         final EditText core = field(engine.coreKey, "CORE API Key（可留空）");
         final EditText proxy = field(engine.proxy, "HTTP 代理 host:port（海外检索源需经电脑代理时填写，可留空）");
-        box.addView(perEngine); box.addView(timeout); box.addView(windows); box.addView(core); box.addView(proxy);
+        final EditText solver = field(engine.solver,
+                "过验证服务地址（FlareSolverr，例如 http://192.168.1.20:8191，可留空）");
+        box.addView(perEngine); box.addView(timeout); box.addView(windows); box.addView(core);
+        box.addView(proxy); box.addView(solver);
         ScrollView scroll = new ScrollView(activity); scroll.addView(box);
         new AlertDialog.Builder(activity).setTitle("检索设置").setView(scroll)
                 .setNegativeButton("取消", null)
@@ -879,6 +885,7 @@ public final class ApiWorkflow {
                     value.autoPdfs = number(autoPdfs.getText().toString(), engine.autoPdfs);
                     value.coreKey = core.getText().toString().trim();
                     value.proxy = proxy.getText().toString().trim();
+                    value.solver = solver.getText().toString().trim();
                     try { value.validate(); settings.saveEngine(value); engine = value; toast("已保存检索设置"); }
                     catch (Exception error) { toast(error instanceof IllegalArgumentException
                             ? error.getMessage() : "设置保存失败"); }

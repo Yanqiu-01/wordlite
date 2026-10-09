@@ -101,6 +101,15 @@ function Ensure-Reverse([int]$number) {
         Invoke-Adb @("reverse", ("tcp:{0}" -f $remote), ("tcp:{0}" -f $number)) | Out-Null
         Write-Host ("  手机 127.0.0.1:{0} -> 电脑 127.0.0.1:{1}" -f $remote, $number) -ForegroundColor Cyan
     }
+
+    # 过验证服务（FlareSolverr）也一并反代：应用里"检索设置 → 过验证服务地址"填
+    # 127.0.0.1:8191 就指到电脑上这一台，知网/万方/维普的详情页与检索页都能走它。
+    if (Test-PortOpen 8191) {
+        Invoke-Adb @("reverse", "tcp:8191", "tcp:8191") | Out-Null
+        Write-Host "  手机 127.0.0.1:8191 -> 电脑 127.0.0.1:8191（过验证服务）" -ForegroundColor Cyan
+    } else {
+        Write-Host "  电脑 127.0.0.1:8191 没在监听：没开 FlareSolverr。应用里那一格留空即可，撞到人机验证就按摘要比" -ForegroundColor Yellow
+    }
 }
 
 Write-Host "== 电脑侧代理 ==" -ForegroundColor Cyan
@@ -184,7 +193,7 @@ if ($Watch) {
     while ($true) {
         Start-Sleep -Seconds 5
         $now = @(ReverseList | ForEach-Object { ("" + $_ -split " ")[0] })
-        $wanted = @("tcp:7897", "tcp:7890")
+        $wanted = @("tcp:7897", "tcp:7890", "tcp:8191")
         $gone = @($wanted | Where-Object { $now -notcontains $_ })
         if ($gone.Count -gt 0) {
             Write-Host ("  {0} 断了（拔线或 adb 重启），补上" -f ($gone -join ", ")) -ForegroundColor Yellow

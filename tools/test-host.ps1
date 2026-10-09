@@ -91,6 +91,7 @@ Add-Suite "CnkiSearchRegression"   @()
 
 Add-Suite "CnkiTouchRegression"    @()
 Add-Suite "CqvipStateRegression"   @()
+Add-Suite "ChallengeSolverRegression" @()
 Add-Suite "PreservationRegression" @("tests/samples/complex-preservation.docx")
 Add-Suite "ReviewRegression"       @("tests/fixture.docx", "$out/threaded-revisions.docx")
 Add-Suite "PdfRegression"          @("$out/metadata.pdf")

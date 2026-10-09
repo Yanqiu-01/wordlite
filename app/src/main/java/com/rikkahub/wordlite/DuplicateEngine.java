@@ -58,6 +58,8 @@ public final class DuplicateEngine {
     /** 「这个源这一轮一条路都没走通」：只有连接层没建成才算，源答了话（403/412/429/5xx）不算。 */
     static final String ROAD_EXHAUSTED_NOTE = "这个源这一轮一条路都没走通——";
     /** 候选清单「可比材料」列的三个取值，入库时逐条写死，报告里不许再现场猜。 */
+    /** 摘要预览短于这个字数才值得再花一次浏览器去取详情页：比这长的材料本来就不薄 */
+    static final int BROWSER_BODY_FLOOR = 400;
     static final String MATERIAL_FULL = "全文", MATERIAL_ABSTRACT = "摘要", MATERIAL_RECORD = "仅题录";
     /**
      * 精要档：手机上把详情页渲染出来取回的那一段——万方那 1,500+ 字是网站自己从整篇里摘出来的
@@ -515,7 +517,13 @@ public final class DuplicateEngine {
             if (spans.length >= 2) note(report, "已标出 " + (spans.length / 2) + " 处引用段落，这部分只计入总相似度比");
             if (!useWeb) note(report, "未启用联网检索，只与自建库比对");
             else if (cancelled(cancellation)) note(report, GAP_CANCELLED);
-            else search(text, library, report, wanted, safe, cancellation, progress);
+            else {
+                /* 过验证的账本按轮清一次：这一轮解了几次、哪几家没过，最后要能在报告里看见。 */
+                ChallengeSolver.beginPass();
+                search(text, library, report, wanted, safe, cancellation, progress);
+                String solved = ChallengeSolver.summary();
+                if (solved.length() > 0) note(report, "人机验证：" + solved);
+            }
             if (library.isEmpty()) note(report, "自建库为空，比对基线只有检索到的候选文献摘要");
             TextCorpus.Report matched = null;
             TextCorpus.Structure structure = TextCorpus.structure(text);
@@ -1795,7 +1803,21 @@ public final class DuplicateEngine {
                     } else autoFailed++;
                 }
             }
-            report.candidates.add(candidate);
+            /* 还只有摘要可比、题录里又带着这三家的详情页 URL：配了过验证服务就再用浏览器取一次。
+               检索协议给的是 128 字预览，浏览器渲染出来的同一页给的是完整摘要加万方那份全文精要，
+               这是中文这一侧匿名唯一一条能拿到厚材料的路上。取不到就照旧按摘要比，不虚报。 */
+            if (!fetched && !cancelled(cancellation) && limits.solver != null
+                    && limits.solver.trim().length() > 0 && body.length() < BROWSER_BODY_FLOOR
+                    && deadline - System.currentTimeMillis() > limits.timeoutSeconds * 1000L + 1000L) {
+                String got = PaperSources.browserDetail(candidate, limits, cancellation);
+                if (got != null && !got.trim().isEmpty()) {
+                    body = body.isEmpty() ? got : body + "\n" + got;
+                    fetched = true;
+                    report.autoBodies.add(new AutoBody(
+                            candidate.source == null ? "" : candidate.source.title,
+                            candidate.source == null ? "" : candidate.source.engine, got));
+                }
+            }            report.candidates.add(candidate);
             bump(report.candidateCount, CandidateRanker.sourceKey(candidate));
             if (body.trim().isEmpty()) {
                 candidate.comparableMaterial = MATERIAL_RECORD;
@@ -1925,7 +1947,7 @@ public final class DuplicateEngine {
         int chinese = 0;
         for (String engine : new String[] { "cnki", "cqvip", "wanfang" })
             if (count(report.candidateCount, engine) > 0) chinese++;
-        if (chinese > 0 && report.fullTextCandidates == 0)
+        if (chinese > 0 && report.fullTextCandidates == 0 && ChallengeSolver.pagesFetched() == 0)
             note(report, "知网、万方、维普只回摘要，正文与图表无法比对，相似率是下限");
         if (report.autoPdfTried > 0 || report.autoPdfLeft > 0)
             note(report, autoFetchLine(report.autoPdfTried, report.autoPdfFetched,
