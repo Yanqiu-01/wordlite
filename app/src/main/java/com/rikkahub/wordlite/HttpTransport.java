@@ -180,6 +180,10 @@ public final class HttpTransport {
            "我代理是不是填错了"，真正的原因是这台手机在自己的网络上出不去。谁撞了什么就都列出来。 */
         StringBuilder burned = new StringBuilder();
         boolean roadDown = false;
+        /* 有没有哪条路从源拿到了答话（429/403/302 都算答了话）。答了话的那一句才是这一轮的真相，
+           后面任何一条拨不上的路都不许替它改写。 */
+        ApiClient.Failure answered = null;
+        java.net.Proxy answeredVia = proxy;
         for (int i = 0; ; ) {
             java.net.Proxy via = order.get(i);
             try {
@@ -209,11 +213,43 @@ public final class HttpTransport {
                     if (error.refused) Routes.portRefused(via);
                     if (burned.length() > 0) burned.append("；");
                     burned.append(Routes.label(via)).append(' ').append(brief(error));
+                } else if (error.status > 0) {
+                    /* 源答了话：这条路把包送出去了，它的冷却当场作废；先答的那一条留着当这一轮的说法。 */
+                    Routes.proofOfLife(via);
+                    if (answered == null) {
+                        answered = error;
+                        answeredVia = via;
+                    }
                 }
                 if (++i >= order.size() || (!roadDown && !reroutable)) break;
             }
         }
 
+        /* 有一条路从源拿到了答话，这一轮的说法就是那句答话，拨不上的路只能排在它后面；两种都要
+           把走过的路原样列出来，"这条代理到底被试过没有"不许让用户去猜。
+           真机 2026-10-09 00:51 那一轮实测：Crossref 与 Semantic Scholar 经电脑上 adb reverse 进来的
+           Clash（127.0.0.1:7897）各拿到一次 HTTP 429（匿名配额按出口 IP 计，同一条代理在同一轮里为
+           OpenAlex 送回来 60 篇候选），换直连被当场拒回，旧写法把整句改写成"试过的路都没通：直连
+           拒绝连接"——屏幕上读起来像那条代理从没被试过。宿主同形状复现：status=0、reachOf=-1。 */
+        StringBuilder walked = new StringBuilder();
+        /* 只有一条路时一个字都不改写：那时候"源答了什么"已经是全部信息，而下游按整句比对的判据
+           （DetectRegression 认 404/429 那两句原话）照旧要认它。"走过哪几条路"只在多条路之间说得通。 */
+        if (order.size() > 1) {
+            if (answered != null)
+                walked.append(Routes.label(answeredVia)).append(" 答了 HTTP ").append(answered.status);
+            if (burned.length() > 0) {
+                if (walked.length() > 0) walked.append("；");
+                walked.append(burned);
+            }
+        }
+        String roads = walked.length() > 0 ? "（这一轮走过的路：" + walked + "）" : "";
+        if (answered != null) {
+            failure = new ApiClient.Failure(answered.getMessage() + roads, answered.status);
+            failure.refused = answered.refused;
+            failure.retryAfterSeconds = answered.retryAfterSeconds;
+            failedVia = answeredVia;
+            roadDown = false;
+        }
         if (roadDown && burned.length() > 0 && order.size() > 1) {
             /* 路是全烧完的，不是某一条坏了：报"哪几条路各撞了什么"，而不是只报最后一条的下场。
                只有一条路时不改写：那时候"请求超时"已经是全部信息，而下游按前缀分类的判据照旧要认它。 */
@@ -226,11 +262,11 @@ public final class HttpTransport {
         /* 对方报了时限就等它说的这么久（有上限），没报就立刻重试只是撞在同一个窗口里：
            实测 Semantic Scholar 的匿名共享配额连续五次都不带 Retry-After，七百毫秒后再打一次必然还是 429。 */
         if (failure.retryAfterSeconds <= 0)
-            throw new ApiClient.Failure("检索源限流（HTTP 429），本次跳过", failure.status);
+            throw new ApiClient.Failure("检索源限流（HTTP 429），本次跳过" + roads, failure.status);
         long wait = failure.retryAfterSeconds * 1000L;
         if (wait > MAX_RETRY_WAIT_MILLIS)
             throw new ApiClient.Failure("检索源限流，约 " + failure.retryAfterSeconds
-                    + " 秒后恢复，本次跳过", failure.status);
+                    + " 秒后恢复，本次跳过" + roads, failure.status);
         try {
             Thread.sleep(wait);
         } catch (InterruptedException interrupted) {
