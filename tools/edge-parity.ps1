@@ -189,6 +189,9 @@ foreach ($r in $devRows) {
         page  = [int]$r.page; line = [int]$r.line; chars = [int]$r.lineChars
         width = (NumOr $r.lineWidthPx 0.0); left = (NumOr $r.lineLeftPx 0.0)
         paraX = (NumOr $r.paraXPx 0.0); text = (Norm $r.lineFull); raw = $r.lineFull
+        over  = $(if ($r.PSObject.Properties['hangOverPx']) { NumOr $r.hangOverPx 0.0 } else { 0.0 })
+        # A mark Word hangs outside the column is measured inside it, so lineWidthPx stops at the
+        # margin while the ink carries on. Captures without that column (older ones) read 0.
     }) | Out-Null
 }
 foreach ($b in $blocks) { $b.key = Norm (($b.lines | ForEach-Object { $_.text }) -join '') }
@@ -314,6 +317,9 @@ foreach ($wp in $wordParas) {
                 word_right_px = $wordRight
                 delta_px      = $(if ($null -eq $wordRight) { $null } else { R2 ($ourRight - $wordRight) })
                 our_gap_px    = R2 ($ourRight - $widthPx)
+                our_overhang_px = R2 $d.over
+                our_ink_right_px = R2 ($ourRight + $d.over)
+                ink_delta_px  = $(if ($null -eq $wordRight) { $null } else { R2 ($ourRight + $d.over - $wordRight) })
                 word_gap_px   = $w.word_dev_px
                 word_stop_px  = $w.stop_px
                 text_hash     = (KeyHash $wl[$i].text)
@@ -342,7 +348,8 @@ foreach ($wp in $wordParas) {
 
 # ---------- 4. write the per-line TSV (ASCII, CRLF) ----------
 $cols = @('source', 'word_para', 'word_page', 'word_line', 'our_page', 'our_para', 'our_line', 'kind',
-    'is_last_line', 'char_count', 'indent_px', 'para_x_px', 'line_left_px', 'our_width_px', 'our_right_px', 'word_right_px', 'delta_px',
+    'is_last_line', 'char_count', 'indent_px', 'para_x_px', 'line_left_px', 'our_width_px', 'our_right_px', 'our_overhang_px', 'our_ink_right_px',
+    'word_right_px', 'delta_px', 'ink_delta_px',
     'our_gap_px', 'word_gap_px', 'word_stop_px', 'text_hash', 'text')
 $outFull = if ([IO.Path]::IsPathRooted($Out)) { $Out } else { Join-Path (Get-Location) $Out }
 $parent = Split-Path -Parent $outFull
@@ -412,6 +419,17 @@ if ($all.Count) {
     $short = @($all | Where-Object { ($_ - $widthPx) -lt -8.0 })
     "within 1 px of the right margin: {0}/{1} ({2:N1}%)   more than 8 px short of it: {3} ({4:N1}%)" -f `
         $flush.Count, $all.Count, (100.0 * $flush.Count / $all.Count), $short.Count, (100.0 * $short.Count / $all.Count)
+    # The same lines measured by where their INK ends, which is the only honest comparison once a
+    # trailing mark is allowed to hang: Word lets one full-width closing mark sit past its own
+    # margin (tools/hang-truth.py: 22 of 370 body lines, 11.42-12.44 pt). Legitimate hanging is then
+    # "we hang no further than Word's own line does", not "nobody passes the margin".
+    $inkRows = @($rowsOut | Where-Object -FilterScript $notLast)
+    $inkOver = @($inkRows | Where-Object { ($_.our_ink_right_px - $widthPx) -gt 1.0 })
+    $wordAlso = @($inkOver | Where-Object { $null -ne $_.word_right_px -and ($_.word_right_px - $widthPx) -gt 1.0 })
+    $worse = @($inkOver | Where-Object { $null -ne $_.word_right_px -and `
+        ($_.our_ink_right_px - $widthPx) - ($_.word_right_px - $widthPx) -gt 1.0 })
+    "ink past the right margin: {0}/{1} justified non-last lines; Word's own ink is past it on {2} of them;" -f $inkOver.Count, $inkRows.Count, $wordAlso.Count
+    "  we pass the margin further than Word's own line does by more than 1 px: {0}  (this is the number acceptance item 6 must watch)" -f $worse.Count
 }
 ""
 if ($Top -gt 0 -and $rowsOut.Count) {
