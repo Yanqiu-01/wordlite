@@ -39,6 +39,7 @@ public final class TextCorpusRegression {
         shortFragments();
         matching();
         fingerprints();
+        caps();
         merging();
         rates();
         citations();
@@ -479,6 +480,38 @@ public final class TextCorpusRegression {
         TextCorpus.Report citedReport = citedOut.match("正文从这里开始讲我们的实验设置。\n" + reference,
                 null, TextCorpus.structure("正文从这里开始讲我们的实验设置。\n" + reference).spanArray());
         check(citedReport.hits.isEmpty(), "落在参考文献区间里的重复不会被指纹带翻出来");
+    }
+
+    /** 上限到顶之后的行为：文献留着、句子名额不再涨，而且外面看得出来。 */
+    private static void caps() {
+        TextCorpus.restoreCaps();
+        TextCorpus base = new TextCorpus();
+        base.add(source("cap-a", "上限甲", "local"),
+                "深度学习模型在自然语言处理的特征提取实验中显著提升了训练收敛速度。");
+        check(!base.sentenceCapReached() && !base.fingerprintCapReached(),
+                "没到顶时两个都不报警（入库 " + base.sentenceCount() + " 句 / 上限 " + base.sentenceCap() + "）");
+        check(base.sentenceCap() == TextCorpus.MAX_CORPUS_SENTENCES
+                        && base.fingerprintTokenCap() == TextCorpus.MAX_FINGERPRINT_TOKENS,
+                "产品路径上的两个上限就是 40000 句与 1200000 个指纹 token");
+        try {
+            TextCorpus.overrideCaps(3, 4);
+            TextCorpus tiny = new TextCorpus();
+            tiny.add(source("cap-b", "上限乙", "local"),
+                    "第一段话讲的是模型收敛速度。第二段话讲的人工标注成本。第三段话讲的是数据规模影响。");
+            check(tiny.sentenceCount() > 0 && tiny.sentenceCount() <= 3,
+                    "压低到 3 句之后只收 " + tiny.sentenceCount() + " 句，多出来的句子不占名额");
+            check(tiny.sentenceCapReached(), "撞到上限时 sentenceCapReached() 报警，报告才有条可写");
+            check(tiny.sourceCount() == 1,
+                    "到顶之后文献本身仍然留着（题录 " + tiny.sourceCount() + " 篇），只是不再逐句可比");
+        } finally {
+            TextCorpus.restoreCaps();
+        }
+        TextCorpus back = new TextCorpus();
+        back.add(source("cap-c", "上限丙", "local"),
+                "恢复默认之后一段正常的话应该照常入库，不受刚才那个压低值的影响。");
+        check(!back.sentenceCapReached() && back.sentenceCount() >= 1
+                        && back.sentenceCap() == TextCorpus.MAX_CORPUS_SENTENCES,
+                "restoreCaps() 之后一切回到产品默认（" + back.sentenceCount() + " 句入库）");
     }
 
     private static void merging() {

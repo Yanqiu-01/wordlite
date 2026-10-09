@@ -89,9 +89,25 @@ public final class TextCorpus {
     static void restoreMinSentenceChars() {
         minSentenceChars = MIN_SENTENCE_CHARS;
     }
-    private static final int MAX_CORPUS_SENTENCES = 40000;
+    public static final int MAX_CORPUS_SENTENCES = 40000;
     /** 指纹索引的 token 上限，超了就只保留句级比对。 */
-    private static final int MAX_FINGERPRINT_TOKENS = 1200000;
+    public static final int MAX_FINGERPRINT_TOKENS = 1200000;
+    /**
+     * 两个上限的活值。产品路径永远就是上面那两个数，只有自检能把它们压低（见 overrideCaps），
+     * 这样"到顶之后会发生什么"能在毫秒级验到，不必先造出 74 MB 索引才看得见。
+     */
+    private static int sentenceCeiling = MAX_CORPUS_SENTENCES;
+    private static int fingerprintCeiling = MAX_FINGERPRINT_TOKENS;
+
+    static void overrideCaps(int sentences, int fingerprints) {
+        sentenceCeiling = sentences;
+        fingerprintCeiling = fingerprints;
+    }
+
+    static void restoreCaps() {
+        sentenceCeiling = MAX_CORPUS_SENTENCES;
+        fingerprintCeiling = MAX_FINGERPRINT_TOKENS;
+    }
     /** 一篇文献至少要共享两枚指纹才值得去验证，一枚多半是巧合。 */
     private static final int MIN_SHARED_FINGERPRINTS = 3;
     private static final int MAX_ANCHORS_PER_DOC = 4000;
@@ -433,12 +449,12 @@ public final class TextCorpus {
         sourceChars.add(Integer.valueOf(validCount(norm, 0, text.length())));
         ArrayList<int[]> spans = sentences(text);
         for (int i = 0; i < spans.size(); i++) {
-            if (entries.size() >= MAX_CORPUS_SENTENCES) return;
+            if (entries.size() >= sentenceCeiling) return;
             int[] span = spans.get(i);
             ArrayList<Frag> pieces = fragments(norm, span[0], span[1]);
             if (pieces.isEmpty()) { skippedSentences++; continue; }
             for (int f = 0; f < pieces.size(); f++) {
-                if (entries.size() >= MAX_CORPUS_SENTENCES) return;
+                if (entries.size() >= sentenceCeiling) return;
                 Frag frag = pieces.get(f);
                 Entry entry = new Entry(frag.key, frag.grams, signature(frag.grams), sourceIndex, frag.chars);
                 int entryId = entries.size();
@@ -459,7 +475,7 @@ public final class TextCorpus {
 
     /** winnowing 取样结果进倒排，一篇文献一份全文，跨句复制才追得到。 */
     private void indexFingerprints(int sourceIndex, String text) {
-        if (fingerprintTokens >= MAX_FINGERPRINT_TOKENS || text == null) return;
+        if (fingerprintTokens >= fingerprintCeiling || text == null) return;
         String flat = normalize(text);
         int[] at = Fingerprints.tokens(flat);
         if (at.length < Fingerprints.MIN_MATCH) return;
@@ -605,6 +621,17 @@ public final class TextCorpus {
     }
 
     public int sentenceCount() { return entries.size(); }
+
+    /** 逐句索引是否已到顶：到顶之后再入库的文献只留题录，不再逐句参与比对。 */
+    boolean sentenceCapReached() { return entries.size() >= sentenceCeiling; }
+
+    /** 指纹倒排是否已到顶：到顶之后新文献只剩句级可比，跨句抄写追不到。 */
+    boolean fingerprintCapReached() { return fingerprintTokens >= fingerprintCeiling; }
+
+    /** 当前生效的两个上限，供报告把"到顶"写成具体数字。 */
+    public int sentenceCap() { return sentenceCeiling; }
+
+    public int fingerprintTokenCap() { return fingerprintCeiling; }
 
     public boolean isEmpty() { return entries.isEmpty(); }
 

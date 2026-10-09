@@ -535,6 +535,14 @@ public final class DuplicateEngine {
             }
             // 语料到此定型（检索回来的候选已入库、比对也做完了），清单再数，篇数才对得上比的那一份。
             report.inventory = CorpusLedger.aggregate(library);
+            /* 自建库比上限大是常态：排在前面的那些把名额吃光之后，后面的只留了题录。
+               不说出这一句，用户会把 0% 读成"肯定没重复"，而它其实只比了前几十篇。 */
+            if (library.sentenceCapReached())
+                note(report, "逐句比对到 " + library.sentenceCap() + " 句就到上限了，"
+                        + "自建库里排在后面的文献只留了题录，没有参与比对");
+            else if (library.fingerprintCapReached())
+                note(report, "指纹索引到 " + library.fingerprintTokenCap() + " 就到上限了，"
+                        + "排在后面的文献只能整句比对，跨句抄写可能查不出来");
             if (cancelled(cancellation)) note(report, "检测到取消，未执行 AIGC 倾向分析");
             else {
                 step(progress, "AIGC 倾向分析", 3, 4);
