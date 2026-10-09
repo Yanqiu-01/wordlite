@@ -72,6 +72,10 @@ Add-Suite "AigcOfflineModelRegression" @("app/src/main/assets/aigc", "tests/corp
 Add-Suite "LocalRewriteRegression" @()
 Add-Suite "DeepModeAudit"          @("tests/corpus/real-prose.txt", "tests/corpus/oa-planted-cjmenet.txt")
 Add-Suite "RewriteRateRegression"  @("tests/samples/input-liu.docx", "tests/corpus/oa-planted-cjmenet.txt", "$out/rewrite-rate")
+# 降重为什么只换掉命中区三成的字：逐段量"多少字能动、动得了的里面多少在替换表里有候选、表里有候选的点
+# 被哪条规矩挡下"，另带两把与自家判据无关的尺（字符二元组 TF-IDF 余弦、ROUGE-L）。只吃本地语料，跑三秒。
+# 口径与 RewriteRateRegression 逐字相同，所以它报的 516 -> 398 与那条必须一致——不一致就是有人动了表或判据。
+Add-Suite "RewriteCoverageAudit"   @("tests/samples/input-liu.docx", "tests/corpus/oa-planted-cjmenet.txt", "$out/rewrite-coverage")
 Add-Suite "DetectRegression"       @()
 Add-Suite "RetrievalCoverageRegression" @()
 Add-Suite "WanfangPagingRegression"    @()
