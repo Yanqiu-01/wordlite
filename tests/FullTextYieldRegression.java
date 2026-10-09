@@ -277,6 +277,28 @@ public class FullTextYieldRegression {
                             && batch.summary().contains("要机构权限或登录 2 个"),
                     "标题行一句话带齐：" + batch.summary());
 
+            /* 7b) 2.6.3 真机那一屏把一份加密的 PDF 报成"没说原因"：它在下载口是好好的（真的 %PDF- 头），
+               死在解析口，而形状号只有下载口会填。现在解析口也要落形状号。 */
+            java.io.IOException parse = new java.io.IOException("x");
+            check(CorpusImport.readShapeOf("PDF 已加密，读不出正文", parse).equals("pdf-encrypted")
+                            && CorpusImport.readShapeOf("PDF 有文字流，但字体编码映射不出文字", parse)
+                                    .equals("pdf-undecodable")
+                            && CorpusImport.readShapeOf("自建库名额已满（上限 120 个文件）", parse)
+                                    .equals("library-full")
+                            && CorpusImport.readShapeOf("没有从文件里读到文本", parse).equals("pdf-no-text"),
+                    "解析口的失败也落形状号，不再只有下载口会填");
+            CorpusImport.Batch parsed = new CorpusImport.Batch();
+            parsed.total = 4;
+            parsed.receipts.add(receipt(1, CorpusImport.Status.IMPORTED, "", 4200));
+            parsed.receipts.add(receipt(2, CorpusImport.Status.FAILED,
+                    CorpusImport.readShapeOf("PDF 已加密，读不出正文", parse), 0));
+            parsed.receipts.add(receipt(3, CorpusImport.Status.FAILED, "fetch-failed", 0));
+            parsed.receipts.add(receipt(4, CorpusImport.Status.FAILED, "fetch-failed", 0));
+            check(parsed.shapeTally().equals("PDF 已加密 1 个、没打通 2 个"),
+                    "那一屏的分堆不再出现那一堆没说原因的：" + parsed.shapeTally());
+            check(!parsed.shapeTally().contains("没说原因"),
+                    "三种说得出原因的失败不许被归成一堆黑盒：" + parsed.shapeTally());
+
             System.out.println("SUMMARY " + checks + " assertions passed; loopback-only network");
         } finally {
             server.stop(0);
