@@ -297,6 +297,80 @@ public final class TextCorpus {
      * 包含率命中的落点要裁到两边实际共享的那一段。一段共享块最短要长到这个长度（折叠串的单位数）：
      * MIN_SHARED_GRAMS 枚首尾相接的三元组正好盖住 5 个字符，再短只是撞上了同一个术语，不是一段抄来的话。
      */
+    /**
+     * 一段连续逐字重合要多少字才允许报进比率。
+     *
+     * 13 不是我们扫出来的，是行业默认：主流商用查重 SDK 的默认档就是"连续 13 字"，它的严格阶梯是
+     * 10 / 11 / 13 / 16 / 19（默认 13），句级那一层是 0.65 / 0.75 / 0.85 / 0.90 / 0.95（默认 0.85）。
+     * 出处 com.xincheck:duplicate-check:0.5.16 的 ContinuityCheck#setThreshold 与 ClauseCheck#setThreshold
+     * （私有 maven 仓库 https://maven.xincheck.com/repository/maven-releases/，档位见 CheckLevel）。
+     * 在改成 13 之前这个门槛一直等于取样口径的 MIN_MATCH = 18，比外面那几家严 38%，同一段抄写我们
+     * 必然报得比学校少——这是读数偏低的一个来源，不是偶然。
+     *
+     * 取样口径（{@link Fingerprints#GRAM} / {@link Fingerprints#WINDOW}）不动，还是 7/12：那一层是
+     * 用来挑候选文档的，标定台实测 7/12 误报 0.0%，而把取样也压到 13（w=8）误报涨到 32.5%。取样与上报
+     * 分成两个常量之后，取样照旧便宜，上报照旧与外面的默认对齐。
+     */
+    public static final int REPORT_FLOOR_CHARS = 13;
+    private static int reportFloorChars = REPORT_FLOOR_CHARS;
+
+    /** 当前这一轮上报用的最短连续重合字数。 */
+    public static int reportFloorChars() {
+        return reportFloorChars;
+    }
+
+    /** 标定台换档用：11 / 13 / 16 三档对应外面的严格、标准、宽松。 */
+    static void overrideReportFloor(int chars) {
+        if (chars < 4 || chars > 64) throw new IllegalArgumentException("chars=" + chars);
+        reportFloorChars = chars;
+    }
+
+    static void restoreReportFloor() {
+        reportFloorChars = REPORT_FLOOR_CHARS;
+    }
+
+    /**
+     * 一条连续重合里必须有一段"连着写在一起"的正文，长度不少于这个字数，才允许报进比率。
+     *
+     * 为什么需要这一条：取样的 token 流故意跳过标点、还把连着的数字折成一格（那是为了"四十分钟"改成
+     * "40 分钟"、中间插个逗号都断不掉复制痕迹）。代价是两类东西会被拼成一条长重合：
+     * "Mode 1、Mode 2和Mode 3"（折完是 mode#、mode#和mode#）和"浸渗时间、连接温度、连接时间和压力"
+     * （四个四字词并列）。这两条都是把上报门槛降到 13 字之后实测冒出来的全部噪声，34 个字，
+     * 见 reports/current/rewriterobustnessregression.log。它们不是抄写，是术语列举。
+     *
+判据借的是 WCopyfind 那一条：种子不能由碎片拼出来（它要求种子词本身 >3 个字母，纯虚词短语
+     * 永远当不了匹配起点，https://wcopyfind.wfindapps.org/settings.html）。落到我们这边就是：把重合段
+     * 按"原文里下标连续"切开，最长的那一块要够长。真抄的一句话里通常有一段十几个字不带顿号的正文，
+     * 而并列术语每一块只有四五个字。
+     *
+     * 8 这个数是量出来的，同一台实测台（20 段真论文、17 种改写口径、上报门槛 13）：种子 4 与 6 时那两条
+     * 列举照样进比率（噪声 34 字），7 还漏一条（17 字），8 起噪声归零；再往上放到 12 就开始吃真命中——
+     * 拼接那一口径召回掉到 98.3%，低于钉死的 99.0% 地板。可用区间 8..10，取最小的 8：门槛只管"够不够长"，
+     * 真命中能给的连续正文更长，压到下限不会误伤。重跑 tools/detect-calibration.ps1 看 core= 那七行。
+          */
+    public static final int REPORT_CORE_CHARS = 8;
+    private static int reportCoreChars = REPORT_CORE_CHARS;
+
+    /** 标定台换档用：看这一刀在哪一档开始吃真命中。 */
+    static void overrideReportCore(int chars) {
+        if (chars < 1 || chars > 64) throw new IllegalArgumentException("chars=" + chars);
+        reportCoreChars = chars;
+    }
+
+    static void restoreReportCore() {
+        reportCoreChars = REPORT_CORE_CHARS;
+    }
+
+    /** 重合段里"原文下标连续"的最长一块有多少枚 token。中间跳过任何一个字（标点、空格）就断开。 */
+    private static int solidRunTokens(int[] at, int from, int to) {
+        int best = 1, current = 1;
+        for (int i = from + 1; i <= to; i++) {
+            current = at[i] == at[i - 1] + 1 ? current + 1 : 1;
+            if (current > best) best = current;
+        }
+        return best;
+    }
+
     private static final int MIN_SHARED_BLOCK = MIN_SHARED_GRAMS + 2;
     /** 一个比对片段最多裁出几段共享块；每段一次二分，这个上限把最坏开销钉成常数倍。 */
     private static final int MAX_SHARED_BLOCKS = 16;
@@ -582,8 +656,9 @@ public final class TextCorpus {
                     bestSpan = span;
                 }
             }
-            if (best < 0 || bestLength < Fingerprints.MIN_MATCH) return;
+            if (best < 0 || bestLength < reportFloorChars) return;
             done[best] = true;
+            if (solidRunTokens(at, bestSpan[0], bestSpan[1]) < reportCoreChars) continue;
             boolean clash = false;
             for (int i = bestSpan[0]; i <= bestSpan[1]; i++) if (used[i]) { clash = true; break; }
             if (clash) continue;
@@ -780,7 +855,7 @@ public final class TextCorpus {
             // 证据是带子本身——winnowing 保证的连续重合，被句级命中咬掉一段并不会把剩下的字变成巧合。
             int remaining = 0;
             for (int r = 0; r < rest.size(); r++) remaining += validCount(norm, rest.get(r)[0], rest.get(r)[1]);
-            if (remaining < Fingerprints.MIN_MATCH) continue;
+            if (remaining < reportFloorChars) continue;
             for (int r = 0; r < rest.size(); r++) {
                 int[] range = rest.get(r);
                 if (validCount(norm, range[0], range[1]) <= 0) continue;

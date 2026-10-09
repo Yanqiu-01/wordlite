@@ -48,6 +48,19 @@ public final class CalibrationSweep {
         System.out.println("CORPUS sourceLines=" + source.size() + " negativeLines=" + negatives.size()
                 + " positives=" + fixture.kinds.size() + " queryChars=" + fixture.query.length());
         engine("CURRENT", fixture, source);
+        // 上报门槛阶梯：13 是主流查重 SDK 的默认档（10/11/13/16/19 五档），18 是本项目改之前的口径。
+        for (int floor : new int[] { 10, 11, 13, 16, 18, 19 }) {
+            TextCorpus.overrideReportFloor(floor);
+            engine("floor=" + floor, fixture, source);
+        }
+        // 上报门槛放到 13 之后，实体种子那一条要几字才开始吃真命中。
+        TextCorpus.overrideReportFloor(13);
+        for (int core : new int[] { 4, 6, 7, 8, 9, 10, 12 }) {
+            TextCorpus.overrideReportCore(core);
+            engine("core=" + core, fixture, source);
+        }
+        TextCorpus.restoreReportCore();
+        TextCorpus.restoreReportFloor();
         pairGrid(fixture, source, negatives);
         sentenceGrid(fixture, source);
         grid(fixture, source, negatives);
