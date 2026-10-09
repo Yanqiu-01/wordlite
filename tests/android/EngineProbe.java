@@ -2,6 +2,7 @@ package com.rikkahub.wordlite;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.Proxy;
 import java.net.Socket;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
@@ -205,8 +206,11 @@ public final class EngineProbe {
                     System.out.printf(Locale.ROOT, "SKIP %-17s tried=%-8s via=%s%n", engine, "-", "needs WORDLITE_CORE_KEY");
                     continue;
                 }
-                int tried = Routes.order(Routes.host(PaperSources.endpoint(engine)),
-                        PaperSources.proxyFor(limits)).size();
+                /* 候选队列整条列出来，不是只报个数：真机上"这条代理到底被试过没有"就是要能从
+                   读数里直接看出来（2026-10-09 那条"试过的路都没通：直连 拒绝连接"坑就坑在这儿）。 */
+                List<Proxy> roads = Routes.order(Routes.host(PaperSources.endpoint(engine)),
+                        PaperSources.proxyFor(limits));
+                int tried = roads.size();
                 long started = System.nanoTime();
                 try {
                     ArrayList<PaperSources.Candidate> found = PaperSources.search(engine, query, limits, null);
@@ -226,8 +230,9 @@ public final class EngineProbe {
                     failures++;
                     String status = error instanceof ApiClient.Failure
                             ? " http=" + ((ApiClient.Failure) error).status : "";
-                    System.out.printf(Locale.ROOT, "FAIL %-17s %9s tried=%-2d via=%-22s %s%s%n", engine, ms + "ms", tried,
-                            "-", String.valueOf(error.getMessage()), status);
+                    System.out.printf(Locale.ROOT, "FAIL %-17s %9s tried=%-2d roads=%s via=%-22s %s%s%n",
+                            engine, ms + "ms", tried, roadLabels(roads), "-",
+                            String.valueOf(error.getMessage()), status);
                 }
             }
             System.out.println("ROUND " + round + " " + ((System.nanoTime() - roundStarted) / 1000000L)
@@ -250,6 +255,16 @@ public final class EngineProbe {
      * 每一次尝试都把它自己的形状打出来：没链接、连不上、扫描版没文字层、页面是 JS 壳、被挡，
      * 五种失败在界面上是五种下一步，不能都印成"没抓到"。
      */
+    /** 候选队列里按先后排了哪几条路。空列表不可能：直连永远兜底。 */
+    private static String roadLabels(List<Proxy> roads) {
+        StringBuilder out = new StringBuilder("[");
+        for (Proxy road : roads) {
+            if (out.length() > 1) out.append("、");
+            out.append(Routes.label(road));
+        }
+        return out.append(']').toString();
+    }
+
     private static ArrayList<PaperSources.Candidate> fulltextPass(String query, PaperSources.Limits base,
                                                                   Set<String> wanted, int fetch) {
         final int minCjk = 800;

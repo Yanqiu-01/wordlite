@@ -85,11 +85,35 @@ final class Routes {
     /**
      * 这个回环代理端口刚被当场拒回：没人监听，不是网络慢。记下冷却期，过后再试。
      * 只认自动发现的那两个端口——用户自己填的代理照原样再撞，那是他显式要的路。
+     *
+     * <p>「只认那两个端口」得真的在这一行也成立。用户在设置里填的是另一个回环端口时（实测填过
+     * 127.0.0.1:18899），旧写法把它也记进冷却表，于是 {@link #anyPortDown()} 从此说"回环上的代理
+     * 端口没人监听"，自检把用户支去跑 tools/phone-gateway.ps1，而真正在用的 7897 一直好着。</p>
      */
     static synchronized void portRefused(Proxy via) {
-        if (via == null || !isLoopbackProxy(via)) return;
+        if (!isAutodiscovered(via)) return;
         long until = System.nanoTime() / 1000000L + LOOPBACK_COOLDOWN_MILLIS;
         DOWN_UNTIL.put(address(via), Long.valueOf(until));
+    }
+
+    /**
+     * 这条路刚把请求送出去并拿到了答话（哪怕回的是一句 429）：端口上有人在听，冷却当场作废。
+     *
+     * <p>不记这一笔，一轮几十扇窗口里的一次抖动就够把一条活路藏起来六十秒。实测形状：Clash 重载
+     * 配置的那几秒钟里 7897 被拒回一次而进冷却，紧接着 OpenAlex 明明经它取回过 60 篇候选，后面几个
+     * 海外源的候选队列里却排不到它——那一路只剩 lastGood 一根独木，而 lastGood 是全局的，国内源
+     * 一次直连走通就把它换成直连了。</p>
+     */
+    static synchronized void proofOfLife(Proxy via) {
+        if (via != null) DOWN_UNTIL.remove(address(via));
+    }
+
+    /** 这条路是不是自动发现要排队的那两个回环端口之一。别的地址不归冷却表管，直连（null）也不。 */
+    private static boolean isAutodiscovered(Proxy via) {
+        if (via == null || !isLoopbackProxy(via)) return false;
+        int port = ((InetSocketAddress) via.address()).getPort();
+        for (int known : LOOPBACK_PORTS) if (known == port) return true;
+        return false;
     }
 
     /** 当前有没有一个自动发现的回环端口在冷却：自检的提示语要看它，才知道该让用户去建反代还是换网络。 */
@@ -181,6 +205,7 @@ final class Routes {
     /** 哪条路通了就记住它，下一次同类请求先走这条，省得每扇窗口都把死路重撞一遍。 */
     static synchronized void succeeded(Proxy via) {
         lastGood = via;
+        proofOfLife(via);
     }
 
     /**
@@ -196,7 +221,10 @@ final class Routes {
             while (DIRECT_FAILED.size() > 32) DIRECT_FAILED.remove(DIRECT_FAILED.keySet().iterator().next());
             return;
         }
-        KNOWN_GOOD.remove(host);
+        /* 只有"为这台主机走通的那条路自己没通"才撤账。别的拨不上——用户在设置里填的死地址、
+           刚拔掉的另一条反代——不许顺手抹掉这条主机的 proven：抹掉之后这条活路在这个主机上只剩
+           lastGood 一根独木，而 lastGood 是全平台一个，国内源一次直连走通就把它换成直连了。 */
+        if (same(KNOWN_GOOD.get(host), via)) KNOWN_GOOD.remove(host);
     }
 
     /** 找过的路全列出来：自检失败时用户最需要知道的是"到底试过哪几条"，而不是又一句"网络失败"。 */

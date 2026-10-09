@@ -42,6 +42,8 @@ public final class DuplicateEngine {
     /* HttpTransport 把 429 写成"检索源限流…"再抛 IOException，PaperSources.search() 只往上抛
        IOException，所以这里只能按注记前缀认限流。这是权宜：0.6.1 让 ApiClient.Failure 带上状态码。 */
     static final String THROTTLED_PREFIX = "检索源限流";
+    /** 「这个源这一轮一条路都没走通」：只有连接层没建成才算，源答了话（403/412/429/5xx）不算。 */
+    static final String ROAD_EXHAUSTED_NOTE = "这个源这一轮一条路都没走通——";
     /** 候选清单「可比材料」列的三个取值，入库时逐条写死，报告里不许再现场猜。 */
     static final String MATERIAL_FULL = "全文", MATERIAL_ABSTRACT = "摘要", MATERIAL_RECORD = "仅题录";
     /**
@@ -1047,7 +1049,9 @@ public final class DuplicateEngine {
                         } catch (IllegalArgumentException error) {
                             sweep.shapes.miss(engine, phrase, message(error), shapesBefore);
                             skipped.put(engine, Boolean.TRUE); failedLast.put(engine, Boolean.TRUE);
-                            notes.add("已跳过 " + PaperSources.label(engine) + "：" + message(error));
+                            /* 这一路一次请求都没发出去：源没勾、检索式为空、缺密钥。它和"路没通"
+                               是两句不同的话，用户下一步做的事也相反。 */
+                            notes.add(skippedNote(PaperSources.label(engine), error, false));
                         } catch (IOException error) {
                             /* 留档：响应侧没机会落行的失败（连不上、超时、429 被包成 IOException）
                                在这里补一行，档里从此没有"问了但什么都没留下"这一格。 */
@@ -1066,7 +1070,7 @@ public final class DuplicateEngine {
                                 notes.add("已重试 " + PaperSources.label(engine) + "：" + message(error));
                             } else {
                                 skipped.put(engine, Boolean.TRUE);
-                                notes.add("已跳过 " + PaperSources.label(engine) + "：" + message(error));
+                                notes.add(skippedNote(PaperSources.label(engine), error, true));
                             }
                         }
                     }
@@ -1700,6 +1704,17 @@ public final class DuplicateEngine {
         String name = engine == null ? "unknown" : engine;
         counts.put(name, Integer.valueOf(count(counts, name) + 1));
     }
+    /**
+     * 「这个源没问成」那半句的两种说法。①{@code asked == false}：请求根本没发出去——源被设置挡下
+     * 或检索式无效，网络没有毛病，要改的是检索设置；②{@code asked == true} 而连接层没建成：这一轮
+     * 一条路都没走通，要修的是出口。源答了话（403/429/5xx）时照抄那句答复，两种说法都不许沾。
+     */
+    static String skippedNote(String label, Throwable error, boolean asked) {
+        if (!asked) return "没问 " + label + "：" + message(error);
+        return "已跳过 " + label + "："
+                + (reachOf(error) < 0 ? ROAD_EXHAUSTED_NOTE : "") + message(error);
+    }
+
     private static String message(Throwable error) {
         String value = error.getMessage();
         return value == null || value.trim().isEmpty() ? error.getClass().getSimpleName() : value.trim();
