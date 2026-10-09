@@ -64,7 +64,6 @@ $argMap = @{
     "DetectionFloor"              = @("tests/corpus", "{out}/detection-floor-library")
     "AbstractLayerRegression"     = @("tests/corpus")
     "FullTextYieldRegression"      = @()
-    "PdfRedirectRegression"        = @()
     "FontSubstitution"            = @("tests/samples/input-liu.docx")
     "OriginalDocxRegression"      = @("tests/samples/input-liu.docx", "{out}/original-roundtrip.docx")
     "TableGeometryRegression"     = @("tests/samples/input-liu.docx", "{out}/table-geometry.docx", "tests/fixture.docx")
