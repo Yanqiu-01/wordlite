@@ -84,6 +84,7 @@ public final class DeviceCapture {
         write(new File(out, "run-fit.tsv"), runFit(result));
         write(new File(out, "chars-tail.tsv"), charsTail(result));
         write(new File(out, "tail-fit.tsv"), tailFit(result));
+        write(new File(out, "glue-price.tsv"), gluePrice(result));
         System.out.println("DONE tag=" + tag + " pages=" + result.totalPages()
                 + " words=" + words + " parseMs=" + parseMs + " totalMs=" + totalMs);
     }
@@ -833,6 +834,81 @@ public final class DeviceCapture {
         return sb.toString();
     }
 
+    /**
+     * What a glued Latin/digit string really costs the line the platform put it on, measured instead of
+     * assumed. AtomicRunSpan answers getSize with the sum of the character advances (block 87: 128 px),
+     * and that is comfortably under the 156 px the line in front of it still had, yet the phone moves the
+     * string down anyway. So re-lay the same paragraph, glue and all, one pixel wider at a time and record
+     * the column width at which the string finally stays on the earlier line: that threshold minus the
+     * line's own natural width is the price the breaker actually used. If it is far above getSize, the
+     * glue is not over-pricing -- the refusal comes from somewhere else, and the fix has to look there.
+     */
+    private static String gluePrice(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page").append(TAB).append("block").append(TAB).append("line").append(TAB)
+          .append("glue_px").append(TAB).append("prev_natural_px").append(TAB).append("room_px")
+          .append(TAB).append("threshold_px").append(TAB).append("effective_px").append(TAB)
+          .append("glue_size_px").append(TAB).append("plain_px").append(TAB)
+          .append("spans_at_run").append(TAB).append("span_px_sum").append(TAB)
+          .append("span_ranges").append(TAB).append("note").append(NL);
+        for (int p = 0; p < result.totalPages(); p++) {
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null) continue;
+                StaticLayout l = pl.text.layout;
+                for (int i = Math.max(1, pl.startLine); i < pl.endLine && i < l.getLineCount(); i++) {
+                    if (!gluedAt(l, i)) continue;
+                    int runAt = l.getLineStart(i);
+                    float run = nextRunWidth(l, i - 1);
+                    float natural = l.getLineWidth(i - 1) - widenExtraSum(l.getText(),
+                            l.getLineStart(i - 1), l.getLineEnd(i - 1));
+                    float room = roomOf(l, i - 1);
+                    float[] glue = glueWidths(l, i);
+                    int spanCount = 0;
+                    float spanSum = 0f;
+                    StringBuilder ranges = new StringBuilder();
+                    if (l.getText() instanceof android.text.Spanned) {
+                        android.text.Spanned sp = (android.text.Spanned) l.getText();
+                        for (DocxTextLayout.AtomicRunSpan glueSpan
+                                : sp.getSpans(runAt, runAt + 1, DocxTextLayout.AtomicRunSpan.class)) {
+                            spanCount++;
+                            spanSum += glueSpan.getSize(l.getPaint(), l.getText(),
+                                    sp.getSpanStart(glueSpan), sp.getSpanEnd(glueSpan), null);
+                            if (ranges.length() > 0) ranges.append('+');
+                            ranges.append(sp.getSpanStart(glueSpan)).append('-').append(sp.getSpanEnd(glueSpan));
+                        }
+                    }
+                    int threshold = -1;
+                    String note = LAYOUT_BUILD == null ? "no build() to call" : "";
+                    if (LAYOUT_BUILD != null && l.getText() instanceof android.text.Spannable) {
+                        for (int w = 500; w <= 660; w++) {
+                            try {
+                                StaticLayout wider = (StaticLayout) LAYOUT_BUILD.invoke(null,
+                                        l.getText(), l.getPaint(), w, l.getAlignment(), false, true);
+                                int at = wider.getLineForOffset(runAt);
+                                if (w == l.getWidth()) note = "run line at own width " + at;
+                                if (at == i - 1) { threshold = w; break; }
+                            } catch (Throwable failed) {
+                                Throwable cause = failed instanceof java.lang.reflect.InvocationTargetException
+                                        && failed.getCause() != null ? failed.getCause() : failed;
+                                note = cause.getClass().getSimpleName();
+                                break;
+                            }
+                        }
+                    }
+                    sb.append(p + 1).append(TAB).append(pl.blockIndex).append(TAB).append(i).append(TAB)
+                      .append(r2(run)).append(TAB).append(r2(natural)).append(TAB).append(r2(room))
+                      .append(TAB).append(threshold).append(TAB)
+                      .append(threshold < 0 ? -1 : r2(threshold - natural)).append(TAB)
+                      .append(r2(glue[0])).append(TAB).append(r2(glue[1])).append(TAB)
+                      .append(spanCount).append(TAB).append(r2(spanSum)).append(TAB)
+                      .append(ranges.length() == 0 ? "-" : ranges.toString()).append(TAB)
+                      .append(note.length() == 0 ? "n/a" : note)
+                      .append(NL);
+                }
+            }
+        }
+        return sb.toString();
+    }
     /**
      * Where this line's ink really ends, and what its tail costs the layout.
      *
