@@ -1,4 +1,4 @@
-# 六条验收（docs/layout-parity-target.md 第 0 节）一次跑完，输出一张表。
+# 七条验收（docs/layout-parity-target.md 第 0 节）一次跑完，输出一张表。前六条是原来的六条，第 7 条见下面口径说明。
 #
 #   pwsh tools/parity-six.ps1 -Tag lh-base                      # 采样 + 六条全量
 #   pwsh tools/parity-six.ps1 -Tag lh-base -SkipDevice          # 手机不重跑，只重算报表
@@ -11,6 +11,12 @@
 #   右边界    tools/edge-parity.ps1
 # Word 真值一律走缓存（-WordCache，默认 artifacts/parity），这里不重开 Word 会话：Word 只允许一个会话。
 # 每条后面都带着量它的文件名，报表同时写 <Out>/<Tag>/six.tsv 与 six.txt。
+#
+# 第 7 条（break-agreement-pdf）的尺子单独说清：它量 Word 自己导出的 PDF
+# （artifacts/agent-typeset/pdf-truth/input-liu.pdf，逐行读回原文）里每个段落行尾的字符偏移集合，
+# 与手机同一篇排出来的行尾偏移集合取交集/并集。第 5 条那个 69.7% 是另一把尺（对我们自己的行序
+# 按行号对），两个数不可并列引用。单独跑第 7 条：
+#     py tools/break-agreement.py -Capture artifacts/agent-layout-verify/<tag> -Out <tsv>
 param(
     [string]$Serial = "EAMUT20528011355",
     [Parameter(Mandatory = $true)][string]$Tag,
@@ -127,7 +133,24 @@ foreach ($line in @($lh | Where-Object { $_ -match '^(\S.*?)\s+n=(\d+)\s+word=([
     if ($cl -gt $worstLines) { $worstLines = $cl; $worst = $c.Groups[1].Value.Trim() }
 }
 
-# ---------- 7. 采样指纹：谁在什么时候、拿哪份代码量的 ----------
+# ---------- 7. 第 7 条：断点一致率（Word 导出 PDF 逐行读回原文，逐段比行尾偏移集合） ----------
+# 这一条既不碰手机也不重开 Word 会话：读第 1 步产出的 <Out>/new/lines-all.tsv，配上仓库里的 Word
+# PDF 真值。量法、方向拆分、断点分类全写在 tools/break-agreement.py 的头注里，这里只取它打印的数。
+$py = if (Get-Command py -ErrorAction SilentlyContinue) { "py" } else { "python" }
+$m7Both = 0; $m7Union = 0; $m7PhoneOnly = 0; $m7WordOnly = 0; $m7Para = 0; $m7PageShift = 0
+try {
+    $b = @(& $py (Join-Path $root "tools/break-agreement.py") "-Capture" $Out "-Out" (Join-Path $Out "break-agreement.tsv") 2>&1)
+    $m7Both      = [int](Grab $b 'BREAK AGREEMENT \(set ruler\): (\d+) of \d+ break points' 1)
+    $m7Union     = [int](Grab $b 'BREAK AGREEMENT \(set ruler\): \d+ of (\d+) break points' 1)
+    $m7PhoneOnly = [int](Grab $b 'phone_only \(we broke, Word did not\) = (\d+)' 1)
+    $m7WordOnly  = [int](Grab $b 'word_only  \(Word broke, we did not\) = (\d+)' 1)
+    $m7Para      = [int](Grab $b 'paragraphs compared=(\d+)' 1)
+    $m7PageShift = [int](Grab $b 'page assignment from this same truth file: (\d+) of' 1)
+} catch {
+    "warn: 第 7 条没跑起来（$($_.Exception.Message)），这一格按没量处理"
+}
+
+# ---------- 8. 采样指纹：谁在什么时候、拿哪份代码量的 ----------
 $engine = @{}
 foreach ($l in @(Get-Content -LiteralPath (Join-Path $d "engine.tsv") -Encoding UTF8)) {
     $c = $l -split "`t"; if ($c.Count -ge 2) { $engine[$c[0]] = $c[1] }
@@ -143,10 +166,11 @@ $rows6 = @(
     [pscustomobject]@{ n = 3; metric = "逐行行高误差 p90"; value = ("{0:0.###} px（|误差|，max {1:0.###}）" -f $m3P90, $m3Max); line = "<= 0.50 px"; pass = ($m3P90 -le 0.50); file = "$Out/line-height-rows.tsv" },
     [pscustomobject]@{ n = 4; metric = "每页累计高度误差"; value = ("{0:0.00} 行（按每页 {1} 行；{2}；最差队列 {3} {4:0.00} 行）" -f $m4Lines, $linesPerPage, $wordSpread, $worst, $worstLines); line = "<= 0.25 行"; pass = ($m4Lines -le 0.25); file = "$Out/line-height-rows.txt" },
     [pscustomobject]@{ n = 5; metric = "逐行换行点一致率"; value = "$m5Aligned/$m5Lines = $m5Rate"; line = ">= 90%"; pass = ($m5Lines -gt 0 -and ($m5Aligned / [math]::Max(1, $m5Lines)) -ge 0.90); file = "$par/line-delta.md" },
-    [pscustomobject]@{ n = 6; metric = "右边界超出 1px 的行数"; value = "$($m6Total - $m6In) / $m6Total"; line = "0 / 32（守住）"; pass = (($m6Total - $m6In) -eq 0); file = "$Out/edge.tsv" }
+    [pscustomobject]@{ n = 6; metric = "右边界超出 1px 的行数"; value = "$($m6Total - $m6In) / $m6Total"; line = "0 / 32（守住）"; pass = (($m6Total - $m6In) -eq 0); file = "$Out/edge.tsv" },
+    [pscustomobject]@{ n = 7; metric = "断点一致率(PDF 真值)"; value = "$(if ($m7Union -eq 0) { "没量到（tools/break-agreement.py 没跑起来或缺 Word PDF 真值）" } else { "$m7Both/$m7Union = $('{0:0.0}' -f (100.0 * $m7Both / [math]::Max(1, $m7Union)))%（$m7Para 段；我们多断 $m7PhoneOnly 处、少断 $m7WordOnly 处；同一份真值算出错页 $m7PageShift 段）" })"; line = ">= 90%（Word 导出 PDF 逐行读回，与第 5 条不是同一把尺）"; pass = ($m7Union -gt 0 -and ($m7Both / [math]::Max(1, $m7Union)) -ge 0.90); file = "$Out/break-agreement.tsv" }
 )
 ""
-"== 六条验收  tag=$Tag  页数 ours/Word = $ourPages/$wordPages =="
+"== 七条验收  tag=$Tag  页数 ours/Word = $ourPages/$wordPages =="
 foreach ($r in $rows6) {
     "{0} {1,-14} {2,-56} 验收线 {3}  [{4}]" -f $r.n, $r.metric, $r.value, $r.line, $(if ($r.pass) { "过" } else { "不过" })
 }

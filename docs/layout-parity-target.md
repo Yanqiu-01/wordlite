@@ -24,10 +24,11 @@ per-line advance = `StaticLayout.getLineTop(i+1)-getLineTop(i)`, plus the `+= 0.
 | 2 | 逐行行高误差中位 | `artifacts/agent-typeset/line-height-rows.ps1`（Word 相邻基线距离，COM） | -0.767 px（n=91，Word 26.267 px） | 绝对值 <= 0.10 px |
 | 3 | 逐行行高误差 p90 | 同上（取 \|误差\| 的 p90） | 2.533 px（max 3.467） | <= 0.50 px |
 | 4 | 每页累计高度误差 | 同上 x 每页行数（Word 每页 27-35 行） | 0.79 行（最差队列 sz12 line300 snap=false 2.55 行） | <= 0.25 行 |
-| 5 | 逐行换行点一致率 | `tools/line-break-delta.ps1 -Stage report` | 115/165 = 69.7%（`breakfix3`；`autospace1` 114/165 = 69.1%，最早 103/165 = 62.4%） | >= 90% |
+| 5 | 逐行换行点一致率（**旧口径**） | `tools/line-break-delta.ps1 -Stage report` | 115/165 = 69.7%（`breakfix3`；`autospace1` 114/165 = 69.1%，最早 103/165 = 62.4%）。**旧口径：对我们自己的行序逐行号对，不可与第 7 条并列引用** | >= 90% |
 | 6 | 两端对齐右边界超出 1px 的行数 | `tools/edge-parity.ps1 -Impl new` | **1 / 33（本轮退步：见第 24.4 节，退 1 行 = para 160 第 14 行 563.00 px 对 Word 564.53 px）** | 0 / 32（守住，不许为了行高牺牲它） |
+| 7 | 断点一致率（**Word 导出 PDF 真值**，新口径） | `py tools/break-agreement.py -Capture <tag>`（真值 = Word 自己导出的 PDF `artifacts/agent-typeset/pdf-truth/input-liu.pdf`，sha256 `AB298AC416DCFC72855645E5AD8E472ABDA3DFFC9A6B10925A4FAA1396E761A1`，逐行读回原文） | 225/355 = **63.4%**（102 段；我们多断 65 处、少断 65 处；同一份真值算出错页 6/102 段；采样 `main251`，`lines-all.tsv` sha `5F714EE762A78345`） | >= 90% |
 
-一条命令复采这六条：`pwsh tools/parity-six.ps1 -Tag <tag>`（真机采样 + 行高探针 + 三条对比，只调已有脚本、不重新定义量法；Word 真值走缓存，不重开 Word 会话；结果写 `<tag>/six.tsv`、`<tag>/six.txt`，带 head_sha 与 `lines-all.tsv` 的 sha）。第 0 节的六个数每一轮都以这条命令的输出为准，第 17 节记下本轮的复采与指纹。
+一条命令复采这七条（前六条的结构与口径一字不动，第 7 条是本轮加上去的断点一致率，尺子见第 27 节；单跑第 7 条：`py tools/break-agreement.py -Capture artifacts/agent-layout-verify/<tag>`）：`pwsh tools/parity-six.ps1 -Tag <tag>`（真机采样 + 行高探针 + 三条对比，只调已有脚本、不重新定义量法；Word 真值走缓存，不重开 Word 会话；结果写 `<tag>/six.tsv`、`<tag>/six.txt`，带 head_sha 与 `lines-all.tsv` 的 sha）。第 0 节的六个数每一轮都以这条命令的输出为准，第 17 节记下本轮的复采与指纹。
 
 本轮落到的 HEAD 是 tag `autospace1`（第 20 节）：`w:autoSpaceDE` / `w:autoSpaceDN` 的缺省从"没写=关"改成 Word 的"没写=开"，第 5 条 62.4% → 69.1%，其余五条一字不差（`pages.tsv` sha `921A8FAB4D3D09F8` 不变、右边界仍 0/32、`lines-all.tsv` sha `D9822E2C3396D6EC` → `AC44D355853F4616`）。
 
@@ -1216,3 +1217,120 @@ docDefaults 继承之后交给 DocxTextLayout 的 (w:line, w:lineRule, snapToGri
 - 另外记一笔对不上：交接时引用的基线"201/206、73.9%、78.8%、0/33"在 HEAD 上复现不出来，
   同一条命令的读数是 199/206（7 段错页）、69.7%、1/33（`artifacts/agent-layout-verify/head25/six.txt`）。
   写进更新说明的数应当从这份读取出。
+
+## 27. 第七项：断点一致率改用 Word 导出 PDF 那把尺（63.4%）；并核对清 `497f19b / 204/206 / 50.1%` 这组数不存在
+
+**口径先写死，后面每一轮都照这句引用。** 断点一致率只认 `tools/break-agreement.py` 打出来的那个数：
+真值是 Word 自己导出的 PDF（`artifacts/agent-typeset/pdf-truth/input-liu.pdf`，
+sha256 `AB298AC416DCFC72855645E5AD8E472ABDA3DFFC9A6B10925A4FAA1396E761A1`，876,606 字节），
+用 pymupdf 的 `rawdict` 逐行读回原文；每个段落两边各得到一组"这一行停在第几个字"的偏移，
+一致率 = 两边都断的点数 / 两边不重复的点数。旧口径的 115/165 = 69.7% 只出现在第 5 条那一行，
+那句"对我们自己的行序逐行号对"跟着它一起写死，两个数不是同一把尺，不许并列引用。
+
+### 27.1 怎么跑（也写进了 `tools/parity-six.ps1` 的头注）
+
+```
+py tools/break-agreement.py -SelfTest                    # 13 条断言，量法本身不许悄悄漂
+py tools/break-agreement.py -Capture artifacts/agent-layout-verify/<tag> \
+                            -Out artifacts/word-break/break-agreement.tsv
+pwsh tools/parity-six.ps1 -Tag <tag>                     # 第七项现在自己出现在表里
+```
+
+`-SelfTest` 不需要 PDF 也不需要采样，它盯的是量法：一处断行吞掉的空格必须和下一个真字符算同一个断点
+（`canon("中文 word 中文", 2) == 3`），每个类别名各钉一个用例（`cjk|cjk`、字母串内部、`cjk|latin`、
+`latin|cjk`、`cjk|digit`、标点后、标点前、斜杠后、括号引号后），一致率的算术钉成 2 个共同 + 1 个只我们有
++ 1 个只有 Word 有 = 50.0%。写这几条断言的时候它当场逮到我三处下位数错，这正是它的用途。
+
+### 27.2 本轮读数（采样 `main251`，`lines-all.tsv` sha `5F714EE762A78345`，engine head_sha `df89547`）
+
+```
+BREAK AGREEMENT (set ruler): 225 of 355 break points = 63.4%
+  phone_only (we broke, Word did not) = 65  (18.3% of all break points)
+  word_only  (Word broke, we did not) = 65  (18.3%)
+paragraphs compared=102   device blocks=210   Word paragraphs with a full line set=114
+page assignment from this same truth file: 6 of 102 compared paragraphs start on a different page
+```
+
+两件事值得单记：
+
+1. 102 段里只有 34 段第一个断点就和 Word 不一样，另外 68 段整段一模一样。一段之内一旦第一处错开，
+   后面每一行的行尾都跟着挪，所以 65 处"我们多断"里有 96 处属于这种被带偏的后续点。
+   **排队修的时候按"每段第一处错点"排，不按 65 这个总数排**，否则会把同一个病数四遍。
+2. 每处断点都带 Word 那一行的页码，所以页归属直接从同一份 PDF 真值算得（6/102 段起页不同），
+   不用为页码再开一次 Word 会话。这个 6 与 `tools/word-parity.ps1` 的 7 段错页是同一件事在两个
+   分母上的读数（102 段可比 / 206 段对齐），两边方向一致（全是手机早一页）。
+
+每段第一处错点的分类（`py tools/break-agreement.py` 的 `-Top` 表，另有
+`artifacts/word-break/break-agreement.tsv` 逐点一行）：
+
+| 方向 | 断点落在什么上面 | 第一处错点 | 该方向合计 |
+| --- | --- | --- | --- |
+| 我们多断 | 两个汉字之间 | 8 | 38 |
+| 我们多断 | 一个真空格上 | 6 | 12 |
+| 我们多断 | 汉字与数字之间 | 3 | 3 |
+| 我们多断 | 中文标点之后 / 之前 | 2 / 1 | 3 / 1 |
+| 我们多断 | 中西文交界、斜杠后、其它 | 各 1 | 4 |
+| 我们多断 | **连续字母数字串内部** | 0 | **1** |
+| Word 断了而我们没断 | 两个汉字之间 | 3 | 32 |
+| Word 断了而我们没断 | 一个真空格上 | 5 | 11 |
+| Word 断了而我们没断 | 中文标点之后 | 0 | 8 |
+| Word 断了而我们没断 | 中西文交界 / 数字与汉字 / 连字符后 | 0 / 1 / 0 | 4 / 3 / 2 |
+
+真机第 8 页那个把 `Cu/SB/P-Cu/SB/Cu` 拆成 `C|u` 的缺陷，在第七项这把尺上现在是 **355 处断点里 1 处**
+（`inside alnum run`，我们多断方向）。这一族从第 24 节记的 10 行降到 1 处，是确实落在 HEAD 里的。
+
+### 27.3 Word 那侧三条几何事实（顺手量死，其中一条否掉我们自己的错线索）
+
+命令是把 Word 导出的 PDF 用 `pymupdf` 的 `rawdict` 逐字读回坐标（脚本要点：
+`page.get_text("rawdict")` 的 line 结构与 Word 的行一致，正文 803 行；
+按 y 聚 `get_text("words")` 会得 1020 个假行，只能当交叉核对）。
+
+1. 版心：左边界众数 85.1 pt（381 行），右边界众数 510.3 pt（93 行）→ 425.2 pt = 566.9 px，
+   和 `tests/samples/input-liu.docx` 的 sectPr（11906 − 1701 − 1701 twips = 8504 twips = 566.93 px）对上。
+2. 汉字 advance：段落末行（不拉伸）的众数是 **12.000 pt = 16.000 px 整**（5,634 个采样）；
+   两端对齐的行是 **12.108 pt**（2,576 个）。也就是说 Word 是靠**拉开字距**做两端对齐的，
+   它没有把整宽字压缩到 12 pt 以下。
+3. 一条整行最多装 35 个整宽字：36 × 12.000 = 432.0 pt > 425.2 pt。实测所有左边界 ≤ 90 pt 的整行里，
+   汉字数最多的桶只到 34（再算上不落在 `\u4e00-\u9fff` 的全角标点正好 35~36 字），
+   **没有任何一行装下 36 个整宽字**。
+
+第 3 条否掉一条我们自己的线索：第 26 节之前 replay 台给出的"Word 靠悬挂标点多吃一个字，
+打开悬挂可把断点率从 23.3% 抬到 30.9%"不能当引擎改法用。
+`py tools/break-replay.py -Top 8` 的读数是当前规则 23.3%（67/288）、最好组合 31.2%（90/288），
+而真机对同一批段落量到的是 63.4% —— 差出四成说明这个 Python 重排台自己的贪心断行就是错的，
+它排序出来的"哪条规则值得改"不可信。**要定规则就改引擎上真机复采，不要在 replay 台上试。**
+
+### 27.4 查无此提交：`497f19b`、`breakBefore[IDENTIFICATOR]`、`204/206`、`50.1%`
+
+发版前逐条核对，全部可重跑：
+
+```
+git cat-file -t 497f19b                 -> fatal: Not a valid object name 497f19b
+git cat-file --batch-all-objects --batch | Select-String -SimpleMatch 'IDENTIFICATOR','breakBefore'
+                                        -> hits: 0（全库 2,305 个对象，含 loose、pack 与不可达对象）
+git grep -n 'IDENTIFICATOR\|breakBefore' -> 工作树 0 处（app / tools / tests / docs 全查过）
+git log --all --oneline                 -> 没有任何一节的标题或正文写过 204/206 或 50.1%
+```
+
+名为 `breakfix1` / `breakfix2` / `breakfix3` 的三次真机采样也支撑不了那组数。把每份 `six.tsv` 的
+`n=value` 串起来取 sha256 前 12 位，六个 tag（`head25` / `fixedlh1` / `breakfix1` / `breakfix2` /
+`breakfix3` / `main251`）全是同一个 `BBFB62626BC7` —— 六个数一字不差。再看指纹：
+`breakfix2`、`breakfix3` 的 `new/lines-all.tsv` 与 `head25`、`main251` 字节相同（sha 前 12 位
+`5F714EE762A7`），而它们的 engine head_sha 分别是 `e30c376`、`68beb77`、`df89547`。
+换了引擎提交、采样输出一个换行点都没变，这是"那轮改动没有作用面"的直接证据，不是"改动没跑起来"。
+
+结论写在这里给发版用：**`196/206 -> 204/206`、`28.5% -> 50.1%`、"页数与 Word 同为 28" 这三个数在这台
+机器上没有任何一份采样支撑，`breakBefore[IDENTIFICATOR]` 那段代码从来没有作为文件存在过。**
+2.6.2 不该发它。要这条规则，就照 27.5 的顺序从真值重做。
+
+### 27.5 下一步（按页数优先）
+
+1. 先只盯"每段第一处错点"里最大的一类：我们多断、断在两个汉字之间（第一处 8 段 / 合计 38 处）。
+   这一类要拿第 2 条那个 12.000 pt 与第 3 条那个 35 字上限去对：我们到底在哪一行比 Word 少装了一个字，
+   少的那一个字的宽度是从哪一项扣掉的（版心取整 567 对 566.93、中西缝隙 4.000 px 落在断行处是否计入、
+   首行缩进的计量单位）。三处都用真机复采判，不在 Python 台上判。
+2. 每改一类报三样：这类的第一处错点从几降到几、六个老指标、错页段数。页数与页归属优先于断点率。
+3. 引文那一簇（我们没断 Word 断了）单列一张表：`artifacts/word-break/citation-cuts.tsv`。
+   本轮它读到 0 行——判定规则（一段里没有空格、连续拉丁 ≥ 10 字）在真值段落上不成立，
+   参考文献条目里是带空格的。这条得换个判法（按段落落在参考文献区 `word_para >= 300` 判），
+   换完之前那 13 处的说法先不要引。
