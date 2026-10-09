@@ -230,9 +230,13 @@ public final class EngineProbe {
                     failures++;
                     String status = error instanceof ApiClient.Failure
                             ? " http=" + ((ApiClient.Failure) error).status : "";
-                    System.out.printf(Locale.ROOT, "FAIL %-17s %9s tried=%-2d roads=%s via=%-22s %s%s%n",
-                            engine, ms + "ms", tried, roadLabels(roads), "-",
-                            String.valueOf(error.getMessage()), status);
+                    /* route= 就是自检那一屏最后一栏取的那个数（Routes.routeFor），这里印出来
+                       是为了让那一栏能在真机上被读到，而不是只能在屏幕上抄。 */
+                    System.out.printf(Locale.ROOT,
+                            "FAIL %-17s %9s tried=%-2d route=%-34s roads=%s %s%s%n",
+                            engine, ms + "ms", tried,
+                            Routes.routeFor(Routes.host(PaperSources.endpoint(engine))),
+                            roadLabels(roads), String.valueOf(error.getMessage()), status);
                 }
             }
             System.out.println("ROUND " + round + " " + ((System.nanoTime() - roundStarted) / 1000000L)
