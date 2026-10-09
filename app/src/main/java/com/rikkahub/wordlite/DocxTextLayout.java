@@ -124,6 +124,7 @@ public final class DocxTextLayout {
                 : f.alignment == 2 ? Layout.Alignment.ALIGN_OPPOSITE
                 : Layout.Alignment.ALIGN_NORMAL;
         boolean allowWordWrap = f.wordWrap && hasLongLatinRun(text);
+        if (text.length() > 0) glueSlashRuns(text, paint, width);
         StaticLayout layout = build(text, paint, width, alignment, f.alignment == 3, allowWordWrap);
         // The platform keeps owning the word spaces of a Latin run only while it keeps them inside
         // the column. Below API 34 it does not: measured on the target phone, a Latin line that had
@@ -485,8 +486,15 @@ public final class DocxTextLayout {
 
     /** True when a replaced range that is not the CJK/Latin auto-space owns this character. */
     private static boolean ownsReplacedRange(Spannable text, int offset) {
-        for (ReplacementSpan owner : text.getSpans(offset, offset + 1, ReplacementSpan.class))
-            if (!(owner instanceof AutoGap)) return true;
+        for (ReplacementSpan owner : text.getSpans(offset, offset + 1, ReplacementSpan.class)) {
+            // AutoGap only carries an advance; AtomicRunSpan only carries break behaviour and draws
+            // its range as ordinary text. Neither stops the line from restating this character's
+            // advance, so neither may retire a seam that the spread still owns: gapOffsets() moves a
+            // seam from a Latin token onto the CJK character right of it, and dropping the seam here
+            // would leave that line short of the right edge (acceptance item 6).
+            if (owner instanceof AutoGap || owner instanceof AtomicRunSpan) continue;
+            return true;
+        }
         return false;
     }
 
@@ -1544,6 +1552,169 @@ public final class DocxTextLayout {
             }
             i = next;
         }
+    }
+
+    /** The width of a stretch of text, asked of the caller so the rule reads as text, not as a device. */
+    interface RunWidth { float of(int start, int end); }
+
+    /** What ties two Western words into one token inside a slash run: "/" always, "-" only there. */
+    private static boolean isJoiner(char c) {
+        return c == '/' || c == '-';
+    }
+
+    /** A letter or a digit: the classes w:autoSpaceDE/DN treat as one Western run. */
+    private static boolean isLatinOrDigit(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+    }
+
+    /**
+     * The stretches of this text that Word refuses to cut at a "/".
+     *
+     * Word put 0 line ends after a "/" in the 59 occurrences inside its own exported PDF's compared
+     * lines (py tools/break-seam-census.py), and that number alone decides nothing -- a character that
+     * never sat where a break was due was never tested. tools/slash-break-truth.py prices each line
+     * instead: the room the line still had against the cost of what the next line starts with. On 6 of
+     * the 21 lines whose next line holds a "/" Word had room for the text up to the slash and refused
+     * it, taking none of it:
+     *
+     *   para  94 p10 line 1   free 77.87 px, text to the slash 36.00 px, whole run 300.00 px  (NPC/SAC305)
+     *   para 113 p13 line 1   free 78.87 px, text to the slash 35.00 px, whole run 173.00 px  (CuO/NaCl/Ag)
+     *   para 357 p27 line 1   free 63.86 px, text to the slash 23.00 px, whole run 413.00 px  (Cu/Sn/Ag)
+     *
+     * and on none of the other 15 was there room even to the slash, so it never had to decide. Zero
+     * counter-examples.
+     *
+     * A "-" joins the run only when the run already holds a qualifying slash. All 9 occurrences of the
+     * document's 5 slash-plus-hyphen tokens ("Cu/SB/P-Cu/SB/Cu" x3, "Cu-Sn/Ag-Sn" x2, "Cu/Sn-58Bi" x2,
+     * "Cu/Cu-Sn", "Sn-58Bi/Porous") sit whole inside ONE line of Word's own PDF, 5 of them at the head of
+     * a line -- carried down whole -- and none of the 9 is split (tmp check over the same truth file the
+     * break agreement reads). A hyphen with no slash in its token is left breakable, because Word ends a
+     * line after one twice ("SiCHigh-|Temperat", "(5):727-|741.") and neither token holds a slash. The
+     * reason the joiner has to travel with the slash is on page 8 of the capture: gluing only up to the
+     * hyphen left "Cu/SB/P" ending a line and the next line starting "-Cu/SB/Cu", and no Chinese
+     * composition starts a line with a hyphen.
+     *
+     * Three bounds, because a rule read off 6 lines must not reach further than those 6 lines:
+     *   - only a "/" with a letter or digit on BOTH sides. Three of the document's 77 slashes fail that
+     *     ("（IMCs）/Cu", "助焊膏//深圳") and none of the three breaks we produce sits there; "化学镀Ni/浸Au"
+     *     has a Chinese character on the right, so it keeps its break opportunity -- an open known case,
+     *     not an oversight, because Word was never seen deciding it either.
+     *   - never a run wider than the line. Measured on the phone (case slash-long of
+     *     tools/device-probe/TokenBreakProbe.java): a 126-character glued run went onto ONE line
+     *     1119 px wide in a 567 px column. Gluing must never be worse than the break it removes.
+     *     The document's longest glued run is 12 characters, "Cu6Sn5/Cu3Sn", about 101 px.
+     *   - the document holds no URL ("http" occurs 0 times in its text), so this rule says nothing
+     *     about one; it is not evidence either way.
+     */
+    static ArrayList<int[]> slashAtomicRuns(CharSequence text, int columnPx, RunWidth width) {
+        ArrayList<int[]> runs = new ArrayList<>();
+        int i = 0;
+        while (i < text.length()) {
+            if (text.charAt(i) != '/' || !isLatinOrDigit(at(text, i - 1)) || !isLatinOrDigit(at(text, i + 1))) {
+                i++;
+                continue;
+            }
+            int a = i, b = i + 1;
+            while (a > 0 && (isLatinOrDigit(text.charAt(a - 1)) || isJoiner(text.charAt(a - 1)))) a--;
+            while (b < text.length() && (isLatinOrDigit(text.charAt(b)) || isJoiner(text.charAt(b)))) b++;
+            // A run may open and close on a letter or digit only: a leading or trailing joiner would put
+            // a span edge exactly where the break we are removing lives.
+            while (b > a + 1 && isJoiner(text.charAt(b - 1))) b--;
+            while (a + 1 < b && isJoiner(text.charAt(a))) a++;
+            if (b - a < 3) { i = b; continue; }
+            int[] last = runs.isEmpty() ? null : runs.get(runs.size() - 1);
+            if (last != null && last[1] >= a) last[1] = Math.max(last[1], b);
+            else runs.add(new int[]{a, b});
+            i = b;
+        }
+        for (int k = runs.size() - 1; k >= 0; k--)
+            if (width.of(runs.get(k)[0], runs.get(k)[1]) > columnPx) runs.remove(k);
+        return runs;
+    }
+
+    private static char at(CharSequence text, int i) {
+        return i < 0 || i >= text.length() ? ' ' : text.charAt(i);
+    }
+
+    /**
+     * A lever to move StaticLayout's break set on Android 10, chosen by measurement rather than by API
+     * notes. The engine cannot hand the platform its own rules (StaticLayout.Builder.setBreakIterator
+     * is gone by reflection, docs section 24.3); no setCustomSpans exists at sdk 29 and
+     * android.text.style.CustomSpan does not even resolve on this phone, so "canBreakLine" is out
+     * (all three read off the target device by pwsh tools/breakiterator-probe.ps1 -Probe TokenBreakProbe).
+     * What is left is the measurement-run edge: a ReplacementSpan is one indivisible measurement unit.
+     * Over the run it removed every after-slash line end at all 56 column widths tried (520..575 px,
+     * 16 / 11 / 34 of them without the span, on thesis paragraphs 86 / 94 / 113) and left the
+     * paragraph's ink the same to the pixel: 3336.0 / 3336.0, 3912.0 / 3912.0, 1114.0 / 1114.0.
+     */
+    static final class AtomicRunSpan extends ReplacementSpan {
+        @Override public int getSize(Paint paint, CharSequence text, int start, int end,
+                                     Paint.FontMetricsInt fm) {
+            if (fm != null) paint.getFontMetricsInt(fm);   // the line height is not this span's business
+            int total = 0;
+            // The device bills every character's advance in whole pixels (docs section 21.4: 40 m
+            // measure 480.00 px, not 497.813). Restating that sum, rather than measuring the range at
+            // once, is what keeps every line the width it already was: only the break set changes.
+            for (int i = start; i < end; i++) total += Math.round(paint.measureText(text, i, i + 1));
+            return total;
+        }
+        @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
+                                   float x, int top, int y, int bottom, Paint paint) {
+            canvas.drawText(text, start, end, x, y, paint);
+        }
+    }
+
+    /**
+     * Attach the atomic-run span. Skipped when the run is not one uniform measurement state -- a size,
+     * font, script or replacement span inside it would have the glue answering for metrics that are
+     * not its own -- or when another replacement span already owns part of it.
+     */
+    private static void glueSlashRuns(SpannableStringBuilder text, TextPaint base, int columnPx) {
+        ArrayList<int[]> runs = slashAtomicRuns(text, columnPx, new RunWidth() {
+            @Override public float of(int start, int end) {
+                float total = 0f;
+                for (int i = start; i < end; i++) total += charAdvance(text, base, i);
+                return total;
+            }
+        });
+        for (int[] r : runs)
+            if (uniformRun(text, base, r[0], r[1]))
+                text.setSpan(new AtomicRunSpan(), r[0], r[1], Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    }
+
+    /**
+     * True when one paint and one draw can stand for every character in the range. The measurement half
+     * is read off the state the run's own metric spans leave on the paint -- PointSizeSpan, FontSpan and
+     * MeasuredFontSpan all land there -- so a face or size change mid-token stops the glue even when the
+     * document put a run boundary in the middle of the token, which is exactly the boundary the platform
+     * was using as the break opportunity this rule removes.
+     */
+    private static boolean uniformRun(Spannable text, TextPaint base, int start, int end) {
+        float size = 0f, scaleX = 1f, skew = 0f;
+        Typeface face = null;
+        for (int i = start; i < end; i++) {
+            for (Object span : text.getSpans(i, i + 1, Object.class)) {
+                if (span instanceof AutoGap || span instanceof AtomicRunSpan) continue;
+                if (span instanceof ReplacementSpan) return false;   // script, tab leader, hanging mark
+                // Colour and decoration are painted character by character: one drawText over the range
+                // would paint the whole token in the first character's colour and drop the rest.
+                if (span instanceof ForegroundColorSpan || span instanceof BackgroundColorSpan
+                        || span instanceof UnderlineSpan || span instanceof StrikethroughSpan) return false;
+            }
+            TextPaint here = new TextPaint(base);
+            for (MetricAffectingSpan metric : text.getSpans(i, i + 1, MetricAffectingSpan.class))
+                metric.updateMeasureState(here);
+            if (i == start) {
+                size = here.getTextSize();
+                face = here.getTypeface();
+                scaleX = here.getTextScaleX();
+                skew = here.getTextSkewX();
+            } else if (here.getTextSize() != size || here.getTypeface() != face
+                    || here.getTextScaleX() != scaleX || here.getTextSkewX() != skew) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** 0 other, 1 CJK, 2 Latin, 3 digit. */
