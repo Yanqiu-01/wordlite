@@ -139,6 +139,17 @@ public final class ZeroRateAudit {
         return source;
     }
 
+    /** 两组已排序三元组的交集枚数：G 档用它量"植入句与检索式到底对不对得上"。 */
+    private static int shared(long[] left, long[] right) {
+        int i = 0, j = 0, hits = 0;
+        while (i < left.length && j < right.length) {
+            if (left[i] == right[j]) { hits++; i++; j++; }
+            else if (left[i] < right[j]) i++;
+            else j++;
+        }
+        return hits;
+    }
+
     /** 逐字符码点平移一位：每个字都变，字面三元组一枚不剩，用来量"改写到判据下线"那一档。 */
     private static String shifted(String value) {
         StringBuilder out = new StringBuilder(value.length());
@@ -185,17 +196,26 @@ public final class ZeroRateAudit {
         }
         line("取样核对：语料前 " + probed + " 行里逐字出现在本文中的行数", Integer.valueOf(inside));
 
-        String windowZero = plan.groups.isEmpty() ? "" : plan.groups.get(0);
+        /* 植入句要落在"这一轮真会问出去的那一扇"里。窗口按中文字数排队之后，第 1 扇不一定是正文
+           最前面那一扇；只勾一家、每家只问两扇时，问出去的是中文字数最多的前两扇。检索回来的那篇
+           必须与问出去的那条检索式对得上——这是 G 档的前提，前提当场量一遍，不许默默失效。 */
+        ArrayList<Integer> priority = DuplicateEngine.windowOrder(plan.chinese, plan.chars);
+        String windowZero = plan.groups.isEmpty() ? "" : plan.groups.get(priority.get(0).intValue());
+        long[] phrase = TextCorpus.gramsOf(TextCorpus.compactOf(
+                PaperSources.queryPhrase(windowZero, DuplicateEngine.MAX_PHRASE_CHARS)));
         int[] pick = null;
-        int best = 0;
+        int best = 0, shared = 0;
         for (int[] s : TextCorpus.sentences(windowZero)) {
             String sentence = windowZero.substring(s[0], s[1]);
             int n = TextCorpus.validCount(TextCorpus.normalize(sentence), 0, sentence.length());
-            if (n >= 26 && n <= 90 && n > best) { best = n; pick = s; }
+            if (n < 26 || n > 90) continue;
+            int hits = shared(phrase, TextCorpus.gramsOf(TextCorpus.compactOf(sentence)));
+            if (hits > shared || (hits == shared && n > best)) { shared = hits; best = n; pick = s; }
         }
-        if (pick == null) throw new IllegalStateException("第一个检索窗口里没有 26-90 字的句子，换样例文档");
+        if (pick == null) throw new IllegalStateException("这一轮头一扇要问的窗口里没有 26-90 字的句子，换样例文档");
+        check(shared > 0, "G 档的前提：植入句与这一扇真会问出去的检索式要有共同三元组，实测 " + shared + " 枚");
         plant = windowZero.substring(pick[0], pick[1]).trim();
-        line("植入句（逐字取自本文第 1 扇检索窗口）", plant);
+        line("植入句（逐字取自这一轮头一扇会问到的检索窗口，与那条检索式共有 " + shared + " 枚三元组）", plant);
         line("植入句有效字符", Integer.valueOf(TextCorpus.validCount(TextCorpus.normalize(plant), 0, plant.length())));
         check(!plan.groups.isEmpty(), "样例文档切得出检索窗口");
 

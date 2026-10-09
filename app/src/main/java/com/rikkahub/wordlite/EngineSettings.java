@@ -11,9 +11,11 @@ public final class EngineSettings {
     public static final String[] DEFAULT_ENGINES = {"cnki", "cqvip", "wanfang", "ncpssd", "openalex", "crossref", "semantic-scholar", "europepmc", "arxiv"};
     public boolean web = true;
     public final ArrayList<String> engines = new ArrayList<String>();
-    /* windows 的新装机默认从 12 降到 6：实测一轮 9 个源约 10 秒（维普最慢 4062ms），12 轮加限速
-       必然撞 180 秒的挂钟闸门，等于把闸门当默认路径用。用户自己设过的值在 deserialize() 里原样
-       读回，这条只改新装机。perEngine 只管每次请求要几条，不再是整轮配额。 */
+    /* windows 管的是"每家检索源最多被问几扇窗口"，不是"整轮只查前几扇"：一轮问哪些扇、
+       每扇问几家，由 DuplicateEngine.allocate() 在请求额度里排（先铺宽再铺深）。新装机默认从 12
+       降到 6 的理由不变：实测一轮 9 个源约 10 秒（维普最慢 4062ms），12 轮加限速容易撞 180 秒
+       挂钟闸。用户自己设过的值在 deserialize() 里原样读回，这条只改新装机。
+       perEngine 只管每次请求要几条，不再是整轮配额。 */
     public int perEngine = 12, timeoutSeconds = 20, windows = 6;
     public String coreKey = "";
     /** Optional HTTP proxy for the built-in sources, written as host:port and empty by default:

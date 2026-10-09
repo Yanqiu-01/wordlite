@@ -844,7 +844,10 @@ public final class ApiWorkflow {
         }
         final EditText perEngine = field(String.valueOf(engine.perEngine), "每个引擎候选数（1-50）");
         final EditText timeout = field(String.valueOf(engine.timeoutSeconds), "超时秒数（5-120）");
-        final EditText windows = field(String.valueOf(engine.windows), "检索窗口数（1-24）");
+        /* 这个数的口径写在自己脸上：它管的是"每家最多问几扇"，不是"整轮只看前几扇"——
+           后者是 2.6.2 之前的实际行为，那会儿 12 意味着第 9 扇之后一个字都没查。 */
+        final EditText windows = field(String.valueOf(engine.windows),
+                "每源检索窗口数（1-24，每家最多问几扇）");
         final EditText core = field(engine.coreKey, "CORE API Key（可留空）");
         final EditText proxy = field(engine.proxy, "HTTP 代理 host:port（海外检索源需经电脑代理时填写，可留空）");
         box.addView(perEngine); box.addView(timeout); box.addView(windows); box.addView(core); box.addView(proxy);

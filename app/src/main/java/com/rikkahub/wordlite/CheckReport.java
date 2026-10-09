@@ -93,8 +93,13 @@ public final class CheckReport {
         if (report.windowsPlanned <= 0 && report.comparableCandidates <= 0) return;
         double rate = report.comparableChars <= 0 ? 0 : report.coveredChars * 100d / report.comparableChars;
         out.append("<h2>检索覆盖率</h2><table><thead><tr><th>项目</th><th>数值</th></tr></thead><tbody>");
-        metricText(out, "已检索窗口数", report.windowsRetrieved + "/" + report.windowsAvailable + " 个窗口组"
-                + "（本次设置允许 " + report.windowsPlanned + " 个）");
+        String shape = report.asksSent <= 0 ? "（本次设置允许 " + report.windowsPlanned + " 个）"
+                : "（真问出去 " + report.asksSent + " 次，每窗 "
+                        + (report.windowDepthLow == report.windowDepthHigh
+                                ? String.valueOf(report.windowDepthLow)
+                                : report.windowDepthLow + "-" + report.windowDepthHigh) + " 家）";
+        metricText(out, "已检索窗口数", report.windowsRetrieved + "/" + report.windowsAvailable
+                + " 个窗口组" + shape);
         metricText(out, "已覆盖字数", report.coveredChars + " 字（可检索正文 " + report.comparableChars + " 字）");
         metricText(out, "覆盖率", percent(rate));
         metricText(out, "可比候选文献", report.comparableCandidates + " 篇（仅摘要可比 "
