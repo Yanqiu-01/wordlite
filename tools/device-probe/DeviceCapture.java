@@ -857,7 +857,7 @@ public final class DeviceCapture {
         StringBuilder sb = new StringBuilder();
         sb.append("para\toffset\tinside_token\tkinds\tchars\n");
         java.util.Map<Object, Boolean> seen = new java.util.IdentityHashMap<Object, Boolean>();
-        int interiors = 0, offenders = 0, scriptSpans = 0;
+        int interiors = 0, offenders = 0, scriptSpans = 0, containers = 0;
         for (int p = 0; p < result.totalPages(); p++) {
             for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
                 if (pl.text == null) continue;
@@ -872,6 +872,8 @@ public final class DeviceCapture {
                     edge[sp.getSpanStart(s)] = true;
                     edge[sp.getSpanEnd(s)] = true;
                     if (s instanceof DocxTextLayout.WordScriptSpan) scriptSpans++;
+                    // 名字判断，不引类型：这份采样还要能在没有容器的树上编过。
+                    if ("ScriptTokenSpan".equals(s.getClass().getSimpleName())) containers++;
                 }
                 for (int i = 1; i < sp.length(); i++) {
                     if (!glued(t.charAt(i - 1)) || !glued(t.charAt(i)))
@@ -893,7 +895,8 @@ public final class DeviceCapture {
         }
         sb.append("SUMMARY\ttoken_interiors=").append(interiors)
           .append("\tspan_edges_inside_a_token=").append(offenders)
-          .append("\tscript_spans_attached=").append(scriptSpans).append('\n');
+          .append("\tscript_spans_attached=").append(scriptSpans)
+          .append("\tscript_token_containers=").append(containers).append('\n');
         return sb.toString();
     }
 

@@ -54,7 +54,10 @@ public class WordBreakLayoutTest {
     @Test public void kimPunctuationEdgesCarryNoAutoGap() throws Exception {
         Spanned text = (Spanned) layout(kim()).getText();
         int comma = kim().text.indexOf("Sn\uff0c\u4f5c\u8005") + 1; // the ， after Cu₃Sn
-        assertEquals(0, text.getSpans(comma - 1, comma, ReplacementSpan.class).length);
+        // The Cu₃Sn word now sits under ONE ScriptTokenSpan on purpose -- a span per script run
+        // is what let the breaker cut the word in half -- so "no ReplacementSpan here" is no longer
+        // the thing under test. What this line is about is the auto-space gap, so ask for that.
+        assertEquals(0, text.getSpans(comma - 1, comma, DocxTextLayout.AutoGap.class).length);
         int dunhao = kim().text.indexOf("\u30010.1"); // 、 before 0.1
         assertTrue(dunhao > 0);
         assertEquals(0, text.getSpans(dunhao, dunhao + 1, ReplacementSpan.class).length);
