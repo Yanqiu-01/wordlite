@@ -112,6 +112,16 @@ def seam(left, right):
 
 
 def face_of(c, pdf_face):
+    """The face whose advance to bill.
+
+    A blank is a special case: the PDF reports whatever font was active when the space was emitted,
+    which is usually the Chinese face of the text before it, but DocxTextLayout picks the face by the
+    character -- a space is `char < 128`, so it takes the run's w:ascii slot, i.e. a Western face.
+    Billing the space at Song's 0.5 em (8.00 px at 12 pt) instead of Times' 0.202 em (3.23 px) charges
+    4.77 px per blank that Word never charged.
+    """
+    if c == " ":
+        return "times"
     return FACE_OF.get(pdf_face) or ("song" if is_cjk(c) else "times")
 
 
@@ -185,6 +195,25 @@ def attach_paragraphs(ragged, paras):
             matched += 1
     return matched
 
+def seams_on(chars, i):
+    """How many quarter-em gaps DocxTextLayout.applyAutoSpace hangs on chars[i].
+
+    applyAutoSpace anchors every CJK|Latin and CJK|digit gap on the CJK side and merges the two gaps of
+    a CJK character that has Western text on both sides into ONE span, so a boundary is priced once and
+    only on that character. Charging it on both neighbours -- which this tool did until 2026-10-09 --
+    bills 8 px for a 4 px gap and invents a width deficit on every Latin-bearing line.
+    """
+    c = chars[i][0]
+    if kind(c) != 1 or is_cjk_punct(c) or c == " ":
+        return 0
+    n = 0
+    if i > 0 and seam(chars[i - 1][0], c):
+        n += 1
+    if i + 1 < len(chars) and seam(c, chars[i + 1][0]):
+        n += 1
+    return n
+
+
 def bill(chars, round_adv, charge_tail, tail_seams):
     """Total width of one line under one billing model, in our document px."""
     total = 0.0
@@ -196,16 +225,15 @@ def bill(chars, round_adv, charge_tail, tail_seams):
         if i > last_ink:
             continue
         adv = advance_px(c, pf, sz)
-        seams = 0
         em_px = sz * PT_TO_PX
-        if i > 0 and seam(chars[i - 1][0], c):
-            seams += 1
-        if i + 1 < n and seam(c, chars[i + 1][0]):
-            seams += 1
+        seams = seams_on(chars, i)
         if c == " ":                       # a blank is never the character an AutoGap rides on
             total += math.floor(adv + 0.5) if round_adv else adv
             continue
-        if i + 1 == n and charge_tail:
+        # The boundary this line ends on: the gap rides the CJK side, so it belongs to THIS line only
+        # when this line's last ink character is that CJK side. When the next line opens with the CJK
+        # character instead, the engine hangs the gap there and this line never sees it.
+        if i == last_ink and charge_tail and tail_seams and kind(c) == 1 and not is_cjk_punct(c):
             seams += tail_seams
         unit = math.floor(adv + 0.5) if round_adv else adv
         total += math.ceil(unit + seams * em_px * GAP_EM) if seams else unit
@@ -272,6 +300,8 @@ def main():
     ap.add_argument("-SizePt", type=float, default=12.0)
     ap.add_argument("-MinChars", type=int, default=8)
     ap.add_argument("-Top", type=int, default=8)
+    ap.add_argument("-Justified", type=int, default=1,
+                    help="1 = also bill the justified lines (see the block it prints)")
     a = ap.parse_args()
     if not (os.path.exists(a.Pdf) and os.path.exists(a.Docx)):
         print("missing input: " + a.Pdf + " / " + a.Docx)
@@ -353,6 +383,39 @@ def main():
               (nm or "word", med(v), statistics.fmean(v) if v else float("nan"),
                quantile(absd, 0.9), loses[nm], lr))
     print("")
+    if a.Justified:
+        # A justified line is stretched to the margin, so its x coordinates cannot be read as a width:
+        # Word's own stretch sits inside them. What IS still readable is which characters Word put on the
+        # line, and that is the question worth asking -- bill the SAME characters twice, once with exact
+        # (float) hmtx advances and once the way this engine charges them (every advance rounded to a
+        # whole pixel, quarter-em seams ceil'd), and ask whether each bill fits the room the line had.
+        # The room is measured from the line's own first character, so an indented first line is priced
+        # against the width it really had. If the exact bill fits and ours does not, this engine could
+        # not have carried what Word carried, and the line loses a character.
+        just = [dict(ln) for ln in body if ln["right_pt"] >= column_pt - 2.0]
+        matched_just = attach_paragraphs(just, docx_paragraphs(a.Docx))
+        just = [ln for ln in just if ln["para"] >= 0]
+        short, deltas, detail = 0, [], []
+        for ln in just:
+            avail = (column_pt - ln["ink"][0][1]) * PT_TO_PX
+            exact = bill(ln["chars"], False, True, ln["tail"])
+            ours = bill(ln["chars"], True, True, ln["tail"])
+            deltas.append(ours - exact)
+            if exact <= avail < ours:
+                short += 1
+                detail.append((ours - avail, exact - avail, ln["para"], ln["page"], ln["raw"]))
+        print("justified lines (stretched to the margin, so x is not a width): billed from hmtx instead")
+        print("  body lines billed=%d (matched to a docx paragraph); our per-line overbill against exact"
+              " advances: med %.3f px  p90 %.3f px  max %.3f px"
+              % (len(just), med(deltas), quantile([abs(d) for d in deltas], 0.9),
+                 max(deltas) if deltas else float("nan")))
+        print("  lines where the exact bill fits the room that line had but ours does not: %d of %d"
+              % (short, len(just)))
+        for over, exact_gap, para, pg, raw in sorted(detail, reverse=True)[:a.Top]:
+            print("     para %-4d p%-3s we are %6.2f px over the room (exact bill leaves %6.2f px)  %s"
+                  % (para, pg, over, -exact_gap, raw[:34]))
+        print("")
+
     print("same bill over the ragged lines that hold Latin letters or digits:")
     for nm in names:
         v = latin[nm]
