@@ -194,7 +194,7 @@ public final class DocxTextLayout {
         StaticLayout.Builder builder = StaticLayout.Builder.obtain(text, 0, text.length(), paint, width)
                 .setIncludePad(false).setAlignment(alignment)
                 .setTextDirection(TextDirectionHeuristics.FIRSTSTRONG_LTR)
-                .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
+                .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
                 .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE);
         if (Build.VERSION.SDK_INT >= 26) {
             // The mode only decides how the platform spreads Latin word spaces: INTER_WORD below
@@ -229,6 +229,7 @@ public final class DocxTextLayout {
         }
         return false;
     }
+
 
     /**
      * Word's w:overflowPunct, measured on the PDF Word exported rather than assumed.
