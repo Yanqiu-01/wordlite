@@ -122,7 +122,7 @@ public final class DeviceCapture {
         sb.append("parseMs=").append(parseMs).append(" paginateMs=").append(totalMs - parseMs).append('\n');
         sb.append("font_loadedFaces=").append(FontManager.loadedCount()).append('\n');
         sb.append("font_resolution_probe:");
-        String[] probeFamilies = { "Times New Roman", "宋体", "黑体", "Calibri", "仿宋", "楷体" };
+        String[] probeFamilies = { "Times New Roman", "宋体", "黑体", "Calibri", "仿宋", "楷体", "华文新魏" };
         for (String family : probeFamilies) {
             Typeface face = DocxTextLayout.resolve(family);
             String path = FontManager.pathFor(face);
