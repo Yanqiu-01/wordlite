@@ -5,6 +5,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -545,6 +546,8 @@ public final class TextCorpus {
     private final ArrayList<int[]> docTokens = new ArrayList<int[]>();
     private final ArrayList<Integer> docSource = new ArrayList<Integer>();
     private final HashMap<Long, ArrayList<int[]>> fingerprints = new HashMap<Long, ArrayList<int[]>>();
+    /** 每枚指纹出现于多少篇文献，供 Noplag 式稀有指纹优先探测。 */
+    private final HashMap<Long, Integer> fingerprintDocumentFrequency = new HashMap<Long, Integer>();
     private int fingerprintTokens;
 
     /** winnowing 取样结果进倒排，一篇文献一份全文，跨句复制才追得到。 */
@@ -559,6 +562,7 @@ public final class TextCorpus {
         docNorms.add(flat);
         docTokens.add(at);
         docSource.add(Integer.valueOf(sourceIndex));
+        HashSet<Long> seenInDocument = new HashSet<Long>();
         for (int i = 0; i < picked.length; i++) {
             Long key = Long.valueOf(hashes[picked[i]]);
             ArrayList<int[]> postings = fingerprints.get(key);
@@ -567,6 +571,11 @@ public final class TextCorpus {
                 fingerprints.put(key, postings);
             }
             postings.add(new int[]{docId, picked[i]});
+            if (seenInDocument.add(key)) {
+                Integer frequency = fingerprintDocumentFrequency.get(key);
+                fingerprintDocumentFrequency.put(key,
+                        Integer.valueOf(frequency == null ? 1 : frequency.intValue() + 1));
+            }
         }
         fingerprintTokens += at.length;
     }
@@ -583,9 +592,35 @@ public final class TextCorpus {
         if (at.length < Fingerprints.MIN_MATCH) return out;
         long[] hashes = Fingerprints.rolling(norm, at);
         int[] picked = Fingerprints.sample(hashes);
-        HashMap<Integer, ArrayList<int[]>> anchors = new HashMap<Integer, ArrayList<int[]>>();
+        long[] queryFingerprints = new long[picked.length];
+        int[] queryDocumentFrequency = new int[picked.length];
+        int queryFingerprintCount = 0;
+        HashSet<Long> querySeen = new HashSet<Long>();
         for (int i = 0; i < picked.length; i++) {
-            ArrayList<int[]> postings = fingerprints.get(Long.valueOf(hashes[picked[i]]));
+            long hash = hashes[picked[i]];
+            Long key = Long.valueOf(hash);
+            if (!querySeen.add(key)) continue;
+            Integer frequency = fingerprintDocumentFrequency.get(key);
+            queryFingerprints[queryFingerprintCount] = hash;
+            queryDocumentFrequency[queryFingerprintCount] = frequency == null ? 0 : frequency.intValue();
+            queryFingerprintCount++;
+        }
+        queryFingerprints = Arrays.copyOf(queryFingerprints, queryFingerprintCount);
+        queryDocumentFrequency = Arrays.copyOf(queryDocumentFrequency, queryFingerprintCount);
+        /* Noplag 的 L1 思路只把稀有指纹优先拿来探测候选；后面的连续字符判定仍由本类完成。
+           小于一个探测批次的自建库直接沿用原始全量路径，避免为了省一次小扫描而改变边界样本。
+           语料超过这一规模后才按 DF 取最稀的指纹，减少高频术语带来的无效 posting 扫描。 */
+        long[] probeFingerprints;
+        if (docNorms.size() <= NoplagRarestProbe.DEFAULT_MAX_PROBES) {
+            probeFingerprints = new long[picked.length];
+            for (int i = 0; i < picked.length; i++) probeFingerprints[i] = hashes[picked[i]];
+        } else {
+            probeFingerprints = NoplagRarestProbe.select(queryFingerprints, queryDocumentFrequency,
+                    NoplagRarestProbe.DEFAULT_DF_SUM_LIMIT, NoplagRarestProbe.DEFAULT_MAX_PROBES);
+        }
+        HashMap<Integer, ArrayList<int[]>> anchors = new HashMap<Integer, ArrayList<int[]>>();
+        for (int i = 0; i < probeFingerprints.length; i++) {
+            ArrayList<int[]> postings = fingerprints.get(Long.valueOf(probeFingerprints[i]));
             if (postings == null) continue;
             for (int p = 0; p < postings.size(); p++) {
                 Integer key = Integer.valueOf(postings.get(p)[0]);
@@ -722,6 +757,7 @@ public final class TextCorpus {
         docTokens.clear();
         docSource.clear();
         fingerprints.clear();
+        fingerprintDocumentFrequency.clear();
         fingerprintTokens = 0;
         skippedSentences = 0;
     }

@@ -352,7 +352,7 @@ public final class DocxTextLayout {
             // taken back is the line's own measured excess: shaving one pixel per attempt left a
             // reference line that only had to give a space back chewing through the whole retry
             // budget and losing every line's justification in the paragraph.
-            int excess = Math.max(1, (int) Math.ceil(spread.getLineWidth(blocked)
+            int excess = Math.max(1, (int) Math.ceil(inkWidth(spread.getText(), spread, blocked)
                     - width + spread.getLineLeft(blocked)) + 1);
             if (!shrinkLine(copy, laidOut, blocked, excess)
                     && !shrinkLine(copy, laidOut, lastLooseLine(copy, laidOut), excess))
@@ -375,13 +375,11 @@ public final class DocxTextLayout {
         // 563.00 px against a column of 566.93 (captures/final1/new, blocks 341-370).
         float slack = width - laidOut.getLineLeft(line) - inkWidth(copy, laidOut, line);
         if (slack < 1f) return 0;
-        // The blanks a wrap left at the tail get Word's accounting: they sit outside the text
-        // boundary and take no width. Without this the platform bills them inside the line, so the
-        // stretch stops a space short of the boundary, and the moment the ink reaches the boundary
-        // the last blank no longer fits and jumps to the next line as leading whitespace.
-        int hardEnd = laidOut.getLineEnd(line);
-        if (end < hardEnd)
-            copy.setSpan(new BlankTail(), end, hardEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        // The blanks a wrap left at the tail still take part in the ORIGINAL break decision. They
+        // must not be re-priced to zero before the paragraph is laid out again: doing that lets the
+        // next line's first character move up, and the retry loop then trades that character back
+        // and forth forever. Word's visible right edge is ink, so the slack and lineToClear() both
+        // bill the blanks as nothing without changing their measured advance.
         int[][] gaps = gapOffsets(copy, laidOut, line, start, end);
         if (wordSpaces) {
             // Only reachable once the platform has lost the column (see measure()): the word spaces
@@ -408,11 +406,17 @@ public final class DocxTextLayout {
             }
         }
         if (gaps.length == 0) return 0;
-        // Floor, never round: overshooting the column by a fraction of a pixel would push the last
-        // character onto the next line, and a moved break is far worse than an edge that is short by
-        // a pixel. MAX_GAP_STRETCH_PX is only a sanity bound -- Word's widest measured single-gap
-        // stretch on the reference document is 2.3 pt (~3 px).
-        int total = Math.min((int) Math.floor(slack + 0.001f), gaps.length * MAX_GAP_STRETCH_PX);
+        // Always leave a break-safety margin: Android can prefer the next break even when a widened
+        // line exactly equals the rounded column, and a moved break is far worse than an edge that
+        // is short by one pixel. MAX_GAP_STRETCH_PX is only a sanity bound -- Word's widest measured
+        // single-gap stretch on the reference document is 2.3 pt (~3 px).
+        int total = (int) Math.floor(slack + 0.001f);
+        // A line whose slack is a whole device pixel is the one Android can push over: filling the
+        // rounded column exactly makes its breaker prefer the next break and starts the 0/1 retry
+        // oscillation. Keep that last pixel unused; one pixel is below the parity threshold and the
+        // original line break survives.
+        if (total > 0 && Math.ceil(slack - 0.001f) == total) total--;
+        total = Math.min(total, gaps.length * MAX_GAP_STRETCH_PX);
         // Word opens only a handful of seams per line, by up to 2.3 pt (~3 px) each. That shape was
         // tried and reads wrong on the phone: three pixels at one seam is three device pixels of hole
         // in the middle of a Chinese sentence. One pixel per seam is invisible and is the nearest the

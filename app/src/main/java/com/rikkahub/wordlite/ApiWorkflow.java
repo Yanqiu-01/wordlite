@@ -391,6 +391,7 @@ public final class ApiWorkflow {
         box.addView(label(result.detectedAt + "  ·  用时 " + (result.elapsedMillis / 1000L) + " 秒", 11));
         for (String note : result.notes) box.addView(label("提示：" + note, 11));
         downloadables(box, result);
+        candidateImport(box, result);
         /* 降重这一格只在真的判出重复之后出现。名字里写清它和在线降重的区别：改完要拿同一把尺子
            再量一次整篇，整篇命中字数没变小就退回原文——"改写过了"不等于"降下来了"。 */
         if (scanShowsDuplicates && !result.hits.isEmpty()) {
@@ -454,6 +455,54 @@ public final class ApiWorkflow {
                     new ArrayList<DuplicateEngine.Downloadable>(java.util.Collections.singletonList(pick))));
             box.addView(row);
         }
+    }
+
+    /** 把本轮公开检索得到的题录/摘要保存到自建库，下一轮离线比对仍能使用。 */
+    private void candidateImport(LinearLayout box, DuplicateEngine.Report result) {
+        if (result == null || result.candidates.isEmpty()) return;
+        final ArrayList<PaperSources.Candidate> candidates =
+                new ArrayList<PaperSources.Candidate>(result.candidates);
+        TextView save = label("保存本轮题录/摘要到自建库：" + candidates.size() + " 篇", 14);
+        save.setTypeface(Typeface.DEFAULT_BOLD);
+        save.setPadding(0, dp(10), 0, dp(10));
+        save.setOnClickListener(view -> confirmCandidateImport(candidates));
+        box.addView(save);
+    }
+
+    private void confirmCandidateImport(final ArrayList<PaperSources.Candidate> candidates) {
+        if (job != null) { toast("有任务在跑，稍后再试"); return; }
+        new AlertDialog.Builder(activity).setTitle("保存题录/摘要")
+                .setMessage("保存 " + candidates.size()
+                        + " 篇公开检索候选的题名、作者、年份和摘要到自建库。没有摘要的条目只保留题录，"
+                        + "不会冒充正文材料。")
+                .setPositiveButton("保存", (dialog, which) -> importCandidates(candidates))
+                .setNegativeButton("取消", null).show();
+    }
+
+    private void importCandidates(final ArrayList<PaperSources.Candidate> candidates) {
+        if (job != null) { toast("有任务在跑，稍后再试"); return; }
+        final ApiClient.Task task = begin("保存题录/摘要");
+        worker = new Thread(() -> {
+            String title;
+            String body;
+            try {
+                CorpusImport.Batch batch = CorpusImport.importCandidates(library, candidates,
+                        (done, total, receipt) -> {
+                            if (done % 20 == 0 || done == total) progress("题录/摘要入库 " + done + "/" + total);
+                        }, task::cancelled);
+                title = "已保存 " + batch.imported() + " 篇，重复 " + batch.duplicates()
+                        + " 篇" + (batch.cancelled ? "（已取消）" : "");
+                body = batch.detail();
+            } catch (Exception error) {
+                title = "保存失败";
+                body = error.getMessage() == null || error.getMessage().isEmpty()
+                        ? "未知错误" : error.getMessage();
+            }
+            final String head = title;
+            final String lines = body;
+            complete(task, () -> showImportReceipts(head, lines));
+        }, "wordlite-candidate-import");
+        worker.start();
     }
 
     /** 下载之前先说清要花多少流量：单份开放获取 PDF 实测 0.7-3.9 MB，一份的上限是 6 MB。 */

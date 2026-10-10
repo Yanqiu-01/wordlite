@@ -60,6 +60,7 @@ Add-Suite "HangPunctuationRegression" @()
 # 规则的范围（斜杠两边都得是字母数字、不许比行宽、区间不许以斜杠开头结尾）都在这里钉着。
 Add-Suite "SlashAtomicRegression" @()
 Add-Suite "TextCorpusRegression"   @()
+Add-Suite "NoplagRarestProbeRegression" @()
 Add-Suite "SourceLedgerRegression" @()
 Add-Suite "CharLedgerRegression"   @()
 Add-Suite "SharedSpanRegression" @()
@@ -67,6 +68,7 @@ Add-Suite "CandidateRankerRegression" @()
 Add-Suite "HitMapRegression" @()
 Add-Suite "RoutesRegression"      @()
 Add-Suite "CorpusImportRegression" @()
+Add-Suite "OpenCorpusImportRegression" @()
 # 题录导出入库（NoteExpress/RefWorks/RIS/BibTeX/GB-T 7714 五种写法、编码嗅探、摘要级档位）。
 # 这一套没进闸门的后果是实打实的：923 行解析代码发出去了，没人每次发布替它跑一遍。
 Add-Suite "RecordImportRegression" @()

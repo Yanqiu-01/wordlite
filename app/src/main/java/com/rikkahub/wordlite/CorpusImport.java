@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.nio.charset.StandardCharsets;
 
 /**
  * 自建库批量导入（ROADMAP 0.6.2 的"一次选多个 TXT/DOCX，逐文件进度、按正文哈希去重"，
@@ -260,6 +261,50 @@ public final class CorpusImport {
             }
         }
         return batch;
+    }
+
+    /**
+     * 把公开检索返回的题录/摘要候选转换成自建库材料。
+     * URL、HTML 和响应原文不进入正文，避免把来源信息变成假命中。
+     */
+    public static Source sourceOf(PaperSources.Candidate candidate) {
+        if (candidate == null || candidate.source == null)
+            throw new IllegalArgumentException("candidate == null");
+        TextCorpus.Source meta = candidate.source;
+        String engine = meta.engine == null ? "" : meta.engine.trim();
+        String title = meta.title == null ? "" : meta.title.trim();
+        String base = (engine.length() == 0 ? "" : "[" + engine + "] ")
+                + (title.length() == 0 ? "开放检索候选" : title);
+        String name = LocalLibrary.sanitize(base + ".txt");
+        if (name == null) name = "开放检索候选.txt";
+        StringBuilder body = new StringBuilder();
+        appendRecordLine(body, candidate.abstractText);
+        appendRecordLine(body, title);
+        appendRecordLine(body, meta.authors);
+        appendRecordLine(body, meta.year);
+        Source out = new Source(name, body.toString().getBytes(StandardCharsets.UTF_8));
+        out.material = candidate.abstractText == null || candidate.abstractText.trim().isEmpty()
+                ? DuplicateEngine.MATERIAL_RECORD : DuplicateEngine.MATERIAL_ABSTRACT;
+        return out;
+    }
+
+    /** 将公开候选走和用户题录相同的去重、容量、回执路径。 */
+    public static Batch importCandidates(LocalLibrary library, List<PaperSources.Candidate> candidates,
+                                         Progress progress, Cancel cancel) {
+        ArrayList<Source> sources = new ArrayList<Source>();
+        if (candidates != null) {
+            for (PaperSources.Candidate candidate : candidates) {
+                if (candidate == null || candidate.source == null) continue;
+                sources.add(sourceOf(candidate));
+            }
+        }
+        return run(library, sources, progress, cancel);
+    }
+
+    private static void appendRecordLine(StringBuilder out, String value) {
+        if (value == null || value.trim().isEmpty()) return;
+        if (out.length() > 0) out.append('\n');
+        out.append(value.trim());
     }
 
     /** 这一份该落哪个档：material 优先，退到旧的 recordLevel 布尔，再退到正文（导进库的原文）。 */
