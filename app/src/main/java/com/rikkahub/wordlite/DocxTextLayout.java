@@ -279,6 +279,34 @@ public final class DocxTextLayout {
         float room = Math.max(0f, width - lineRight);
         return new float[]{room, Math.max(0f, markAdvance - room)};
     }
+    /**
+     * The index of the closing mark that ends the unbreakable Latin token starting at {@code head}, or
+     * -1 when the line before it has nothing to hand over. Word hangs the mark, not the token: its own
+     * PDF ends a line of para 94 on "37.68 MPa，" with the mark 12.08 pt past the right margin, while
+     * our line, 0.1 px short of room for the token plus the mark, dropped the pair to the next line and
+     * ran 43 px short of the margin (tools/right-edge-audit.py over
+     * artifacts/agent-layout-verify/justfix4).
+     */
+    private static int latinHangingMark(Spannable text, int head) {
+        int limit = Math.min(text.length(), head + 24);
+        int i = head;
+        while (i < limit && isLatinRunChar(text.charAt(i))) i++;
+        if (i == head || i >= text.length()) return -1;
+        return isHangingPunctuation(text.charAt(i)) ? i : -1;
+    }
+
+    /**
+     * What Word keeps glued to a closing mark: letters, digits, a decimal point, a unit sign. No hyphen
+     * and no slash -- those are break opportunities in their own right, and gluing across one would
+     * lift a token the original was free to split.
+     */
+    private static boolean isLatinRunChar(char c) {
+        if (c >= 'a' && c <= 'z') return true;
+        if (c >= 'A' && c <= 'Z') return true;
+        if (c >= '0' && c <= '9') return true;
+        return c == '.' || c == '%' || c == '\u2103';
+    }
+
     private static StaticLayout hangTrailingPunctuation(SpannableStringBuilder text, TextPaint paint,
                                                          StaticLayout layout, int width,
                                                          Layout.Alignment alignment, boolean wordWrap,
@@ -296,6 +324,27 @@ public final class DocxTextLayout {
                 if (isHangingPunctuation(first)) {
                     marks.add(head);
                     inside.add(hangSplit(lineRight, width, charAdvance(text, paint, head))[0]);
+                    continue;
+                }
+                int latinMark = latinHangingMark(text, head);
+                if (latinMark >= 0) {
+                    // A Latin token cannot be broken and kinsoku forbids its closing mark from starting
+                    // a line, so the whole tail climbs onto this line and only the mark crosses over.
+                    float tail = 0f;
+                    boolean priced = true;
+                    for (int i = head; i < latinMark; i++) {
+                        if (ownsReplacedRange(text, i)) { priced = false; break; }
+                        tail += charAdvance(text, paint, i);
+                    }
+                    if (priced && text.getSpans(latinMark, latinMark + 1,
+                            ReplacementSpan.class).length == 0
+                            // Only the mark may cross the margin; the token in front of it still has to
+                            // land inside, which is what Word's measured one-em overflow means.
+                            && lineRight + tail <= width + 0.5f) {
+                        marks.add(latinMark);
+                        inside.add(hangSplit(lineRight + tail, width,
+                                charAdvance(text, paint, latinMark))[0]);
+                    }
                     continue;
                 }
                 if (!isCjk(first) || isCjkPunctuation(first)) continue;
