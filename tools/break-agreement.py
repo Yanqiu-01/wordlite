@@ -169,8 +169,12 @@ def pair(blocks, word, paras):
             pi = wkeys[k]
             cand = word[pi]
             same_len = cand["text"] and blk["total"] == len(cand["text"])
-            head = cand["text"][:8] == blk["first8"]
-            tail = cand["text"][-8:] == blk["last8"]
+            # A paragraph's last line can be shorter than the probe's 8-character window ("the
+            # paragraph ends after 7 characters of its own"), so the ends are matched as ends, not as
+            # fixed-width slices -- a slice made a 7-character tail look like a different paragraph
+            # and dropped para 94 (artifacts/agent-layout-verify/hangbreak1) out of the comparison.
+            head = bool(blk["first8"]) and cand["text"].startswith(blk["first8"])
+            tail = bool(blk["last8"]) and cand["text"].endswith(blk["last8"])
             if same_len and head and tail:
                 pairs.append((blk, pi))
                 wkeys = wkeys[k + 1:]
