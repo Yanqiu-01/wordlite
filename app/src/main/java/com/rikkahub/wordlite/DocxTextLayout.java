@@ -112,7 +112,9 @@ public final class DocxTextLayout {
             String label = paragraph.listLabel.isEmpty() ? "•" : paragraph.listLabel;
             text.setSpan(new ListMargin(label, firstMargin, restMargin), 0, text.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
         } else {
-            text.setSpan(new LeadingMarginSpan.Standard(firstMargin, restMargin), 0, text.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
+            // No LeadingMarginSpan here: a non-list paragraph carries its indent through indentLines,
+            // because on the target phone the platform's margin reaches neither the break width nor the
+            // ink of this document (the measurement is written up at indentLines).
         }
         Spacing spacing = null;
         if (text.length() > 0) {
@@ -139,7 +141,22 @@ public final class DocxTextLayout {
                 : Layout.Alignment.ALIGN_NORMAL;
         boolean allowWordWrap = f.wordWrap && hasLongLatinRun(text);
         if (text.length() > 0) glueSlashRuns(text, paint, width);
-        StaticLayout layout = build(text, paint, width, alignment, f.alignment == 3, allowWordWrap);
+        // A paragraph that carries its own line margins may not be handed to the platform's
+        // justification. Measured on the target phone (API 29): under INTER_WORD the pass lays every
+        // line across the whole column and reports getLineLeft 0, so the margin span reaches neither the
+        // break width nor the drawing. 69 body paragraphs of the sample lost their 24 pt first-line
+        // indent (Word puts their first line at 109.10 pt against an 85.10 pt margin) and the 30
+        // reference entries lost their 21 pt hanging indent (Word's continuation lines start at
+        // 106.10 pt), and every line after the first took roughly one character more than Word's.
+        // Under JUSTIFICATION_MODE_NONE the very same span is honoured, so these paragraphs keep their
+        // margins here and this file closes their lines -- which justifyEastAsian already does for every
+        // Chinese paragraph and for every Latin column the platform overflows.
+        boolean ownMargins = firstMargin != 0 || restMargin != 0;
+        StaticLayout layout = build(text, paint, width, alignment,
+                f.alignment == 3 && !ownMargins, allowWordWrap);
+        if (ownMargins && !paragraph.isList)
+            layout = indentLines(text, paint, layout, width, alignment, allowWordWrap,
+                    firstMargin, restMargin);
         // The platform keeps owning the word spaces of a Latin run only while it keeps them inside
         // the column. Below API 34 it does not: measured on the target phone, a Latin line that had
         // to pull a long token down gets its whole leftover dumped into the word spaces, so a
@@ -149,7 +166,8 @@ public final class DocxTextLayout {
         // stretches word spaces as well, but it stops at the right boundary. Once a line is over
         // the edge the platform owns nothing in this paragraph: it is re-laid with justification off
         // and every line gets closed here, under the same floor-the-slack rule CJK seams use.
-        boolean platformJustify = f.alignment != 3 || !overshootsColumn(layout, width);
+        boolean platformJustify = !ownMargins
+                && (f.alignment != 3 || !overshootsColumn(layout, width));
         // Word's w:overflowPunct lets a trailing fullwidth punctuation mark hang
         // past the line width by its blank half, so punct-ended lines hold one
         // more character. Android's breaker cannot express that in a single
@@ -279,6 +297,87 @@ public final class DocxTextLayout {
         float room = Math.max(0f, width - lineRight);
         return new float[]{room, Math.max(0f, markAdvance - room)};
     }
+    /**
+     * Give every line the indent its paragraph asked for.
+     *
+     * This used to be the platform's job. On the target phone it is worth nothing for this document:
+     * 572 of the 599 lines the capture reports have getLineLeft() == 0, so the 69 paragraphs carrying
+     * w:firstLine="480" open flush at the margin where Word opens their first line at 109.10 pt against
+     * an 85.10 pt margin, and the 30 reference entries carrying w:ind left="420" hanging="420" keep
+     * every line after the first at the margin where Word starts it at 106.10 pt. Turning the platform's
+     * own justification off -- the documented case where a leading margin gets ignored -- moves 211
+     * lines of geometry and still leaves every lineLeft at 0, so that is not the reason here either.
+     *
+     * So the room is carried by this file: the line's first measurement run is priced at what it costs
+     * plus the indent and drawn at the indent, which shrinks the break width by the amount Word shrinks
+     * it (a body first line gets 535 px of the 567 px column, a reference continuation line 539 px,
+     * against Word's 401.2 pt and 404.2 pt) and puts the ink where Word puts it.
+     *
+     * Like the hanging-mark pass this has to read back the lines it produced, so it lays out, reads and
+     * re-lays up to three times. A pass always clears the previous pass's charges first, so a character
+     * that moved off a line start never carries an indent that no longer belongs to it.
+     */
+    private static StaticLayout indentLines(SpannableStringBuilder text, TextPaint paint,
+                                            StaticLayout layout, int width,
+                                            Layout.Alignment alignment, boolean wordWrap,
+                                            int firstMargin, int restMargin) {
+        for (int pass = 0; pass < 3; pass++) {
+            for (LineIndent spent : text.getSpans(0, text.length(), LineIndent.class))
+                text.removeSpan(spent);
+            for (AutoGap seam : text.getSpans(0, text.length(), AutoGap.class)) seam.marginPx = 0;
+            int attached = 0;
+            int lines = layout.getLineCount();
+            for (int k = 0; k < lines; k++) {
+                int margin = k == 0 ? firstMargin : restMargin;
+                if (margin == 0) continue;
+                int start = layout.getLineStart(k), end = layout.getLineEnd(k);
+                if (start >= end) continue;
+                int upto = headRunEnd(text, start, end);
+                float natural = 0f;
+                AutoGap seam = null;
+                boolean blocked = false;
+                for (int i = start; i < upto; i++) {
+                    for (ReplacementSpan owner : text.getSpans(i, i + 1, ReplacementSpan.class)) {
+                        // Two replacement spans over one range are measured as a single run and only
+                        // one of the two sizes survives, so an existing seam carries the indent (its
+                        // own shift already moves the ink) and any other owner retires this line's
+                        // indent rather than fight it for the range.
+                        if (owner instanceof AutoGap) {
+                            if (seam == null) seam = (AutoGap) owner;
+                        } else {
+                            blocked = true;
+                        }
+                    }
+                    natural += charAdvance(text, paint, i);
+                }
+                if (blocked) continue;
+                if (seam != null) seam.marginPx += margin;
+                else text.setSpan(new LineIndent(Math.round(natural), margin), start, upto,
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                attached++;
+            }
+            if (attached == 0) return layout;
+            layout = build(text, paint, width, alignment, false, wordWrap);
+        }
+        return layout;
+    }
+
+    /**
+     * The line's first measurement run: one character when the line opens on CJK, where a break there is
+     * legal for Word anyway, and up to the next blank when it opens on Latin -- which adds no break
+     * opportunity the blank did not already offer and keeps a head token like "[1]" in one piece.
+     */
+    private static int headRunEnd(Spannable text, int start, int end) {
+        char c = text.charAt(start);
+        // One surrogate pair is one character: charging a lone high surrogate would leave the low half
+        // outside the range and split a glyph down the middle.
+        if (Character.isHighSurrogate(c)) return Math.min(end, start + 2);
+        if (scriptKind(c) == 1) return start + 1;
+        int i = start + 1;
+        while (i < end && !Character.isWhitespace(text.charAt(i))) i++;
+        return i;
+    }
+
     /**
      * The index of the closing mark that ends the unbreakable Latin token starting at {@code head}, or
      * -1 when the line before it has nothing to hand over. Word hangs the mark, not the token: its own
@@ -2431,17 +2530,46 @@ public final class DocxTextLayout {
     static final class AutoGap extends ReplacementSpan {   // package-private: the device probe counts it
         final boolean before;
         final boolean after;
-        AutoGap(boolean before, boolean after) { this.before = before; this.after = after; }
+        /** Room this seam also carries for its line's own indent (see indentLines); 0 in a seam. */
+        int marginPx;
+        AutoGap(boolean before, boolean after) { this(before, after, 0); }
+        AutoGap(boolean before, boolean after, int marginPx) {
+            this.before = before; this.after = after; this.marginPx = marginPx;
+        }
         private int seams() { return (before ? 1 : 0) + (after ? 1 : 0); }
         /** How far the glyph steps right inside its own advance: the seams that sit on its left. */
-        float shift(Paint paint) { return before ? paint.getTextSize() / 4f : 0f; }
+        float shift(Paint paint) { return (before ? paint.getTextSize() / 4f : 0f) + marginPx; }
         @Override public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
             if (fm != null) paint.getFontMetricsInt(fm);
-            return (int) Math.ceil(paint.measureText(text, start, end) + seams() * paint.getTextSize() / 4f);
+            return (int) Math.ceil(paint.measureText(text, start, end)
+                    + seams() * paint.getTextSize() / 4f) + marginPx;
         }
         @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
                                    float x, int top, int y, int bottom, Paint paint) {
             canvas.drawText(text, start, end, x + shift(paint), y, paint);
+        }
+    }
+
+    /**
+     * One line's own indent, carried on the first measurement run of that line: the run is priced at
+     * what it really costs plus `marginPx`, and drawn that far to the right, so the break arithmetic
+     * and the ink move together. This exists because the platform's own leading margin never reaches
+     * this document on the target phone -- see indentLines.
+     */
+    static final class LineIndent extends ReplacementSpan {   // package-private: the probe counts it too
+        private final int sizePx;
+        final int marginPx;
+        LineIndent(int naturalPx, int marginPx) {
+            this.sizePx = naturalPx + marginPx;
+            this.marginPx = marginPx;
+        }
+        @Override public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
+            if (fm != null) paint.getFontMetricsInt(fm);
+            return sizePx;
+        }
+        @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
+                                   float x, int top, int y, int bottom, Paint paint) {
+            canvas.drawText(text, start, end, x + marginPx, y, paint);
         }
     }
 
