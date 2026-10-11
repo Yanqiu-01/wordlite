@@ -71,7 +71,10 @@ def audit(capture, tol):
             if i == len(ls) - 1:
                 continue                      # 段末行：Word 也不拉伸
             k = kind(r)
-            right = float(r["lineLeftPx"]) + float(r["lineWidthPx"]) + float(r["hangOverPx"])
+            # 右边界一律按 paraXPx + lineLeftPx + lineWidthPx + hangOverPx 算，与
+            # tools/edge-parity.ps1 第 33-40 行口径一致（Word 那侧的 right_edge_pt 同一原点）。
+            right = (float(r["paraXPx"]) + float(r["lineLeftPx"])
+                     + float(r["lineWidthPx"]) + float(r["hangOverPx"]))
             deficit = COLUMN - right
             stat[k + ":行"] += 1
             stat[k + (":短于边界" if deficit > tol else ":齐平")] += 1
