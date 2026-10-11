@@ -552,7 +552,7 @@ public final class DeviceCapture {
                     + "\tlineLeftPx\tparaXPx\topenGaps\tautoGaps\thangOverPx"
                     + "\tlineStretchPx\tlineNaturalPx\tlineRoomPx\tlayoutWidthPx"
                     + "\tnextCharPx\tnextRunPx\tnextRunChars"
-                    + "\tlineInkPx\tlineTailPx"                    + "\tlineTailChars\tlineTailFree"                    + "\tlineSpaces\tlineCodepoints\tlineText\n");
+                    + "\tlineInkPx\tlineTailPx"                    + "\tlineTailChars\tlineTailFree"                    + "\tlineSpaces\tlineCodepoints\tlineText"                    + "\theadIndentPx\n");
         else
             sb.append("paragraph\tline\tfirst8\tlast8\tlineChars\tlineWidthPx\tlineStretchPx"
                     + "\tlineNaturalPx\tlineRoomPx\tscriptChars\tscriptLaidPx\tscriptSpanPx"
@@ -632,7 +632,8 @@ public final class DeviceCapture {
                           .append('\t').append(Math.round(tailPx * 100) / 100f).append(TAB).append(tailBlanks(l, i)).append(TAB).append(tailFree(l, i))
                           .append(TAB).append(countChar(raw, ' '))
                           .append(TAB).append(raw.codePointCount(0, raw.length()))
-                          .append(TAB).append(ws(raw)).append('\n');
+                          .append(TAB).append(ws(raw))
+                          .append(TAB).append(headIndentPx(l, s)).append('\n');
                     }
                 }
             }
@@ -743,6 +744,25 @@ public final class DeviceCapture {
         android.text.Spanned sp = (android.text.Spanned) l.getText();
         return sp.getSpans(l.getLineStart(line), l.getLineStart(line) + 1,
                 DocxTextLayout.AtomicRunSpan.class).length > 0;
+    }
+
+    /**
+     * Room the engine's own line-indent charge carries at this line's head (DocxTextLayout.indentLines).
+     * A line that asked for an indent and shows 0 here never got one, which is a different bug from a
+     * line whose indent was charged and then lost somewhere else.
+     */
+    private static float headIndentPx(StaticLayout l, int lineStart) {
+        CharSequence t = l.getText();
+        if (!(t instanceof android.text.Spanned) || lineStart < 0) return 0f;
+        android.text.Spanned sp = (android.text.Spanned) t;
+        float sum = 0f;
+        for (DocxTextLayout.LineIndent li
+                : sp.getSpans(lineStart, lineStart + 1, DocxTextLayout.LineIndent.class))
+            if (sp.getSpanStart(li) == lineStart) sum += li.marginPx;
+        for (DocxTextLayout.AutoGap g
+                : sp.getSpans(lineStart, lineStart + 1, DocxTextLayout.AutoGap.class))
+            if (sp.getSpanStart(g) == lineStart) sum += g.marginPx;
+        return sum;
     }
 
     /** Room the line still had before the justification pass stretched it. */
