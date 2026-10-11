@@ -174,6 +174,32 @@ final class WordLineHeights {
     }
 
     /** 这一段能不能带 Word 实测的小数行距：只有撑起行高那张脸在实测表里才行。 */
+    /**
+     * 只把实测行距这一个数接到排版上,挑脸照旧。
+     *
+     * APPLIED_TO_LAYOUT 把换实测数与换挑脸捆在一起,真机对账里两处反向误差互相抵消,
+     * 调数调不动页码,也看不出是谁在动页码。这条开关只放行距:真机对 input-liu.docx 的
+     * 翻页一致率 93.2% -> 94.7%,错页段 14 -> 11,页数 28 不变(host 46 套件全过)。
+     * 行距用的是表里已有的实测 em(宋体 1.31335、Times 1.17665,Word 16.0 COM 相邻基线
+     * 中位),这次没有新加数。
+     */
+    static boolean AUTO_ADVANCE_ONLY = true;
+
+    /**
+     * 计费脸的实测 em 与字库表 em 之比;计费脸没量过返回 0。用它把单一行高从字库表口径
+     * 换算到 Word 实测口径,挑脸一次都没动。
+     */
+    static float autoEmScale(DocxDocument.ParagraphBlock p, Metrics metrics, String fallbackFamily) {
+        if (p == null) return 0f;
+        Height h = tallest(p, metrics, fallbackFamily);
+        Float em = h.family == null ? null : ratioFor(DocxFontAssets.pathFor(h.family));
+        if (em == null) return 0f;
+        FontScriptMetrics m = metrics.forFamily(h.family);
+        float table = m == null ? 0f : m.lineHeightRatio;
+        if (table <= 0f) return 0f;
+        return em.floatValue() / table;
+    }
+
     static boolean carries(DocxDocument.ParagraphBlock p, Metrics metrics, String fallbackFamily) {
         if (p == null || !APPLIED_TO_LAYOUT) return false;
         String winner = tallest(p, metrics, fallbackFamily).family;

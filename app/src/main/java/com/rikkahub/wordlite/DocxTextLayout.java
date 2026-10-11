@@ -104,7 +104,8 @@ public final class DocxTextLayout {
         Spacing spacing = null;
         if (text.length() > 0) {
             spacing = new Spacing(f, 1f, wordSingleLineHeightPt(paragraph),
-                    wordAscentFraction(paragraph), lineGridPitchTwips, lineHeightMeasured(paragraph));
+                    wordAscentFraction(paragraph), lineGridPitchTwips, lineHeightMeasured(paragraph),
+                            lineHeightEmScale(paragraph));
             text.setSpan(spacing, 0, text.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
             applyAutoSpace(text, f);
             // The leader is built with the styled text (applyTabLeaders) so that the reading view
@@ -855,6 +856,11 @@ public final class DocxTextLayout {
      * 只有实测撑起来的段落才允许带小数行距（`Spacing.lineCarry`）：没量过的字体照旧走两步取整，
      * 行为一个字节都不改——这条改动必须可逆，不许顺手把没量过的字体一起改了。
      */
+    static float lineHeightEmScale(DocxDocument.ParagraphBlock p) {
+        if (!WordLineHeights.AUTO_ADVANCE_ONLY || WordLineHeights.APPLIED_TO_LAYOUT) return 0f;
+        return WordLineHeights.autoEmScale(p, METRICS, effectiveDefaultFamily(p));
+    }
+
     static boolean lineHeightMeasured(DocxDocument.ParagraphBlock p) {
         // 与 wordSingleLineHeightPt 共用同一次扫描：谁的 pt × 比值最高谁说了算，不是比值单独最大。
         return WordLineHeights.carries(p, METRICS, effectiveDefaultFamily(p));
@@ -1795,7 +1801,7 @@ public final class DocxTextLayout {
             float scale = pxPerPoint / PageGeometry.points(1f);
             text.setSpan(new Spacing(paragraph.format, scale,
                             wordSingleLineHeightPt(paragraph), wordAscentFraction(paragraph), -1,
-                            lineHeightMeasured(paragraph)),
+                            lineHeightMeasured(paragraph), lineHeightEmScale(paragraph)),
                     0, text.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
         }
     }
@@ -1826,7 +1832,8 @@ public final class DocxTextLayout {
         private float fixedCarry;
 
         Spacing(DocxDocument.ParagraphFormat f, float coordinateScale,
-                float singleLineHeightPt, float ascentFrac, int lineGridPitchTwips, boolean measuredAdvance) {
+                float singleLineHeightPt, float ascentFrac, int lineGridPitchTwips, boolean measuredAdvance,
+                float emScale) {
             lineTwips = f.lineSpacingTwips;
             rule = f.lineRule == null ? "" : f.lineRule;
             this.coordinateScale = coordinateScale;
@@ -1892,6 +1899,20 @@ public final class DocxTextLayout {
                     // 上伸按 chooseHeight 画出来的那个整数算，两者必须同源，否则版心还回去的量
                     // 与屏幕上真正的基线位置就对不上。
                     lineHang = advance - Math.max(1, Math.round(desiredHeight * ascentFraction));
+                }
+            }
+            /* Word 实测行距单独接入:只换行距这一个数,挑脸一次都没动。整数行盒照画,
+               小数那一截交给 A4Paginator 的 lineCarry。网格地板把行抬起来时不插手。 */
+            if (emScale > 0f && autoRule && desiredHeight == autoHeight && singleLineHeightPt > 0f) {
+                double r = lineTwips > 0 ? lineTwips / 240d : 1d;
+                float adv = (float) (singleLineHeightPt * emScale
+                        * PageGeometry.points(1f) * coordinateScale * r);
+                int box = Math.max(1, Math.round(adv));
+                if (Math.abs(adv - box) < 1f) {
+                    desiredHeight = box;
+                    lineCarry = adv - box;
+                    lineHang = adv - Math.max(1, Math.round(box * ascentFraction));
+                    gridSnapGrownRow = false;
                 }
             }
             computed = true;
