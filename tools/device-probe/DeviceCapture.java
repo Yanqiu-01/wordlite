@@ -552,7 +552,7 @@ public final class DeviceCapture {
                     + "\tlineLeftPx\tparaXPx\topenGaps\tautoGaps\thangOverPx"
                     + "\tlineStretchPx\tlineNaturalPx\tlineRoomPx\tlayoutWidthPx"
                     + "\tnextCharPx\tnextRunPx\tnextRunChars"
-                    + "\tlineInkPx\tlineTailPx"                    + "\tlineTailChars\tlineTailFree"                    + "\tlineSpaces\tlineCodepoints\n");
+                    + "\tlineInkPx\tlineTailPx"                    + "\tlineTailChars\tlineTailFree"                    + "\tlineSpaces\tlineCodepoints\tlineText\n");
         else
             sb.append("paragraph\tline\tfirst8\tlast8\tlineChars\tlineWidthPx\tlineStretchPx"
                     + "\tlineNaturalPx\tlineRoomPx\tscriptChars\tscriptLaidPx\tscriptSpanPx"
@@ -614,9 +614,9 @@ public final class DeviceCapture {
                     } else {
                         sb.append(p + 1).append('\t').append(pl.blockIndex).append('\t').append(i)
                           .append('\t').append(edge(text, true)).append('\t')
-                          .append(edge(text, false)).append('\t').append(e - s)
+                          .append(edge(text, false)).append('\t').append(text.length())
                           .append('\t').append(Math.round(l.getLineWidth(i) * 100) / 100f)
-                          .append('\t').append(ws(raw))
+                          .append('\t').append(one(text))
                           .append('\t').append(Math.round(l.getLineLeft(i) * 100) / 100f)
                           .append('\t').append(Math.round(pl.text.x * 100) / 100f)
                           .append('\t').append(openGaps).append('\t').append(autoGaps)
@@ -631,7 +631,8 @@ public final class DeviceCapture {
                           .append('\t').append(Math.round(inkPx * 100) / 100f)
                           .append('\t').append(Math.round(tailPx * 100) / 100f).append(TAB).append(tailBlanks(l, i)).append(TAB).append(tailFree(l, i))
                           .append(TAB).append(countChar(raw, ' '))
-                          .append(TAB).append(raw.codePointCount(0, raw.length())).append('\n');
+                          .append(TAB).append(raw.codePointCount(0, raw.length()))
+                          .append(TAB).append(ws(raw)).append('\n');
                     }
                 }
             }
@@ -1324,9 +1325,10 @@ public final class DeviceCapture {
         StringBuilder sb = new StringBuilder(value.length());
         for (int i = 0; i < value.length(); i++) {
             char c = value.charAt(i);
-            if (c == '\t') sb.append('\\').append('t');
-            else if (c == '\r') sb.append('\\').append('r');
-            else if (c == '\n') sb.append('\\').append('n');
+            // The markup is the one every reader of this file already strips (see Norm in
+            // tools/edge-parity.ps1); a backslash escape would be read as two text characters.
+            if (c == '\t') sb.append("<tab>");
+            else if (c == '\r' || c == '\n') sb.append("<para>");
             else sb.append(c);
         }
         return sb.toString();
