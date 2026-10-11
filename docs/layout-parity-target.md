@@ -1963,3 +1963,19 @@ block 95 正是这种段：9 行 `lineStretchPx` 全是 0.00。
 3. 下一轮的改法已经有靶子：布局之后做一次自检——某一行的行首是粘住的串、而它上一行的剩余宽度足够放下
    这串（按不粘时的实测宽算），就把那一张粘串去掉重排，且只有"其他行的断点一个都没动"才接受这次重排。
    本轮没有动引擎：这条改动要配 `tools/test-host.ps1` 全绿与七项复采，留给下一轮一次做完。
+
+## 31. block 87 的 glue 不是定价贵，是两端对齐先占了位（tag `exp12`，3.0.6 之后）
+
+`tools/capture-device.ps1` 的 `glue-price.tsv` 在 3.0.6 上重量 block 87（p8，正文 `Xiong等采用Sn-58Bi焊料（SB）与多孔Cu（P-Cu）构建Cu/SB/P-Cu/SB/Cu夹层结构…`）：
+
+| 读数 | 值 | 出处 |
+|---|---|---|
+| 粘连串自报宽度 | 128px（16 字，`AtomicRunSpan` 逐字求和一致） | `glue_size_px` / `span_px_sum` |
+| 前一行自然宽（扣掉拉开的量） | 411px | `prev_natural_px`，`lineNaturalPx` |
+| 前一行留给它的空间 | 156px | `room_px` = 566.93 - 411 |
+| 前一行实际付出去的宽度 | 519px | `lines-all.tsv` 的 `lineWidthPx`，其中 108px 是两端对齐拉开的 18 个间隙 |
+| 整串能留在前一行所需的最窄版心 | 646px | `threshold_px`（逐像素加宽版心试出来的） |
+
+`threshold_px` 646 ≈ 519 + 128，即平台把这一行**已经拉开的 108px** 也算进了断行预算；按自然宽算 411 + 128 = 539 ≤ 566.93，本该放得下。Word 正是放下的：PDF 里 p8 那一行 `Xiong 等采用Sn-58Bi 焊料（SB）与多孔Cu（P-Cu）构建Cu/SB/P-Cu/SB/Cu` 整串在一行内，墨迹宽 535.3px（`tools/pdf-line-truth.py`）。
+
+所以这一档不是 glue 定价贵，而是**间隙的加宽量在断行之前就被定死并计入预算**：`justifyEastAsian`（`DocxTextLayout:322`，由 `measure` 在 `DocxTextLayout:153` 调用）在第一遍 StaticLayout 之后插入 `WidenGap`，重排出来的那一版才是分页器用的版本，于是第一遍放得下的东西在第二遍被 108px 挤走。下一步要做的是让断行按间隙的最小宽度判、加宽量在断行定下来之后再摊；这一步会同时动两端对齐，必须与 `tools/justify-device.ps1`、`tools/parity-six.ps1` 一起量，不能只看 block 87 一档。
