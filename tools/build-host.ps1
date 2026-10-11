@@ -116,6 +116,9 @@ Copy-Item (Join-Path $dex "classes.dex") $outDex -Force
 Write-Host "== insert classes.dex =="
 # Same as build.sh appending with zipfile(apk, "a"): deflate the dex into the linked apk.
 if (-not ("System.IO.Compression.ZipFile" -as [type])) { Add-Type -AssemblyName System.IO.Compression.FileSystem }
+# ZipArchiveMode lives in System.IO.Compression; Windows PowerShell 5.1 leaves it unloaded
+# even after the FileSystem shim, so ask for it by name too.
+if (-not ("System.IO.Compression.ZipArchiveMode" -as [type])) { Add-Type -AssemblyName System.IO.Compression }
 $zip = [System.IO.Compression.ZipFile]::Open($unsigned, [System.IO.Compression.ZipArchiveMode]::Update)
 try {
     foreach ($e in @($zip.Entries | Where-Object { $_.FullName -eq "classes.dex" })) { $e.Delete() }
