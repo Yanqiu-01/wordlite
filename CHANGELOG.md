@@ -13,6 +13,15 @@
 
 
 
+## 3.0.6(`versionCode 65`)
+
+- 中文行的行高改由宋体计费。之前按字库表比值挑脸，Times 的 1.1074 高于宋体的表值，正文里明明写的是中文，行高却按 Times 的 23.53px 算，Word 给中文行的是宋体的行高。`WordLineHeights.autoEmScale` 现在按字库表口径与 Word 实测口径各扫一遍取比值，中文行落到宋体，纯西文行仍留在 Times；挑脸的规则本身没动，画图那条路一个字没改。
+- 行高的数改用 Word 自己导出 PDF 的逐行行顶差：12pt 中文行中位 25.92px（1.296 em，397 个样本），12pt 西文行 23.04px（1.152 em，83 个样本）。原先的 26.267px / 23.533px 来自 Word 16.0 COM 的相邻基线距离，比版面实际偏高 0.35px，一页 33 行就差 11.5px，版心少装一行。`tools/pdf-line-truth.py` 新增 `-Steps` 模式，这两个数可以一条命令复现。
+- 实测行距单独接入：`WordLineHeights.AUTO_ADVANCE_ONLY`。原先 `APPLIED_TO_LAYOUT` 把"换实测数"与"换逐字符挑脸"捆在一起，两处反向误差互相抵消，调数调不动页码；现在只放行距，整数行盒照画，小数那一截走 `lineCarry`。
+- 真机复量（华为 CDY-AN90，14,460 字稿子）：页数 28 对 28 不变，比 Word 提前一页的段落 14 → 7，翻页一致率 93.2% → 96.6%，带上下标的段落错页 2 → 1 段。分页门槛（≤10 段）首次通过。
+- 已知未解决：block 87 的 glue 定价——粘连的拉丁串自报 128px，留给它的版心还有 156px，平台仍按 235px 收费把它推到下一行；定价来源尚未定位。`WordLineHeights.APPLIED_TO_LAYOUT` 仍为 false。
+- 宿主回归 46 个套件通过（`WordLineHeightRegression` 69 条断言按新口径重写）。
+
 ## 3.0.5(`versionCode 64`)
 
 - 断行策略改为 `BREAK_STRATEGY_SIMPLE`(`DocxTextLayout.build`)。真机复量(华为 CDY-AN90,14,460 字稿子):断行与 Word 一致的行占比 63.3% → 74.9%(257/343),短于版心 1px 以上的行 27 → 19,页数 28 对 28 不变。两端对齐保留。`BREAK_STRATEGY_SIMPLE` 只改断行策略,不改行高、不改分页。
