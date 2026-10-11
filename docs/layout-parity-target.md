@@ -1979,3 +1979,32 @@ block 95 正是这种段：9 行 `lineStretchPx` 全是 0.00。
 `threshold_px` 646 ≈ 519 + 128，即平台把这一行**已经拉开的 108px** 也算进了断行预算；按自然宽算 411 + 128 = 539 ≤ 566.93，本该放得下。Word 正是放下的：PDF 里 p8 那一行 `Xiong 等采用Sn-58Bi 焊料（SB）与多孔Cu（P-Cu）构建Cu/SB/P-Cu/SB/Cu` 整串在一行内，墨迹宽 535.3px（`tools/pdf-line-truth.py`）。
 
 所以这一档不是 glue 定价贵，而是**间隙的加宽量在断行之前就被定死并计入预算**：`justifyEastAsian`（`DocxTextLayout:322`，由 `measure` 在 `DocxTextLayout:153` 调用）在第一遍 StaticLayout 之后插入 `WidenGap`，重排出来的那一版才是分页器用的版本，于是第一遍放得下的东西在第二遍被 108px 挤走。下一步要做的是让断行按间隙的最小宽度判、加宽量在断行定下来之后再摊；这一步会同时动两端对齐，必须与 `tools/justify-device.ps1`、`tools/parity-six.ps1` 一起量，不能只看 block 87 一档。
+
+## 35. 量台丢了一批，以及现在还剩下哪几把尺（2026-10-11）
+
+清理 artifacts/ 的时候删过了头。三样从来没进版本库的量台生产者一起没了，回收站里只有数据没有生产者，
+这一批是不可恢复的：
+
+- `artifacts/word/pages.tsv`（Word 自报的每段起页，验收第 1 条的全量尺，206 段）；`artifacts/word/`
+  目录本身早在 10-09 就空了，这份真值不是我这次删的，但这次确认它确实不存在了。
+- `artifacts/agent-typeset/run-repaginate.ps1` 与 `line-height-rows.ps1`（验收第 2、3、4 条：逐行行高、
+  每页累计行高）。`artifacts/agent-typeset/` 现在只剩 16K 的空壳，git 历史里没有这两个文件。
+- `artifacts/agent-layout-verify/` 下各标签的旧采样（postmerge1 / tailfit1 等）。以后每个标签重跑一次
+  `tools/capture-device.ps1` 就有新的。
+
+补上的三把尺已经进库，别再放回 artifacts/：
+
+- `tools/export-word-pdf.ps1` 用 Word 16.0 重导 PDF 真值；
+- `tools/verify-pdf-truth.py` 逐段核对新旧 PDF 真值的行数与起页（重导的那份字节和文档里钉的 sha
+  不一样，所以是功能核对：共享的 103 段行数与页码全部一致）；
+- `tools/page-mismatch-ruler.py` 出差值直方图，回答"我的内容比 Word 早一页/晚一页"。
+  口径只覆盖 PDF 配对能看见的段落（参考稿 104 段），不是第 1 条那把 206 段的尺，两个数不可并列引用。
+
+现在的读数（标签 `head0426f64`，工作树未含本节的改动）：第 1 条量不了；第 2、3、4 条量不了；
+第 5 条 130/154 = 84.4%；第 6 条 107/111 在一像素以内，越界的行 0；第 7 条 257/343 = 74.9%；
+页归属这把新尺 0/104 早页（上一版同一把尺上是 6/103，全是 -1）。
+
+在量的一件事：`AtomicRunSpan` 原来自己按字 `Math.round` 报价，同一串字符不粘的时候引擎收 127 px，
+粘上就收 128 px，而 block 87 那一行只剩 126 px，于是串被挤到下一行——Word 把它留在原行。
+现在 span 不再自己量，直接用 `glueSlashRuns` 那份 `charAdvance` 的报价（只取整一次）。
+这件事只有手机能判：整串计费与逐字计费哪个是设备真正在收的，由第 5 条和页归属那把尺说。
