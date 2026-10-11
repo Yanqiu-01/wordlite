@@ -552,7 +552,7 @@ public final class DeviceCapture {
                     + "\tlineLeftPx\tparaXPx\topenGaps\tautoGaps\thangOverPx"
                     + "\tlineStretchPx\tlineNaturalPx\tlineRoomPx\tlayoutWidthPx"
                     + "\tnextCharPx\tnextRunPx\tnextRunChars"
-                    + "\tlineInkPx\tlineTailPx"                    + "\tlineTailChars\tlineTailFree\n");
+                    + "\tlineInkPx\tlineTailPx"                    + "\tlineTailChars\tlineTailFree"                    + "\tlineSpaces\tlineCodepoints\n");
         else
             sb.append("paragraph\tline\tfirst8\tlast8\tlineChars\tlineWidthPx\tlineStretchPx"
                     + "\tlineNaturalPx\tlineRoomPx\tscriptChars\tscriptLaidPx\tscriptSpanPx"
@@ -614,9 +614,9 @@ public final class DeviceCapture {
                     } else {
                         sb.append(p + 1).append('\t').append(pl.blockIndex).append('\t').append(i)
                           .append('\t').append(edge(text, true)).append('\t')
-                          .append(edge(text, false)).append('\t').append(text.length())
+                          .append(edge(text, false)).append('\t').append(e - s)
                           .append('\t').append(Math.round(l.getLineWidth(i) * 100) / 100f)
-                          .append('\t').append(one(text))
+                          .append('\t').append(ws(raw))
                           .append('\t').append(Math.round(l.getLineLeft(i) * 100) / 100f)
                           .append('\t').append(Math.round(pl.text.x * 100) / 100f)
                           .append('\t').append(openGaps).append('\t').append(autoGaps)
@@ -629,7 +629,9 @@ public final class DeviceCapture {
                           .append('\t').append(Math.round(nextRun * 100) / 100f)
                           .append('\t').append(nextRunChars(l, i))
                           .append('\t').append(Math.round(inkPx * 100) / 100f)
-                          .append('\t').append(Math.round(tailPx * 100) / 100f).append(TAB).append(tailBlanks(l, i)).append(TAB).append(tailFree(l, i)).append('\n');
+                          .append('\t').append(Math.round(tailPx * 100) / 100f).append(TAB).append(tailBlanks(l, i)).append(TAB).append(tailFree(l, i))
+                          .append(TAB).append(countChar(raw, ' '))
+                          .append(TAB).append(raw.codePointCount(0, raw.length())).append('\n');
                     }
                 }
             }
@@ -1312,6 +1314,28 @@ public final class DeviceCapture {
             sb.append(c);
         }
         return sb.toString();
+    }
+
+    /**
+     * Column-safe form of the line's real text: spaces (U+0020, U+00A0, U+3000) survive because they are
+     * the thing under dispute, only the three characters that would break the TSV get escaped.
+     */
+    private static String ws(String value) {
+        StringBuilder sb = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\t') sb.append('\\').append('t');
+            else if (c == '\r') sb.append('\\').append('r');
+            else if (c == '\n') sb.append('\\').append('n');
+            else sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    private static int countChar(String value, char want) {
+        int n = 0;
+        for (int i = 0; i < value.length(); i++) if (value.charAt(i) == want) n++;
+        return n;
     }
 
     private static String edge(String text, boolean head) {
