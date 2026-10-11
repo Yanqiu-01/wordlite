@@ -56,6 +56,7 @@ public final class DeviceCapture {
         AssetManager assets = assetManager(assetsZip);
         Context ctx = new ProbeContext(assets);
         DocxTextLayout.initialize(ctx);
+        DocxTextLayout.TRACE_JUSTIFY = true;
 
         long begin = System.currentTimeMillis();
         DocxDocument doc;
@@ -86,6 +87,10 @@ public final class DeviceCapture {
         write(new File(out, "chars-tail.tsv"), charsTail(result));
         write(new File(out, "tail-fit.tsv"), tailFit(result));
         write(new File(out, "glue-price.tsv"), gluePrice(result));
+        write(new File(out, "glue-bisect.tsv"), glueBisect(result));
+        write(new File(out, "spread-trace.tsv"), spreadTrace(result));
+        write(new File(out, "advance-scale.tsv"), advanceScale());
+        write(new File(out, "justify-trace.tsv"), justifyTrace(result));
         System.out.println("DONE tag=" + tag + " pages=" + result.totalPages()
                 + " words=" + words + " parseMs=" + parseMs + " totalMs=" + totalMs);
     }
@@ -1430,6 +1435,289 @@ public final class DeviceCapture {
         if (Character.isWhitespace(c) || isCjk(c)) return false;
         if (FontScriptMetrics.unicodeScript(c) != 0) return true;
         return Character.isLetterOrDigit(c);
+    }
+
+    /**
+     * Which span moves a glued string down a line? The same paragraph is re-laid at the SAME column
+     * width with one span set at a time taken out, and every variant reports the line index the first
+     * character of the string lands on plus where the line above it ended:
+     *   nw = justification widening out, glue kept   ng = widening and glue out
+     *   na = widening, glue and autoSpace seams out
+     * The variant that pulls the string back onto the earlier line names the span responsible for the
+     * break, which is the difference between "the widening was billed before the break" and "the glue
+     * span itself costs more than it answers getSize with".
+     */
+    private static String glueBisect(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page\tblock\tline\trun_first\trun_px\trun_px_live\troom_px"
+                + "\tnw_line\tnw_prev_end\tnw_prev_px"
+                + "\tng_line\tng_prev_end\tng_prev_px"
+                + "\tna_line\tna_prev_end\tna_prev_px\tnote\n");
+        java.util.IdentityHashMap<StaticLayout, StaticLayout[]> cache =
+                new java.util.IdentityHashMap<>();
+        for (int p = 0; p < result.totalPages(); p++) {
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null) continue;
+                StaticLayout l = pl.text.layout;
+                for (int i = Math.max(1, pl.startLine); i < pl.endLine && i < l.getLineCount(); i++) {
+                    if (!gluedAt(l, i)) continue;
+                    StaticLayout[] v = cache.get(l);
+                    if (v == null) {
+                        v = new StaticLayout[] { relay(l, false, false), relay(l, true, false),
+                                relay(l, true, true) };
+                        cache.put(l, v);
+                    }
+                    int at = l.getLineStart(i);
+                    sb.append(p + 1).append('\t').append(pl.blockIndex).append('\t').append(i)
+                      .append('\t').append(one(clean(l.getText().subSequence(at,
+                              Math.min(l.getLineEnd(i), at + 20)).toString()), 20))
+                      .append('\t').append(r2(nextRunWidth(l, i - 1)))
+                      .append('\t').append(r2(glueWidths(l, i)[0]))
+                      .append('\t').append(r2(roomOf(l, i - 1)));
+                    for (int k = 0; k < 3; k++) appendVariant(sb, v[k], at);
+                    sb.append('\t').append(v[0] == null ? one(relayError, 40) : "").append('\n');
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /** Line the offset lands on, and the end and width of the line in front of it. */
+    /**
+     * Line-by-line arithmetic of the justification pass, replayed on the live paragraph with every
+     * WidenGap taken out: what the pre-widening line held, the slack the pass would spread over it and
+     * how many seams it found to spread it on. That is the exact figure the engine spends, so a slack
+     * that reaches into the room the SAME line's own break was resting on shows up here as
+     * ink + (next chunk) <= width alongside a slack that spends it anyway.
+     */
+    private static String spreadTrace(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page\tblock\tline\tstart\tend\text\tinge\tslack\tseams\tword_spaces"
+                + "\tspread_gaps\tspread_px\tnext_chunk_px\n");
+        for (int p = 0; p < result.totalPages(); p++) {
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null) continue;
+                StaticLayout live = pl.text.layout;
+                if (!hasGluedLineStart(live, pl)) continue;
+                StaticLayout base = relay(live, false, false);
+                if (base == null) continue;
+                android.text.SpannableStringBuilder copy =
+                        new android.text.SpannableStringBuilder(base.getText());
+                for (int i = 0; i < base.getLineCount(); i++) {
+                    int start = base.getLineStart(i), end = base.getLineEnd(i);
+                    int ext = end;
+                    while (ext - start > 1 && Character.isWhitespace(copy.charAt(ext - 1))) ext--;
+                    float ink = base.getLineWidth(i);
+                    float slack = base.getWidth() - base.getLineLeft(i) - ink;
+                    int seams = seamCount(copy, base, i, start, ext);
+                    int spaces = spaceCount(copy, base, i, start, ext);
+                    int spent = spreadOne(copy, base, base.getWidth(), i);
+                    float spentPx = widenExtraSum(copy, start, ext);
+                    sb.append(p + 1).append('\t').append(pl.blockIndex).append('\t').append(i)
+                      .append('\t').append(start).append('\t').append(end).append('\t').append(ext)
+                      .append('\t').append(r2(ink)).append('\t').append(r2(slack))
+                      .append('\t').append(seams).append('\t').append(spaces)
+                      .append('\t').append(spent)
+                      .append('\t').append(r2(spentPx))                      .append('\t').append(r2(nextRunWidth(base, i)))
+                      .append('\n');
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    private static boolean hasGluedLineStart(StaticLayout l, A4Paginator.ParagraphLayout pl) {
+        for (int i = Math.max(1, pl.startLine); i < pl.endLine && i < l.getLineCount(); i++)
+            if (gluedAt(l, i)) return true;
+        return false;
+    }
+
+    /** DocxTextLayout.gapOffsets / wordSpaceOffsets / spreadLine, for a replay that must not change them. */
+    private static final java.lang.reflect.Method GAP_OFFSETS =
+            spreadMethod("gapOffsets", android.text.Spannable.class, StaticLayout.class,
+                    int.class, int.class, int.class);
+    private static final java.lang.reflect.Method SPACE_OFFSETS =
+            spreadMethod("wordSpaceOffsets", android.text.Spannable.class, StaticLayout.class,
+                    int.class, int.class, int.class);
+    private static final java.lang.reflect.Method SPREAD_LINE =
+            spreadMethod("spreadLine", android.text.SpannableStringBuilder.class, StaticLayout.class,
+                    int.class, int.class, boolean.class);
+
+    private static java.lang.reflect.Method spreadMethod(String name, Class<?>... params) {
+        try {
+            java.lang.reflect.Method m = DocxTextLayout.class.getDeclaredMethod(name, params);
+            m.setAccessible(true);
+            return m;
+        } catch (Throwable absent) {
+            return null;
+        }
+    }
+
+    private static int seamCount(android.text.Spannable copy, StaticLayout base, int line,
+                                 int start, int end) {
+        return offsetCount(GAP_OFFSETS, copy, base, line, start, end);
+    }
+
+    private static int spaceCount(android.text.Spannable copy, StaticLayout base, int line,
+                                  int start, int end) {
+        return offsetCount(SPACE_OFFSETS, copy, base, line, start, end);
+    }
+
+    private static int offsetCount(java.lang.reflect.Method m, android.text.Spannable copy,
+                                   StaticLayout base, int line, int start, int end) {
+        if (m == null) return -1;
+        try {
+            int[][] found = (int[][]) m.invoke(null, copy, base, line, start, end);
+            return found == null ? 0 : found.length;
+        } catch (Throwable failed) {
+            return -1;
+        }
+    }
+
+    /** Run the engine's own spread on the working copy, so the next line sees the same text it would. */
+    private static int spreadOne(android.text.SpannableStringBuilder copy, StaticLayout base,
+                                 int width, int line) {
+        if (SPREAD_LINE == null) return -1;
+        try {
+            return ((Integer) SPREAD_LINE.invoke(null, copy, base, width, line, false)).intValue();
+        } catch (Throwable failed) {
+            return -1;
+        }
+    }
+
+    /**
+     * The engine's own reading of its justification pass, for the paragraphs where a glued string
+     * starts a line and for every paragraph where the pass gave up on keeping the breaks. One row per
+     * paragraph; each ";;"-separated event is one state of the pass.
+     */
+    private static String justifyTrace(A4Paginator.PageResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page\tblock\tlines\tgave_up\ttrace\n");
+        java.util.IdentityHashMap<StaticLayout, Boolean> seen = new java.util.IdentityHashMap<>();
+        int rows = 0;
+        for (int p = 0; p < result.totalPages() && rows < 60; p++) {
+            for (A4Paginator.ParagraphLayout pl : result.pages.get(p).paragraphs) {
+                if (pl.text == null || pl.text.layout == null) continue;
+                if (seen.containsKey(pl.text.layout)) continue;
+                seen.put(pl.text.layout, Boolean.TRUE);
+                String trace = pl.text.justifyTrace;
+                if (trace == null || trace.length() == 0) continue;
+                boolean gaveUp = trace.indexOf("give-up") >= 0;
+                if (!gaveUp && !hasGluedLineStart(pl.text.layout, pl)) continue;
+                sb.append(p + 1).append('\t').append(pl.blockIndex).append('\t')
+                  .append(pl.text.layout.getLineCount()).append('\t').append(gaveUp ? 1 : 0).append('\t')
+                  .append(one(clean(trace.replace('\n', ';')), 1500)).append('\n');
+                rows++;
+            }
+        }
+        return sb.toString();
+    }
+
+    private static void appendVariant(StringBuilder sb, StaticLayout v, int at) {
+        if (v == null || at >= v.getText().length()) {
+            sb.append("\t-1\t-1\t-1");
+            return;
+        }
+        int line = v.getLineForOffset(at);
+        sb.append('\t').append(line);
+        if (line > 0) {
+            sb.append('\t').append(v.getLineEnd(line - 1))
+              .append('\t').append(r2(v.getLineWidth(line - 1)));
+        } else {
+            sb.append("\t-1\t-1");
+        }
+    }
+
+    /** Re-lay one paragraph at its own width with the named spans taken out; widening always goes. */
+    private static StaticLayout relay(StaticLayout live, boolean dropGlue, boolean dropAuto) {
+        if (LAYOUT_BUILD == null) {
+            relayError = "no build() to call";
+            return null;
+        }
+        try {
+            android.text.SpannableStringBuilder copy =
+                    new android.text.SpannableStringBuilder(live.getText());
+            for (DocxTextLayout.WidenGap gap
+                    : copy.getSpans(0, copy.length(), DocxTextLayout.WidenGap.class)) copy.removeSpan(gap);
+            if (dropGlue)
+                for (DocxTextLayout.AtomicRunSpan glue
+                        : copy.getSpans(0, copy.length(), DocxTextLayout.AtomicRunSpan.class))
+                    copy.removeSpan(glue);
+            if (dropAuto)
+                for (DocxTextLayout.AutoGap seam
+                        : copy.getSpans(0, copy.length(), DocxTextLayout.AutoGap.class)) copy.removeSpan(seam);
+            return (StaticLayout) LAYOUT_BUILD.invoke(null, copy, live.getPaint(), live.getWidth(),
+                    live.getAlignment(), false, true);
+        } catch (Throwable failed) {
+            Throwable cause = failed instanceof java.lang.reflect.InvocationTargetException
+                    && failed.getCause() != null ? failed.getCause() : failed;
+            relayError = cause.getClass().getSimpleName() + ":" + cause.getMessage();
+            return null;
+        }
+    }
+
+    /**
+     * Does the phone's Paint give a whole-pixel advance per glyph, and does measuring the same string
+     * at a larger size recover the float advance Word accumulates? Every width model in the engine
+     * rests on this: the device was measured to bill 40 'm' at 480.00 px where the font's own advance
+     * table says 497.813 (docs section 21.4), which is one rounding PER CHARACTER, while Word sums the
+     * float advances and rounds once per line. If measureText scales, the engine can price a word the
+     * way Word does; if it does not, no span trick will.
+     */
+    private static String advanceScale() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("face\ttext\tsize\tscale\tmeasured\tper_char\thtx\n");
+        String[] faces = { "宋体", "Times New Roman", "黑体", "等线" };
+        String[] samples = { "Xiong", "Sn-58Bi", "Cu/SB/P-Cu/SB/Cu", "MMmmiiil",
+                "等采用焊料与多孔构建", "（SB）（P-Cu）", "0123456789" };
+        float[] sizes = { 16f, 32f, 64f, 128f, 256f };
+        android.text.TextPaint paint = new android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        for (String family : faces) {
+            android.graphics.Typeface face = DocxTextLayout.resolve(family);
+            if (face == null) { sb.append(family).append("\t(no face)\n"); continue; }
+            paint.setTypeface(face);
+            for (String text : samples) {
+                paint.setTextSize(16f);
+                float single = paint.measureText(text);
+                for (float size : sizes) {
+                    paint.setTextSize(size);
+                    float measured = paint.measureText(text);
+                    // What the glyph advance table says, from the same paint at a size where one
+                    // pixel of rounding is a small fraction of the advance.
+                    float[] widths = new float[text.length()];
+                    glyphWidths(paint, text, widths);
+                    float htx = 0f;
+                    for (float w : widths) htx += w;
+                    sb.append(family).append('\t').append(one(clean(text), 22)).append('\t')
+                      .append(r2(size)).append('\t').append(r2(size / 16f)).append('\t')
+                      .append(r2(measured)).append('\t')
+                      .append(r2(measured / text.length() * 16f / size)).append('\t')
+                      .append(r2(htx * 16f / size)).append('\t').append(NL);
+                }
+                paint.setTextSize(16f);
+                sb.append(family).append('\t').append(one(clean(text), 22))
+                  .append("\tAT16 sum-of-per-char\t").append(r2(sumPerChar(paint, text))).append(NL);
+                sb.append("\n");
+            }
+        }
+        return sb.toString();
+    }
+
+    /** Paint.getGlyphWidths is not in the compile SDK; the platform has it from API 23 up. */
+    private static void glyphWidths(android.text.TextPaint paint, String text, float[] out) {
+        try {
+            java.lang.reflect.Method m = android.graphics.Paint.class.getMethod("getGlyphWidths",
+                    char[].class, int.class, int.class, int[].class, float[].class);
+            m.invoke(paint, text.toCharArray(), 0, text.length(), null, out);
+        } catch (Throwable unavailable) {
+            for (int i = 0; i < out.length; i++) out[i] = -1f;
+        }
+    }
+
+    private static float sumPerChar(android.text.TextPaint paint, String text) {
+        float sum = 0f;
+        for (int i = 0; i < text.length(); i++) sum += paint.measureText(text, i, i + 1);
+        return sum;
     }
 
     private static boolean isCjk(char c) {

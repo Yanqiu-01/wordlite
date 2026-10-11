@@ -20,6 +20,16 @@ import java.util.Locale;
 
 /** Platform shaping with document Run/style metrics; not a Microsoft Word engine. */
 public final class DocxTextLayout {
+    /**
+     * 只有 tools/capture-device 会打开它：开了以后 measure() 把两端对齐那一遍真正看到的东西记在
+     * Paragraph.justifyTrace 上——加宽之前的版面每行落在哪、读到多少余量、加宽之后断点又落在哪。
+     * 这一遍会把交给它的文本改掉（打开一道缝就把那个字自带的 autoSpace span 换掉），所以引擎外面
+     * 没有任何量台能把"加宽之前"那一版重建出来；此前几轮关于"是加宽把粘串挤下去还是宽度模型把它
+     * 挤下去"的争论，缺的就是这份读数。排版在一条线程上跑，这个缓冲区也只被那条线程碰。
+     */
+    public static boolean TRACE_JUSTIFY = false;
+    private static final StringBuilder JUSTIFY_LOG = new StringBuilder();
+
     /** Document-coordinate paragraph layout, shared by pagination and drawing. */
     public static final class Paragraph {
         public final DocxDocument.ParagraphBlock source;
@@ -47,6 +57,9 @@ public final class DocxTextLayout {
          * 我们却报成贴着右边界。没有悬挂标记的行是 0。
          */
         public float[] lineOverhang = new float[0];
+        /** 仅 tools/capture-device 用：见 DocxTextLayout.TRACE_JUSTIFY。平时是 null。 */
+        public String justifyTrace;
+
         Paragraph(DocxDocument.ParagraphBlock source, StaticLayout layout, float x,
                   DocxFieldEngine.DisplayMap displayMap) {
             this.source = source; this.layout = layout; this.x = x; this.displayMap = displayMap;
@@ -156,6 +169,7 @@ public final class DocxTextLayout {
         out.lineCarry = spacing == null ? 0f : spacing.lineCarry;
         out.lineHang = spacing == null ? 0f : spacing.lineHang;
         out.lineOverhang = lineOverhangPx(layout);
+        if (TRACE_JUSTIFY) out.justifyTrace = drainJustifyTrace();
         return out;
     }
 
@@ -331,6 +345,8 @@ public final class DocxTextLayout {
             laidOut = build(text, paint, width, alignment, false, wordWrap);
         }
         final int lines = laidOut.getLineCount();
+        if (TRACE_JUSTIFY) logJustify("base", laidOut, laidOut.getText(), null);
+
         if (lines < 2) return laidOut;
         SpannableStringBuilder copy = new SpannableStringBuilder(text);
         int widened = 0;
@@ -348,7 +364,10 @@ public final class DocxTextLayout {
             // off and the word spaces are spread here instead (wordSpaces says so).
             StaticLayout spread = build(copy, paint, width, alignment, platformJustify, wordWrap);
             int blocked = lineToClear(laidOut, spread, lines, width);
-            if (blocked < 0) return spread;
+            if (blocked < 0) {
+                if (TRACE_JUSTIFY) logJustify("accept", laidOut, copy, spread);
+                return spread;
+            }
             // A line that just gained or lost a whole row is not necessarily the one holding the
             // slack that tipped it over, and neither is a break whose cause sits further up. What is
             // taken back is the line's own measured excess: shaving one pixel per attempt left a
@@ -360,7 +379,57 @@ public final class DocxTextLayout {
                     && !shrinkLine(copy, laidOut, lastLooseLine(copy, laidOut), excess))
                 break;
         }
+        if (TRACE_JUSTIFY) logJustify("give-up", laidOut, copy, null);
         return laidOut;
+    }
+
+
+    /**
+     * 一行一行记下这一遍看到的：起点-终点、墨宽、它读到的余量、这一行现在摊出去几像素；accept 再附上
+     * 加宽之后每行的落点。只给量台看，不进任何产品逻辑。
+     */
+    private static void logJustify(String event, StaticLayout base, CharSequence widenedText,
+                                   StaticLayout spread) {
+        JUSTIFY_LOG.append(event);
+        for (int i = 0; i < base.getLineCount(); i++) {
+            int start = base.getLineStart(i), end = base.getLineEnd(i);
+            float ink = inkWidth(base.getText(), base, i);
+            JUSTIFY_LOG.append('\t').append(start).append('-').append(end)
+                    .append('@').append(whole(ink))
+                    .append('+').append(whole(base.getWidth() - base.getLineLeft(i) - ink))
+                    .append('/').append(whole(widenExtraSum(widenedText, start, end)));
+        }
+        if (spread != null) {
+            JUSTIFY_LOG.append("\t|");
+            for (int i = 0; i < spread.getLineCount(); i++)
+                JUSTIFY_LOG.append('\t').append(spread.getLineStart(i)).append('-')
+                        .append(spread.getLineEnd(i)).append('@')
+                        .append(whole(inkWidth(spread.getText(), spread, i)));
+        }
+        JUSTIFY_LOG.append('\n');
+    }
+
+    private static float whole(float v) {
+        return Math.round(v * 100f) / 100f;
+    }
+
+    /** 把这一段段落攒下的读数取走；只在 TRACE_JUSTIFY 打开时被调用。 */
+    private static String drainJustifyTrace() {
+        String s = JUSTIFY_LOG.toString();
+        JUSTIFY_LOG.setLength(0);
+        return s;
+    }
+
+    /** Whole pixels the pass added to the advances inside this range; 0 when it never spread. */
+    private static float widenExtraSum(CharSequence text, int start, int end) {
+        if (!(text instanceof Spanned)) return 0f;
+        Spanned sp = (Spanned) text;
+        int sum = 0;
+        for (WidenGap gap : sp.getSpans(start, end, WidenGap.class)) {
+            if (sp.getSpanStart(gap) < start || sp.getSpanEnd(gap) > end) continue;
+            sum += gap.extraPx;
+        }
+        return sum;
     }
 
     /** Opens one line's slack across its own gaps; returns how many gaps were opened. */
@@ -611,7 +680,15 @@ public final class DocxTextLayout {
             float raw = next - from;
             float advance = (float) Math.round(raw);
             if (raw <= 0f || Math.abs(raw - advance) > 0.01f) continue;
+            // Two seams can ask for the same character. The token-skip rule moves a seam sitting in
+            // front of "Ag3Sn" onto the character behind the token, and the seam behind that token
+            // asks for the same character; widenGap() would then set a SECOND WidenGap on one range,
+            // which is the one shape the platform cannot size (measured on block 87 line 0: the "（"
+            // carried WidenGap(extra=6) twice, so the line ended 6 px shorter than the slack the pass
+            // believed it had spread, and the paragraph's right edge fell short of Word's).
+            if (!gaps.isEmpty() && gaps.get(gaps.size() - 1)[0] == at) continue;
             gaps.add(new int[]{at, (int) advance, at == i ? 0 : 1});
+
         }
         return gaps.toArray(new int[gaps.size()][]);
     }
@@ -2131,15 +2208,27 @@ public final class DocxTextLayout {
      * paragraph's ink the same to the pixel: 3336.0 / 3336.0, 3912.0 / 3912.0, 1114.0 / 1114.0.
      */
     static final class AtomicRunSpan extends ReplacementSpan {
+        /** What the engine already charged these characters before the glue existed. */
+        private final int naturalPx;
+
+        AtomicRunSpan(int naturalPx) { this.naturalPx = naturalPx; }
+
         @Override public int getSize(Paint paint, CharSequence text, int start, int end,
                                      Paint.FontMetricsInt fm) {
             if (fm != null) paint.getFontMetricsInt(fm);   // the line height is not this span's business
-            int total = 0;
-            // The device bills every character's advance in whole pixels (docs section 21.4: 40 m
-            // measure 480.00 px, not 497.813). Restating that sum, rather than measuring the range at
-            // once, is what keeps every line the width it already was: only the break set changes.
-            for (int i = start; i < end; i++) total += Math.round(paint.measureText(text, i, i + 1));
-            return total;
+            // The span used to re-price its own run one Math.round per character. Every character then
+            // paid up to half a pixel of its own, so a glued string cost MORE than the very same
+            // characters cost unglued -- and the glue, whose entire job is to keep a token on its line,
+            // became the reason the token no longer fitted. Reference document block 87: the engine
+            // prices "Cu/SB/P-Cu/SB/Cu" at 127 px (docs section 33.8) while this span charged 128 px,
+            // and the line held 126 px of room; Word left the token where it was.
+            //
+            // So the span measures nothing. It carries the width the engine already gave these
+            // characters through charAdvance, which is the source the line-capacity arithmetic reads:
+            // one price, one owner. Whether a whole-run charge or a per-character one is what the
+            // device truly bills is a question for the phone, not for this file -- tools/parity-six.ps1
+            // item 5 and tools/page-mismatch-ruler.py answer it.
+            return naturalPx;
         }
         @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
                                    float x, int top, int y, int bottom, Paint paint) {
@@ -2153,16 +2242,21 @@ public final class DocxTextLayout {
      * not its own -- or when another replacement span already owns part of it.
      */
     private static void glueSlashRuns(SpannableStringBuilder text, TextPaint base, int columnPx) {
-        ArrayList<int[]> runs = slashAtomicRuns(text, columnPx, new RunWidth() {
+        // One width function for both questions: is this run narrow enough to glue at all, and what
+        // does the glued run cost. Handing the span the answer of the first is what stops the two
+        // numbers from drifting apart, which is how block 87 ended up 1 px too expensive to stay.
+        RunWidth natural = new RunWidth() {
             @Override public float of(int start, int end) {
                 float total = 0f;
                 for (int i = start; i < end; i++) total += charAdvance(text, base, i);
                 return total;
             }
-        });
+        };
+        ArrayList<int[]> runs = slashAtomicRuns(text, columnPx, natural);
         for (int[] r : runs)
             if (uniformRun(text, base, r[0], r[1]))
-                text.setSpan(new AtomicRunSpan(), r[0], r[1], Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                text.setSpan(new AtomicRunSpan(Math.round(natural.of(r[0], r[1]))),
+                        r[0], r[1], Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
 
     /**
