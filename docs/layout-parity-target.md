@@ -2173,3 +2173,39 @@ Word 导出的 PDF 也在：`[10] LEE D B, YOON J W. Rapid Equiaxed Cu3Sn F`，7
 或者在探针里改成就地打印 `layout.getText()` 的码点（不写字符串，写长度与空格计数）。修报表是第一步，
 它现在正在把 82 行拉丁混排的文本谎报成没有空格，前面所有拿 `lineFull` 做 character-level 对比的结论
 （含第 38 节的分家统计）都要在修好之后重跑。
+
+## 41. 两端对齐：西文行根本没被摊开，原因是拉伸被整段丢回去（改前 `glueprice1`，改后 `justfix4`）
+
+`py tools/right-edge-audit.py artifacts/agent-layout-verify/<tag>`（本次新增的尺子，只测量）：
+
+| 口径（段末行不计，Word 自己也不拉伸它） | 改前 | 改后 |
+| --- | --- | --- |
+| 纯西文行离右边界 > 2 px | **50 / 58** | **11 / 58** |
+| 纯西文行一个缝都没摊（openGaps=0 且 lineStretchPx=0） | 54 | 15 |
+| 含汉字行离右边界 > 2 px | 18 / 331 | 16 / 331 |
+| 最差一行差多少 | 97 px（blk 341） | 55 px（blk 372，Word 同一行自己差 52 px） |
+| `justify-trace.tsv` 以 give-up 收场的段 | **21 / 24** | **1 / 6**（只剩 para 69） |
+
+一致性一条没动：第 6 条 `tools/edge-parity.ps1 -Impl .../new` 改前改后都是**版内右边界 108/111 行在
+1 px 内、超过 8 px 的 0 行、越界 9 行且 Word 自己越界的正是那 9 行**；第 7 条 `257 of 343 = 74.9%`、
+页归属 `0 of 104`、总页 28、`tools/word-break-model.py` 的分歧分类逐格相同。**拉伸一改没改断行。**
+
+真凶不在算法缺件，`wordSpaceOffsets()` 与 `MAX_WORD_SPACE_STRETCH_PX` 早就写好了。链子是这条：
+
+1. 采样报表 `justify-trace.tsv` 的 `gave_up` 列：所有西文参考文献段都是 1，即摊过又被丢回去。
+2. 为什么会丢：`spreadLine()` 的余量按墨宽算（Word 把换行留下的行尾空格留在边界外、不拉伸），
+   可是断行器仍要把那 4 px 的空格塞进这一行。把余量摊到刚刚满格，行尾空格放不下就掉到下一行，
+   行起点一变，`lineToClear()` 就判"断点动了"，重试只按超出量退 2 px，预算 `2*lines+4` 远不够
+   退掉 98 px，于是 `give-up`——整段一像素都不摊。
+3. 所以纯西文段（每条参考文献自己一段，段内没有汉字缝）右边界全塌：差 17~97 px。Word 量出来是
+   这些行里 47/86 齐到自己那一侧的边界（悬挂缩进后 avail=538.9 px），空格步进从 4.00 px 被拉到
+   4.62~7.66 px，即它照摊不误。
+
+改的两处都在 `DocxTextLayout.java`：`spreadLine()` 在西文空格那一路把行尾空格的钱也记进"不能占的
+地方"（对墨宽算余量、对断点算实占），并留 1 px 保险；`justifyEastAsian()` 的重试外面再套一层
+guard=1..3，逐次多留 1 px，段落保住"断点还站得住的最大摊量"，而不是全丢。
+
+顺带：`tools/device-probe/DeviceCapture.java` 的 `clean()` 把空格和制表符一起丢掉，`lineFull` 因此
+599 行里带空格的是 0 行。现在 `lineFull` 保持老口径不动（老脚本按它对齐），新列 `lineText` 原样
+带空格（tab 仍写成 `<tab>`，`edge-parity.ps1` 的 `Norm` 认这个记号），另加 `lineSpaces` 与
+`lineCodepoints` 两列。这一改动把 `edge-parity.ps1` 的匹配从 3/210 行恢复到 171/210 行。

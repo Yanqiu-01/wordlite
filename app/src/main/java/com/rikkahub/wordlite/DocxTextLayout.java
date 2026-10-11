@@ -348,36 +348,46 @@ public final class DocxTextLayout {
         if (TRACE_JUSTIFY) logJustify("base", laidOut, laidOut.getText(), null);
 
         if (lines < 2) return laidOut;
-        SpannableStringBuilder copy = new SpannableStringBuilder(text);
-        int widened = 0;
-        for (int line = 0; line < lines - 1; line++)
-            widened += spreadLine(copy, laidOut, width, line, wordSpaces);
-        if (widened == 0) return laidOut;
-        // Widening may never move a line break: pagination and the measured Word parity both rest on
-        // the same breaks. Slack is restated from the laid-out geometry, so a break that still moved
-        // means the shaping changed underneath us; take that single line's slack back out and lay the
-        // paragraph out again, rather than throwing away every line's justification.
-        for (int attempt = 0, budget = 2 * lines + 4; attempt < budget; attempt++) {
-            // platformJustify is what measure() decided: while the platform keeps the column it also
-            // keeps the word spaces of Latin runs, and the CJK gaps here are sized from the slack
-            // that pass left over, so nothing is stretched twice. When it lost the column the pass is
-            // off and the word spaces are spread here instead (wordSpaces says so).
-            StaticLayout spread = build(copy, paint, width, alignment, platformJustify, wordWrap);
-            int blocked = lineToClear(laidOut, spread, lines, width);
-            if (blocked < 0) {
-                if (TRACE_JUSTIFY) logJustify("accept", laidOut, copy, spread);
-                return spread;
+        // A line filled to the exact column is a break the platform may still move: its trailing
+        // blank, or one character of the next token, finds room in the last pixel, and the retry below
+        // then takes the whole paragraph's justification back out. Every Latin reference line of the
+        // sample document lost its stretch that way (blocks 341-371 of
+        // artifacts/agent-layout-verify/spacefix1, justify-trace.tsv column gave_up). Each attempt
+        // leaves one more pixel of the slack unused, so a paragraph keeps the widest spread whose
+        // breaks still survive instead of falling back to no justification at all.
+        SpannableStringBuilder copy = null;
+        for (int guard = 1; guard <= 3; guard++) {
+            copy = new SpannableStringBuilder(text);
+            int widened = 0;
+            for (int line = 0; line < lines - 1; line++)
+                widened += spreadLine(copy, laidOut, width, line, wordSpaces, guard);
+            if (widened == 0) return laidOut;
+            // Widening may never move a line break: pagination and the measured Word parity both rest
+            // on the same breaks. Slack is restated from the laid-out geometry, so a break that still
+            // moved means the shaping changed underneath us; take that single line's slack back out
+            // and lay the paragraph out again, rather than throwing away every line's justification.
+            for (int attempt = 0, budget = 2 * lines + 4; attempt < budget; attempt++) {
+                // platformJustify is what measure() decided: while the platform keeps the column it
+                // also keeps the word spaces of Latin runs, and the CJK gaps here are sized from the
+                // slack that pass left over, so nothing is stretched twice. When it lost the column
+                // the pass is off and the word spaces are spread here (wordSpaces says so).
+                StaticLayout spread = build(copy, paint, width, alignment, platformJustify, wordWrap);
+                int blocked = lineToClear(laidOut, spread, lines, width);
+                if (blocked < 0) {
+                    if (TRACE_JUSTIFY) logJustify("accept", laidOut, copy, spread);
+                    return spread;
+                }
+                // A line that just gained or lost a whole row is not necessarily the one holding the
+                // slack that tipped it over, and neither is a break whose cause sits further up. What
+                // is taken back is the line's own measured excess: shaving one pixel per attempt left
+                // a reference line that only had to give a space back chewing through the whole retry
+                // budget and losing every line's justification in the paragraph.
+                int excess = Math.max(1, (int) Math.ceil(inkWidth(spread.getText(), spread, blocked)
+                        - width + spread.getLineLeft(blocked)) + 1);
+                if (!shrinkLine(copy, laidOut, blocked, excess)
+                        && !shrinkLine(copy, laidOut, lastLooseLine(copy, laidOut), excess))
+                    break;
             }
-            // A line that just gained or lost a whole row is not necessarily the one holding the
-            // slack that tipped it over, and neither is a break whose cause sits further up. What is
-            // taken back is the line's own measured excess: shaving one pixel per attempt left a
-            // reference line that only had to give a space back chewing through the whole retry
-            // budget and losing every line's justification in the paragraph.
-            int excess = Math.max(1, (int) Math.ceil(inkWidth(spread.getText(), spread, blocked)
-                    - width + spread.getLineLeft(blocked)) + 1);
-            if (!shrinkLine(copy, laidOut, blocked, excess)
-                    && !shrinkLine(copy, laidOut, lastLooseLine(copy, laidOut), excess))
-                break;
         }
         if (TRACE_JUSTIFY) logJustify("give-up", laidOut, copy, null);
         return laidOut;
@@ -434,7 +444,7 @@ public final class DocxTextLayout {
 
     /** Opens one line's slack across its own gaps; returns how many gaps were opened. */
     private static int spreadLine(SpannableStringBuilder copy, StaticLayout laidOut, int width,
-                                  int line, boolean wordSpaces) {
+                                  int line, boolean wordSpaces, int guard) {
         int start = laidOut.getLineStart(line);
         int end = laidOut.getLineEnd(line);
         while (end - start > 1 && Character.isWhitespace(copy.charAt(end - 1))) end--;
@@ -468,7 +478,18 @@ public final class DocxTextLayout {
                     caps[i] = i < gaps.length ? MAX_GAP_STRETCH_PX : MAX_WORD_SPACE_STRETCH_PX;
                     room += caps[i];
                 }
-                int[] share = spreadAcrossGaps(Math.min((int) Math.floor(slack + 0.001f), room), caps);
+                // The blanks this wrap left at the tail sit outside Word's boundary and stay
+                // unstretched, yet the platform's breaker still has to fit them on the line. Fill
+                // those pixels and the blank drops to the next line, the break moves, and the retry
+                // in justifyEastAsian throws the paragraph's whole justification away -- which is how
+                // every Latin reference line of the sample document ended up ragged (blocks 341-371
+                // of artifacts/agent-layout-verify/spacefix1, justify-trace.tsv gave_up=1). The tail
+                // is therefore billed twice: as nothing to the ink, as real room to the break, plus
+                // one pixel of guard and one more per retry.
+                float tail = laidOut.getLineWidth(line) - inkWidth(copy, laidOut, line);
+                int spare = (int) Math.floor(slack + 0.001f - Math.max(0f, tail));
+                int want = Math.min(spare, room) - guard;
+                int[] share = spreadAcrossGaps(Math.max(0, want), caps);
                 int widened = 0;
                 for (int i = 0; i < open.length; i++)
                     if (share[i] > 0)
