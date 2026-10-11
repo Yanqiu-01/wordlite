@@ -23,6 +23,13 @@ public final class FontScriptMetrics {
         ascentFraction = lineHeightRatio > 0 ? winAscentRatio / lineHeightRatio : 0.8f;
     }
 
+    /** 换一张行高比值出来的副本:上伸占比照旧,脚本折算不动。 */
+    FontScriptMetrics withLineHeightRatio(float ratio) {
+        if (lineHeightRatio == ratio || ratio <= 0f) return this;
+        return new FontScriptMetrics(superscriptScale, superscriptOffset, subscriptScale,
+                subscriptOffset, ratio * ascentFraction, ratio * (1f - ascentFraction));
+    }
+
     public float scale(boolean superscript) {
         return superscript ? superscriptScale : subscriptScale;
     }

@@ -6,11 +6,24 @@ Word 的分页真值只能靠 COM 一段一段问（tools/word-page-stack.ps1）
 正好等于页高，不需要任何估算。
 
 命令：  py tools/pdf-line-truth.py [-Pdf 路径] [-Out 路径]
+        py tools/pdf-line-truth.py -Steps [-Size 12] [-Ratio 1.25]
+-Steps 不写 TSV，改打相邻两行行顶之差的分布（按字号与中英分组、页眉页脚剔除），并换算成 em：
+WordLineHeights 表里的实测 em 就是从这里来的，改表里的数必须重跑这条命令。
 输出 TSV 前两行是 # 开头的指纹（sha256、页高、PyMuPDF 版本），其余每行一条：
   page  line  top  baseline  bottom  x0  x1  size  fonts  text
 坐标是 PDF 点（1pt = 4/3 我方文档像素），原点在页顶，top/bottom 是墨迹盒（不是行盒）。
 """
-import argparse, hashlib, sys, pymupdf
+import argparse, collections, hashlib, re, statistics, sys, pymupdf
+
+CJK_RE = re.compile(u"[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]")
+LAT_RE = re.compile(u"[A-Za-z0-9]")
+
+
+def kind(text):
+    """一行算中文还是西文：有中日韩文字或全角标点算中文，只有字母数字算西文。"""
+    if CJK_RE.search(text):
+        return "CJK"
+    return "LAT" if LAT_RE.search(text) else "OTH"
 
 def sha256(path):
     h = hashlib.sha256()
@@ -23,10 +36,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-Pdf", default="artifacts/agent-typeset/pdf-truth/input-liu.pdf")
     ap.add_argument("-Out", default="artifacts/agent-layout-verify/word-pdf-lines.tsv")
+    ap.add_argument("-Steps", action="store_true",
+                    help="打相邻行顶之差的分布（WordLineHeights 的实测 em 出处），不写 TSV")
+    ap.add_argument("-Size", type=float, default=12.0, help="-Steps 只量这个字号的行，单位 pt")
+    ap.add_argument("-Ratio", type=float, default=1.25,
+                    help="-Steps 换算 em 用的行距倍数（w:line/240）")
     a = ap.parse_args()
     doc = pymupdf.open(a.Pdf)
     rows = ["# pdf=%s" % a.Pdf, "# sha256=%s  pymupdf=%s  pages=%d" % (sha256(a.Pdf), pymupdf.__version__, doc.page_count)]
     heights = set()
+    all_pages = []
     for i in range(doc.page_count):
         page = doc[i]
         heights.add(round(page.rect.height, 2))
@@ -66,9 +85,31 @@ def main():
             if r[7] not in hit[7]:
                 hit[7] = (hit[7] + " " + r[7]).strip()[:40]
         merged.sort(key=lambda m: (m[1], m[3]))
+        all_pages.append(merged)
         for n, m in enumerate(merged):
             rows.append("\t".join([str(i + 1), str(n), "%.2f" % m[0], "%.2f" % m[1], "%.2f" % m[2],
                                    "%.2f" % m[3], "%.2f" % m[4], "%.2f" % m[5], m[6], m[7]]))
+    if a.Steps:
+        groups = collections.defaultdict(list)
+        for merged in all_pages:
+            body = [m for m in merged if 100.0 < m[0] < 740.0]      # 页眉页脚不算
+            for x, y in zip(body, body[1:]):
+                step_pt = y[0] - x[0]
+                if not (15.0 < step_pt < 34.0):
+                    continue
+                if round(x[5], 2) != round(a.Size, 2) or round(y[5], 2) != round(a.Size, 2):
+                    continue
+                if kind(x[7]) != kind(y[7]) or kind(x[7]) == "OTH":
+                    continue
+                groups[kind(x[7])].append(step_pt * 96.0 / 72.0)
+        for name in sorted(groups):
+            v = sorted(groups[name])
+            med = statistics.median(v)
+            print("size=%.0fpt %s n=%d median=%.3fpx mean=%.3fpx em=%.5f"
+                  % (a.Size, name, len(v), med, sum(v) / len(v),
+                     med / a.Ratio / (a.Size * 96.0 / 72.0)))
+            print("    分布:", collections.Counter(round(x, 2) for x in v).most_common(5))
+        return
     with open(a.Out, "w", encoding="utf-8", newline="\n") as f:
         f.write("page\tline\ttop\tbaseline\tbottom\tx0\tx1\tsize\tfonts\ttext\n")
         f.write("\n".join(rows[2:]) + "\n")

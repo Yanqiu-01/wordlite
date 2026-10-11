@@ -18,15 +18,15 @@ import java.util.HashMap;
  *
  * Word 真值来自桌面 Word 16.0 COM 的逐行基线坐标（`artifacts/agent-typeset/word-line-pitch.ps1`，
  * 121 段 / 508 行 / 380 个可测行距），结论写在 `docs/layout-parity-target.md`：12pt、w:line=300、
- * 不开网格的中文正文，相邻基线距离中位 26.267px；纯西文的参考文献行 23.533px。字库表里任何一个和
+ * 不开网格的中文正文，相邻基线距离中位 25.92px；纯西文的参考文献行 23.04px。字库表里任何一个和
  * （宋体 1.000 em、Times 1.1074 em、hhea+lineGap 1.141 em）都算不出这两个数，所以只能实测。
  * 手机上的真实渲染不在这里测，由 tools/capture-device.ps1 与 word-parity/edge-parity 两条线负责。
  */
 public final class WordLineHeightRegression {
     private static int checks;
     /** Word 真值（px，96dpi 文档单位）。这两个数一改就必须重新量。 */
-    private static final double WORD_CJK_PX = 26.267, WORD_LATIN_PX = 23.533;
-    private static final float SONG_EM = 1.31335f, TIMES_EM = 1.17665f;
+    private static final double WORD_CJK_PX = 25.92, WORD_LATIN_PX = 23.04;
+    private static final float SONG_EM = 1.296f, TIMES_EM = 1.152f;
     private static final String ROOT = new File(System.getProperty("user.dir")).getAbsolutePath();
     private static final HashMap<String, FontScriptMetrics> CACHE =
             new HashMap<String, FontScriptMetrics>();
@@ -110,27 +110,27 @@ public final class WordLineHeightRegression {
                 "黑体没量过，返回 null 走字库表推导，不拿宋体的数凑");
         check(WordLineHeights.ratioFor(DocxFontAssets.CALIBRI) == null, "Calibri 没量过，同样不猜");
         check(WordLineHeights.ratioFor(null) == null, "路径为空返回 null，不许抛");
-        close(WORD_CJK_PX / 1.25d / 16d, SONG_EM, 0.0005d, "宋体那条能反推回 Word 实测的 26.267px");
-        close(WORD_LATIN_PX / 1.25d / 16d, TIMES_EM, 0.0005d, "Times 那条能反推回 Word 实测的 23.533px");
+        close(WORD_CJK_PX / 1.25d / 16d, SONG_EM, 0.0005d, "宋体那条能反推回 Word 实测的 25.92px");
+        close(WORD_LATIN_PX / 1.25d / 16d, TIMES_EM, 0.0005d, "Times 那条能反推回 Word 实测的 23.04px");
     }
 
-    /** Word 的 auto 行距是一步小数：26.267，不是两步取整的 26。 */
+    /** Word 的 auto 行距是一步小数：25.92，不是两步取整的 26。 */
     private static void advanceIsOneStepFractional() {
         close(WordLineHeights.advancePx(12f * SONG_EM, 300, 1f), WORD_CJK_PX, 0.02d,
-                "12pt 宋体 / w:line=300 一行占多高（Word 真值 26.267px）");
+                "12pt 宋体 / w:line=300 一行占多高（Word 真值 25.92px）");
         close(WordLineHeights.advancePx(12f * TIMES_EM, 300, 1f), WORD_LATIN_PX, 0.02d,
-                "12pt Times / w:line=300 一行占多高（Word 真值 23.533px）");
+                "12pt Times / w:line=300 一行占多高（Word 真值 23.04px）");
         check(Math.round(WordLineHeights.advancePx(12f * SONG_EM, 300, 1f)) == 26,
                 "画出来的行盒仍落在整数上：26px");
-        close(WordLineHeights.advancePx(12f * SONG_EM, 300, 1f) - 26f, 0.267d, 0.01d,
-                "分页要补的那一截小数（26.267 - 26）");
-        close((WordLineHeights.advancePx(12f * SONG_EM, 300, 1f) - 26f) * 27d, 7.2d, 0.2d,
-                "这一截在一页 27 行上累计多少 px：够把一段翻到下一页，所以必须补");
-        close(WordLineHeights.advancePx(12f * SONG_EM, 240, 1f), 21.013d, 0.02d,
-                "单倍行距（w:line=240）时同一张脸给 21.013px");
-        close(WordLineHeights.advancePx(12f * SONG_EM, 0, 1f), 21.013d, 0.02d,
+        close(WordLineHeights.advancePx(12f * SONG_EM, 300, 1f) - 26f, -0.08d, 0.01d,
+                "分页要补的那一截小数（25.92 - 26），是往回还，不是往外补");
+        close((WordLineHeights.advancePx(12f * SONG_EM, 300, 1f) - 26f) * 27d, -2.16d, 0.2d,
+                "这一截在一页 27 行上累计多少 px：整数行盒比 Word 高 2.16px，不补就每页多占一点");
+        close(WordLineHeights.advancePx(12f * SONG_EM, 240, 1f), 20.736d, 0.02d,
+                "单倍行距（w:line=240）时同一张脸给 20.736px");
+        close(WordLineHeights.advancePx(12f * SONG_EM, 0, 1f), 20.736d, 0.02d,
                 "没有 w:line 时按单倍算，不乘比例");
-        close(WordLineHeights.advancePx(10.5f * SONG_EM, 300, 1f), 22.984d, 0.02d,
+        close(WordLineHeights.advancePx(10.5f * SONG_EM, 300, 1f), 22.68d, 0.02d,
                 "五号字（10.5pt）同一条算式，比值与字号无关");
         close(WordLineHeights.advancePx(12f * SONG_EM, 300, 0.5f) * 2f, WORD_CJK_PX, 0.02d,
                 "缩放一页显示时同一比例缩小，补的那截小数也同比缩小");
@@ -141,15 +141,15 @@ public final class WordLineHeightRegression {
         DocxDocument.ParagraphBlock body = paragraph("宋体", "Times New Roman",
                 new Object[]{"接头性能随连接时间变化。", "宋体", "Times New Roman", 12, false});
         WordLineHeights.Height h = WordLineHeights.tallest(body, REAL, "宋体");
-        close(h.pt, 12d * SONG_EM, 0.002d, "宋体正文的行高由宋体撑（12pt × 1.31335）");
+        close(h.pt, 12d * SONG_EM, 0.002d, "宋体正文的行高由宋体撑（12pt × 1.296）");
         check(DocxFontAssets.SONG.equals(DocxFontAssets.pathFor(h.family)),
-                "宋体实测 1.31335 em 已高于 Times 的 1.17665 em，中西混排时说话的是宋体");
+                "宋体实测 1.296 em 已高于 Times 的 1.152 em，中西混排时说话的是宋体");
 
         DocxDocument.ParagraphBlock heading = paragraph("黑体", "黑体",
                 new Object[]{"第一章 绪论", "黑体", "黑体", 16, false},
                 new Object[]{"（见表 1-1）", "黑体", "Times New Roman", 12, false});
         WordLineHeights.Height hh = WordLineHeights.tallest(heading, REAL, "黑体");
-        close(hh.pt, 16d, 0.002d, "16pt 黑体标题的行高由黑体撑（16pt × 1.000 > 12pt × 1.17665）");
+        close(hh.pt, 16d, 0.002d, "16pt 黑体标题的行高由黑体撑（16pt × 1.000 > 12pt × 1.152）");
         check(DocxFontAssets.HEI.equals(DocxFontAssets.pathFor(hh.family)),
                 "字号大的没量过的脸赢下行高：这一段不许带小数");
 
@@ -169,7 +169,7 @@ public final class WordLineHeightRegression {
                 "宋体正文带实测行高");
         check(WordLineHeights.carries(paragraph("SimSun", "Arial",
                 new Object[]{"正文。", "SimSun", "Arial", 12, false}), REAL, "SimSun"),
-                "SimSun 与宋体认到同一张 song.ttc，实测 1.31335 也高过 Arial 的 1.1172，照旧算量过");
+                "SimSun 与宋体认到同一张 song.ttc，实测 1.296 也高过 Arial 的 1.1172，照旧算量过");
         check(WordLineHeights.carries(paragraph("宋体", "Times New Roman",
                 new Object[]{"References", "宋体", "Times New Roman", 12, false}), REAL, "宋体"),
                 "纯西文段同样量过：Times 自己就在表里");
@@ -186,11 +186,11 @@ public final class WordLineHeightRegression {
         check(!WordLineHeights.carries(paragraph("宋体", "Calibri",
                 new Object[]{"Abstract", "宋体", "Calibri", 12, false}), REAL, "宋体"),
                 "纯西文的 Abstract 由 Calibri 撑行高：段里写着宋体也不算量过。2.1.1 那版就是把中文脸的"
-                        + " 1.31335 套到这 19 段参考文献上，每行多算 2.7~3.6px（layout-parity-target 第 7 节 A 表）");
+                        + " 1.296 套到这 19 段参考文献上，每行多算 2.88px（layout-parity-target 第 7 节 A 表）");
         check(WordLineHeights.carries(paragraph("宋体", "Times New Roman",
                 new Object[]{"接头性能随连接时间变化，Cu 含量 3%。", "宋体", "Times New Roman", 12, false}),
                 REAL, "宋体"),
-                "中西混排：这一笔里有中文，中文脸 1.31335 高于 Times 1.17665，照旧带实测行高");
+                "中西混排：这一笔里有中文，中文脸 1.296 高于 Times 1.152，照旧带实测行高");
         check(!WordLineHeights.carries(null, REAL, "宋体"), "空段落返回 false，不许抛");
         check(!WordLineHeights.carries(paragraph("宋体", "Times New Roman"), REAL, "宋体"),
                 "整段没有可测的 run：退回段默认字体判断，不猜");
@@ -208,21 +208,23 @@ public final class WordLineHeightRegression {
 
     /**
      * Word 分页看的是基线，不是整行行盒。真值：版心 865.53px（841.9 - 107.7 - 85.05 = 649.15pt）、
-     * 12pt 宋体 / w:line=300 行距 26.267px，Word 每页实排 33 行（artifacts/word/page_budget.tsv 里
-     * 排得最满那页的 last_body_line）。33 × 26.267 = 866.81px 已经比版心高，按整行行盒判只装得下 32 行
-     * ——手机上那一版就是在这里每页少一行，整篇比 Word 多出两页（word-parity：错位段 50 → 74）。
+     * 12pt 宋体 / w:line=300 行距 25.92px，Word 每页实排 33 行（artifacts/word/page_budget.tsv 里
+     * 排得最满那页的 last_body_line）。33 × 25.92 = 855.36px 仍在 865.53px 的版心里，第 33 行的基线落在 850.44px。
+     * 早先记的 26.267px 让同一笔账变成 33 × 26.267 = 866.81px，比版心还高，判下来每页只装得下
+     * 32 行——那一版把版心算少了，多出来两页；换成 PDF 实测的 25.92px 之后这条判断不再靠
+     * 末行垂量兜底，整行行盒本身就装得下 33 行。
      */
     private static void pageBudgetCountsBaselinesNotLineBoxes() {
         float capacity = 865.5333f;
         float advance = WordLineHeights.advancePx(12f * SONG_EM, 300, 1f);
         int ascent = Math.round(26f * 0.8f);                       // Spacing.chooseHeight 画上那一档
         float hang = advance - ascent;
-        close(advance, WORD_CJK_PX, 0.02d, "这一版每行占的高度就是 Word 实测的 26.267px");
-        close(hang, 5.267d, 0.01d, "末行允许垂到版心以下的量（26.267 - 21）");
-        close(ascent + 32d * advance, 861.54d, 0.02d,
-                "第 33 行的基线落在 861.54px，还在 865.53px 的版心里：所以 Word 排得下 33 行");
-        check(linesOnPage(capacity, advance, 0f, 40) == 32,
-                "整行行盒装进版心：只排得下 32 行——这正是手机上多出来的那两页");
+        close(advance, WORD_CJK_PX, 0.02d, "这一版每行占的高度就是 Word 实测的 25.92px");
+        close(hang, 4.92d, 0.01d, "末行允许垂到版心以下的量（25.92 - 21）");
+        close(ascent + 32d * advance, 850.44d, 0.02d,
+                "第 33 行的基线落在 850.44px，还在 865.53px 的版心里：所以 Word 排得下 33 行");
+        check(linesOnPage(capacity, advance, 0f, 40) == 33,
+                "整行行盒装进版心：25.92px 的口径下本身就排得下 33 行，与 Word 每页行数对上");
         check(linesOnPage(capacity, advance, hang, 40) == 33,
                 "把末行的下伸还给版心：排 33 行，与 Word 每页行数对上");
         check(linesOnPage(capacity, advance, hang, 100) == 33,
@@ -276,8 +278,8 @@ public final class WordLineHeightRegression {
      * 行高由这一行里真正落了笔的那张脸说了算，不是由段里写着哪几张脸说了算。
      *
      * 这条是 2.1.1 实测行高被真机对账否掉的直接原因之一：`tallest` 原来无条件取
-     * max(中西比值)，纯西文的参考文献段被中文脸抬到 26.267px，Word 量到 23.533px，
-     * 19 段每行多算 2.7~3.6px，整篇多算出一页半（docs/layout-parity-target.md 第 7 节 A/B 表）。
+     * max(中西比值)，纯西文的参考文献段被中文脸抬到 25.92px，Word 量到 23.04px，
+     * 19 段每行多算 2.88px，整篇多算出一页半（docs/layout-parity-target.md 第 7 节 A/B 表）。
      */
     private static void faceFollowsTheCharactersOnTheLine() {
         boolean savedFlag = WordLineHeights.APPLIED_TO_LAYOUT;
@@ -287,15 +289,15 @@ public final class WordLineHeightRegression {
                 paragraph("宋体", "Times New Roman",
                         new Object[]{"[12] Kim T, Su W. Copper bonding at 250 C for 30 min.",
                                 "宋体", "Times New Roman", 12, false}), REAL, "宋体");
-        close(latin.pt, 12d * TIMES_EM, 0.002d, "纯西文段按 Times 算行高（12pt × 1.17665），不跟中文脸走");
+        close(latin.pt, 12d * TIMES_EM, 0.002d, "纯西文段按 Times 算行高（12pt × 1.152），不跟中文脸走");
         check(DocxFontAssets.TIMES.equals(DocxFontAssets.pathFor(latin.family)),
-                "撑起纯西文行高的是 Times：这一段的小数按 23.533px 补，不是 26.267px");
+                "撑起纯西文行高的是 Times：这一段的小数按 23.04px 补，不是 25.92px");
 
         WordLineHeights.Height cjk = WordLineHeights.tallest(
                 paragraph("宋体", "Times New Roman",
                         new Object[]{"接头强度 245MPa，孔隙率 3.1%。", "宋体", "Times New Roman", 12, false}),
                 REAL, "宋体");
-        close(cjk.pt, 12d * SONG_EM, 0.002d, "同字号混排仍由中文脸撑：12pt × 1.31335");
+        close(cjk.pt, 12d * SONG_EM, 0.002d, "同字号混排仍由中文脸撑：12pt × 1.296");
         check(DocxFontAssets.SONG.equals(DocxFontAssets.pathFor(cjk.family)),
                 "这一行里有中文，中文脸就是说了算的那一张");
 
@@ -310,7 +312,7 @@ public final class WordLineHeightRegression {
                         new Object[]{"\u2014\u2026\u201c\u201d\u00b7", "宋体", "Times New Roman", 12, false}),
                 REAL, "宋体");
         check(DocxFontAssets.TIMES.equals(DocxFontAssets.pathFor(ambiguous.family)),
-                "宽度歧义那一批（— … “ ” ·）归西文脸：唯一的西文真值 23.533px 就是靠这条守住的");
+                "宽度歧义那一批（— … “ ” ·）归西文脸：唯一的西文真值 23.04px 就是靠这条守住的");
         check(WordLineHeights.isEastAsianChar('\u6c49') && WordLineHeights.isEastAsianChar('\u3001')
                         && WordLineHeights.isEastAsianChar('\uff08') && WordLineHeights.isEastAsianChar('\uac00'),
                 "汉字、CJK 标点、全角形式、谚文都算中文字符");
@@ -384,7 +386,8 @@ public final class WordLineHeightRegression {
         overrideKeepsEverythingElse();
         fixedLineHeightIsAnAbsoluteLength();
         System.out.println("SUMMARY " + checks + " line-height assertions passed (Word truth from "
-                + "desktop Word 16.0 COM baselines, font metrics read from the bundled assets; "
+                + "the Word-exported PDF line tops via tools/pdf-line-truth.py -Steps plus desktop Word "
+                + "16.0 COM baselines, font metrics read from the bundled assets; "
                 + "device rendering is checked by capture-device/word-parity, not here).");
     }
 }

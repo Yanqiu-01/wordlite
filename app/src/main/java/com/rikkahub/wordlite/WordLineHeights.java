@@ -36,13 +36,17 @@ final class WordLineHeights {
     /** 键取 DocxFontAssets 的资源路径：决定行高的是真正落笔那张脸，不是文档里写的字体名。 */
     private static final LinkedHashMap<String, Float> EM = new LinkedHashMap<String, Float>();
     static {
-        /* 宋体：12pt / w:line=300 / auto / 不开 snapToGrid，Word 16.0 COM 相邻基线距离中位 26.267px
-           （58 段纯中文行、逐行样本 380 个），26.267 ÷ 1.25 ÷ 16 = 1.31335 em。 */
-        EM.put(DocxFontAssets.SONG, Float.valueOf(1.31335f));
-        /* Times New Roman：同一篇里纯西文的参考文献行，Word 中位 23.533px（19 段），
-           23.533 ÷ 1.25 ÷ 16 = 1.17665 em。混排行仍由 DocxTextLayout 取 max(中西) 决定整行高，
-           所以中文段落里这两条同时成立：中文行 26.267px、纯西文行 23.533px。 */
-        EM.put(DocxFontAssets.TIMES, Float.valueOf(1.17665f));
+        /* 宋体：Word 自己导出的 PDF 逐行量（py tools/pdf-line-truth.py -Steps：同页相邻两行行顶
+           之差，只取相邻两行都是 12pt 且都是中日韩文字的行），中位 19.44pt = 25.92px，
+           397 个样本，25.92 ÷ 1.25 ÷ 16 = 1.296 em。原先记的是 Word 16.0 COM 相邻基线中位
+           26.267px（1.31335 em），那个数偏高 0.35px：一页 33 行就差 11.5px，版心少装一行，
+           真机对账 28 页变 30 页、错页段 11 变 75。分页要的是版面上的行位置，不是 COM
+           报出来的基线距离。 */
+        EM.put(DocxFontAssets.SONG, Float.valueOf(1.296f));
+        /* Times New Roman：同一份 PDF 里 12pt 的纯西文行（参考文献），中位 23.04px，78 个样本，
+           23.04 ÷ 1.25 ÷ 16 = 1.152 em。原记的 23.533px（COM）同样偏高。混排行由逐字符挑脸
+           决定：笔里有中日韩文字才算中文行，纯西文行留在 Times。 */
+        EM.put(DocxFontAssets.TIMES, Float.valueOf(1.152f));
     }
     /** 这张脸量过就返回实测 em，没量过返回 null（调用方退回字体表推导）。 */
     static Float ratioFor(String path) {
@@ -106,6 +110,12 @@ final class WordLineHeights {
      * 结果拿 Times 的实测小数去补一段没量过的黑体——那是凭空造出来的行高。
      */
     static Height tallest(DocxDocument.ParagraphBlock p, Metrics metrics, String fallbackFamily) {
+        return tallest(p, metrics, fallbackFamily, APPLIED_TO_LAYOUT);
+    }
+
+    /** perCharFace 为真时按 Word 的逐字符挑脸;为假时沿用无条件取 max(中西) 的老取法。 */
+    static Height tallest(DocxDocument.ParagraphBlock p, Metrics metrics, String fallbackFamily,
+                          boolean perCharFace) {
         int baseHalf = p != null && p.baseRunStyle != null ? p.baseRunStyle.fontSizeHalfPoints : -1;
         String baseEA = p != null && p.baseRunStyle != null ? p.baseRunStyle.eastAsiaFontFamily : null;
         String baseLatin = p == null || p.baseRunStyle == null ? null
@@ -125,7 +135,7 @@ final class WordLineHeights {
                 String face;
                 float ratio;
                 FontScriptMetrics scriptMetrics;
-                if (APPLIED_TO_LAYOUT) {
+                if (perCharFace) {
                     /* Word 按字符挑脸：这一笔里出现了中日韩文字或全角标点才轮到中文脸，只有西文字母、
                        数字和半角符号才轮到西文脸。无条件取 max(中西) 等于让没参与这一行的中文脸替纯西文行
                        定行高：真机对账量到 19 段纯西文参考文献被抬到 26.267px，Word 是 23.533px，每行多算
@@ -186,18 +196,33 @@ final class WordLineHeights {
     static boolean AUTO_ADVANCE_ONLY = true;
 
     /**
-     * 计费脸的实测 em 与字库表 em 之比;计费脸没量过返回 0。用它把单一行高从字库表口径
-     * 换算到 Word 实测口径,挑脸一次都没动。
+     * 把字库表的行高比值换成实测比值的替换层。挑脸的规则一个字没动,比的换成 Word 的口径。
+     *
+     * 真机诊断打出来的正是这张脸:正文里有中文,但字库表里 Times 的 1.1074 比宋体的表值高,
+     * 于是中文行按 Times 的 23.53px 摆行,而 Word 给中文行的是宋体的 26.27px。按字库表挑脸
+     * 配上实测数,配错了脸。
+     */
+    private static Metrics measuredMetrics(final Metrics base) {
+        return new Metrics() {
+            @Override public FontScriptMetrics forFamily(String family) {
+                FontScriptMetrics m = base.forFamily(family);
+                Float em = family == null ? null : ratioFor(DocxFontAssets.pathFor(family));
+                return m == null ? null : m.withLineHeightRatio(em == null ? m.lineHeightRatio : em);
+            }
+        };
+    }
+
+    /**
+     * 同一支笔在 Word 口径下该由哪张脸定行高:字库表口径与实测口径各扫一次,取两者之比。
+     * 中文行因此落到宋体,纯西文行仍留在 Times;没量过的脸比值 1,一个字都不改。
      */
     static float autoEmScale(DocxDocument.ParagraphBlock p, Metrics metrics, String fallbackFamily) {
         if (p == null) return 0f;
-        Height h = tallest(p, metrics, fallbackFamily);
-        Float em = h.family == null ? null : ratioFor(DocxFontAssets.pathFor(h.family));
-        if (em == null) return 0f;
-        FontScriptMetrics m = metrics.forFamily(h.family);
-        float table = m == null ? 0f : m.lineHeightRatio;
-        if (table <= 0f) return 0f;
-        return em.floatValue() / table;
+        float table = tallest(p, metrics, fallbackFamily).pt;
+        // 实测口径按 Word 的逐字符挑脸:中文行归宋体,纯西文行归 Times。
+        float word = tallest(p, measuredMetrics(metrics), fallbackFamily, true).pt;
+        if (table <= 0f || word <= table) return 0f;
+        return word / table;
     }
 
     static boolean carries(DocxDocument.ParagraphBlock p, Metrics metrics, String fallbackFamily) {
