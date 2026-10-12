@@ -192,7 +192,7 @@ Robolectric 排版与 UI 回归在 `tests/ui`：
 cd tests/ui && gradle --no-daemon test --console=plain
 ```
 
-`tools/test-host.ps1` 一次跑完 23 个 JVM 套件，2350 条断言：`Regression` 分页/OOXML 70、`ScriptRegression` 上下标行盒 55、`TextCorpusRegression` 指纹比对 183、`SourceLedgerRegression` 来源榜 146、`CharLedgerRegression` 字符账本 100、`SharedSpanRegression` 单句落点 59、`CandidateRankerRegression` 候选去重 92、`RoutesRegression` 国内外选路 72、`CorpusImportRegression` 自建库批量导入 131、`AigcRegression` 逐句倾向 157、`LocalRewriteRegression` 离线降重 388、`DetectRegression` 检索/报告/传输 182、`RetrievalCoverageRegression` 检索覆盖率 111、`CnkiSearchRegression` 知网检索式 226、`CnkiTouchRegression` 知网公开页 20、`RewriteRobustnessRegression` 抗改写召回与嵌入多报 58、`ReportStoreRegression` 报告中心存储 175、`ReviewRegression` 修订批注 22、`PreservationRegression` OOXML 保留 11、`ApiRegression` 接口配置与加密 40、`PdfRegression` 9、`OriginalDocxRegression` 真实论文往返 12、`TableGeometryRegression` 表格几何与回写 31。`FontAssetsRegression` 另计 51 条，直接校验 APK 内的字体字节。
+`tools/test-host.ps1` 一次跑完 46 个 JVM 套件、2531 条断言（2026-10-12 那次全绿的实测数，`pwsh tools/test-host.ps1` 每套件的 `SUMMARY` 行就是逐条账）。覆盖面大致是：分页与 OOXML、上下标行盒、悬挂标点、斜杠不断行、行高、指纹与字符账本、来源榜、候选去重、命中地图、国内外选路、自建库导入、知网/万方/维普三家协议与验证码、AIGC 判据与逐段倾向、离线降重与改写回环、报告中心存储、修订批注、接口配置与加密、PDF 导出、真实论文往返与表格几何、检索被挡三档的措辞、字体替代表。`FontAssetsRegression` 另计，直接校验 APK 内的字体字节，需要先打包。
 
 联网检索源的解析全部走本地回环服务，避免测试依赖外网；要确认这九个内置源此刻真的能返回题录，跑：
 
@@ -232,8 +232,8 @@ pwsh tools/word-parity.ps1 -Impl new             # 与 Word 页码表逐段对�
 
 - 手机版 Office 装不进这台测试机：APK `minSdkVersion 33`，测试机是 Android 10 / API 29，安装期直接 `INSTALL_FAILED_OLDER_SDK`。同机 A/B 做不到，Office 侧只能静态比，运行时真值由 PC 版 Word 提供。
 - Word 的排版不在 Java 层：`libwlibandroid.so` 的 `DT_NEEDED` 直接含 `libdwritecore.so` / `librichedit.so`，内部有 181 个 Windows 排版编译单元，分断行/行盒与页面/表格/脚注两层。逐条复刻规则是可行路线，但要认清对手是这两层。
-- 它不带任何中文正文字体：APK 内 22 个字体 family 只有 Arial、Calibri、Tahoma 与一批符号字体，无宋体/黑体/楷体/仿宋/等线，也没有 Times New Roman。换到没装这些字体的手机上就换一套字形，行宽随之变。Word Lite 自带 14 个字体文件（安装包 63.9 MB，字体压缩后占 99.61%，全部非字体条目合计 244 KB），同一篇文档在任何机型上字宽一致。
-- 安装包体积是两种取舍：Office 343 MB 里 79.5% 是 98 个 `.so`；Word Lite 64 MB 零 native。
+- 它不带任何中文正文字体：APK 内 22 个字体 family 只有 Arial、Calibri、Tahoma 与一批符号字体，无宋体/黑体/楷体/仿宋/等线，也没有 Times New Roman。换到没装这些字体的手机上就换一套字形，行宽随之变。Word Lite 自带 31 个字体文件（安装包 193 MB，其中字体 192.1 MB 一律不压缩存放，非字体条目合计 0.90 MB），同一篇文档在任何机型上字宽一致。
+- 安装包体积是两种取舍：Office 343 MB 里 79.5% 是 98 个 `.so`；Word Lite 193 MB 零 native，但 99.5% 是字体——字体按 STORED 存放，`Typeface.createFromAsset` 直接拿 APK 内指针，省掉开机时那几十 MB 解压副本，代价就是包变大。
 - 查重 / AIGC / 降重在 Office 的 APK 里没有任何用户可见入口（`查重`、`相似度`、`AIGC`、`plagiar` 等字符串跨 98 个 `.so` 与 9,856 个条目全部 0 命中，只有一组没接入口的 `AugLoop::Similarity` 类型和服务端开关）。
 - 值得抄的一条：它专门带了 Wingdings 1/2/3 与 Symbol 共 226 KB 符号字体，Word Lite 目前没带，`w:rFonts` 指向 Wingdings 的项目符号会渲染成字母。
 
