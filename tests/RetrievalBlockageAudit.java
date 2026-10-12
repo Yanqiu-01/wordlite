@@ -56,9 +56,17 @@ public final class RetrievalBlockageAudit {
      * （47.49%）/ 响应留档 20 次；覆盖率那一格改成"真问出去 N 次，每窗 a-b 家"；截断那句注记改成
      * "每个检索源按设置在 K 扇处截断，剩余 M 扇本轮没排上"。来源榜那一行末列从 4 到 2 是问出去的
      * 检索式换了窗口。三档收尾的逐字串一字未动，"知网、万方、维普只回摘要"也照旧。</p>
+     *
+     * <p>instrument-19 那一轮再重钉一次。两份代码各渲染一遍同一轮报告（151 KB）逐字比对，
+     * 整份文件只有两行变了，都是"机器生成倾向"那两处：指标格里
+     * "判据未标定（方向实测为反：真人句分比机器句分更高）"换成"判据表未装载（缺 aigc/aigc-rhythm.tsv），
+     * 本机算不出倾向指数"；正文那段长注脚整段换成同一句。理由：随包判据表换成按 2531 对真人/机器配对
+     * 定过标的 instrument-19，"方向实测为反"说的是没进分数的 AigcScorer，挂在查重报告上已经不成立，
+     * 而这台 JVM 装不上 assets 里的表，所以这一格只能说不装载。查重那一侧的字数、比率、来源榜、
+     * 三档收尾与额度注记逐字未动。</p>
      */
     private static final String REPORT_HASH_WITH_COMPARABLE =
-            "ca65088fc271badbc9ff48084ff1626c36b4789ed21bdf94dae4586797f8b7ef";
+            "7ec144dbf29cd9e3be934a4d1a3fa679b3eef354a13273c8e1d10bf42b6c5113";
 
     private static final String CAUSE_NO_ROUTE = "手机这次没能连上任何检索源";
     private static final String FIX_WLAN = "WLAN 或移动数据";

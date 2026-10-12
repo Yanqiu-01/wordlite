@@ -1,0 +1,19 @@
+id	name	scope	kind	spec	cap	hint	mode	note	human_rate	machine_rate	ratio	gain	loss	p	verified	source
+T01	填充短语起笔	sent	regex	^(值得注意的是|需要指出的是|不难发现|由此可见|总体而言|总的来说|众所周知|毋庸置疑|不可否认|不可忽视的是)	每篇 ≤2 处	删掉引导语，直接从主语开始	套话		0.0	0.0	1.0	297	54	0.0	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+T02	模糊归因	sent	regex	(专家(们)?认为|研究表明|研究显示|业内普遍认为|有观点认为|一些学者指出|有关学者认为|相关研究显示|相关研究表明)	每篇 0 处	补具体出处（作者+年份），否则改成自己的分析并说明依据	可信度	无出处的权威口吻	2.11	0.0	0.0	65	38	0.010063	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+T03	泛化结论与意义声明	sent	regex	(具有重要意义|具有重大意义|具有深远意义|意义深远|意义重大|前景广阔|未来可期|广阔的?发展空间|注入了新的?活力|提供了新的?思路|提供了有益的?借鉴|开辟新的?(路径|方向|局面)|迈上新台阶|任重道远|势在必行)	结尾段 0 处	换成一个能被数据检验的具体推论	空洞		10.57	0.0	0.0	230	42	0.0	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+T04	AI 高频词	sent	regex	(深刻揭示|综合运用|不可或缺|不可替代|深入探讨|系统梳理|理论支撑|有效解决|充分说明|显著提升|充分发挥|有效提升|重要参考|有机结合|有机统一|深度融合|多维度|全方位|多层次)	每段 ≤2 个	换成朴素的动词与名词	词汇		4.23	0.0	0.0	793	129	0.0	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+T05	绕开"是"的系动词堆叠	sent	regex	(扮演着|充当着|作为[^，。；]{1,12}的(?:重要)?(?:载体|途径|手段|方式|桥梁|纽带))	不限	直接用"是"写	句式		0.0	0.0	1.0	59	8	0.0	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+T06	限定词堆叠	sent	struct	COUNT(可能|在一定程度上|一定程度上|潜在的?|某种程度|或许|大概|某种程度上) >= 2	每句 1 个	一个句子只留一个不确定限定词	推卸判断		0.0	0.0	1.0	66	71	0.732684	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+T07	模板化问题陈述	sent	regex	(面临的核心问题是|核心挑战在于|主要矛盾体现在|关键问题是如何|亟待解决的是|如何[^，。；]{2,18}成为[^，。；]{2,12}的关键)	每篇 ≤1 处	把矛盾写成具体情境或设问	提纲腔		0.0	0.0	1.0	1	0	1.0	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+T08	段末套路与引申	sent	regex	(此案例(?:印证|揭示|说明|挑战)了|从中可以看出|这提示我们|这也印证了|这恰恰说明)	每篇 ≤1 处	删掉，或改成推进下一层的转折	重述		0.0	0.0	1.0	2	0	0.5	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+T09	被动分析套话	sent	regex	(该(?:处理|设计|决策|选择|方案|做法)[^，。；]{0,8}(?:基于|体现|反映|展现|印证)|这一(?:做法|选择|处理|方案)(?:展现|体现|反映|说明)了|上述(?:选择|做法)(?:印证|反映|说明)了)	每篇 ≤2 处	写清为什么这么做、中途改过什么	说明书腔		0.0	0.0	1.0	2	0	0.5	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+T10	三元对称并列	sent	struct	THREE_PARALLEL(items=3, len_ratio<=1.3, same_suffix=True)	每段 ≤1 处	打破等长等重，重要的多说，次要的一笔带过	PPT 提纲腔		0.0	0.0	1.0	18	256	0.0	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+T11	首先/其次/再次编号逻辑	sent	regex	(首先[^。]{2,60}[；，][^。]{0,12}其次|第一[，、]?[^。]{2,60}第二[，、]?|一是[^。；]{2,40}二是|其二[^。]{0,40}其三)	每篇 ≤1 处	改成"最根本的是……此外……至于……"	编号逻辑		0.0	0.0	1.0	11	65	0.0	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+T12	四字/了字排比串	sent	struct	CHAINED_LE(items>=3, seps=[,，、], item_len<=10)	每段 ≤1 处	只留真正的贡献点并展开一句	宣传稿腔		0.0	0.0	1.0	0	0	1.0	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+P01	理论起笔	para	regex	^(?:依据|基于|根据|按照|遵循)[^，。；]{0,14}(?:理论|框架|视角|观点|原则|模型|范式|导向)	≤20% 段落	现象先行，理论名移到段中	公式化开头		0.0	0.0	1.0	2	7	0.179688	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+P02	总结套话起笔	para	regex	^(?:综上所述|由此可见|总而言之|概括而言|综合来看)	每篇 ≤1 处	直接删，或换成引出下文的转折	重述		0.0	0.0	1.0	14	0	0.000122	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+P03	冒号堆叠	para	struct	COUNT(:|：) >= 3	每段 ≤2 处	拆句或改用破折号	标点		0.0	0.0	1.0	362	1108	0.0	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+P04	破折号密度	para	struct	COUNT(——) >= 3	每段 ≤2 处	删减或改写成短句	标点		0.0	0.0	1.0	159	49	0.0	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+P05	句长节奏单一	para	struct	SENT_LEN_STDEV_CV(min_n=5, cv<0.28)	不限	插一两个短句打破均质节奏	节奏		69.62	280.0	4.02	464	34	0.0	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng
+P06	三维等重分析	para	regex	(从[^，。；]{1,8}(?:维度|角度|层面)[来]?看[^。]{0,50}从[^，。；]{1,8}(?:维度|角度|层面)[来]?看|理论上[^。]{2,50}实践上[^。]{2,50}(?:方法|应用|现实)上)	每篇 ≤1 处	按真实重要性排序，别三项等长	模板结构		0.0	0.0	1.0	1	0	1.0	0	humanizer-zh-academic@MIT (c) 2025 redbaronyyyyy-eng

@@ -1235,9 +1235,11 @@ public final class DetectRegression {
         check(blackoutRow != null && blackoutRow.contains("样本不足（有效字符 ") && blackoutRow.contains("门槛 400 字")
                         && !blackoutRow.contains("%") && !html.contains("AIGC 生成比例"),
                 "an insufficient sample prints tier plus a character deficit, never 0.00% and never a second 比例");
-        // 整份报告里"比例"只剩 AIGC 那句"不给生成比例"，指标区再也没有冒充比例的数。
-        check(occurrences(html, "比例") == 1 && html.contains("不给生成比例"),
-                "the only surviving use of the word 比例 is the sentence that refuses to give one");
+        // 样本不足那一格如今说的是"只列触发的判据，不给倾向指数"（判据表已标定，
+        // 老的"不给生成比例"那句话跟着旧名字一起退了），所以整份报告里"比例"归零。
+        check(occurrences(html, "比例") == 0 && html.contains("不给倾向指数"),
+                "an insufficient sample refuses the index in plain words and leaves no 比例 anywhere: "
+                        + occurrences(html, "比例"));
         ArrayList<String> unknown = new ArrayList<String>();
         unknown.add("不存在的源");
         DuplicateEngine.Report unselected = DuplicateEngine.scan(selection, new TextCorpus(), true, unknown, limits,
@@ -1315,16 +1317,17 @@ public final class DetectRegression {
         check(!html.contains("AIGC 生成比例") && occurrences(html, "比例") == 0,
                 "the finished report never calls anything a 比例 any more: the AIGC cell lost that name");
         String trendRow = metricRow(html, "机器生成倾向");
-        // The scorer's direction is inverted on the labelled corpus (docs/aigc-corpus.md 4.2: AUC(machine>human)
-        // = 0.305), so this cell refuses. The arithmetic it used to print stays pinned as three pieces: 8 flagged
-        // characters out of a 21-character document, and WATCH still spells itself 观察.
+        // This JVM has no assets, so the criteria table cannot be installed and the cell can only say
+        // "instrument not installed". On device the same cell prints tier plus flagged-character counts,
+        // pinned by tests/ReportStoreRegression.aigcChain. The arithmetic stays pinned as three pieces here:
+        // 8 flagged characters out of a 21-character document, and WATCH still spells itself 观察.
         check(DuplicateEngine.trendMachineChars(report) == 8 && DuplicateEngine.trendTotalChars(report) == 21
                         && DuplicateEngine.aigcTierName(AigcDetector.Tier.WATCH).equals("观察"),
                 "the numbers behind that cell are still 8 flagged of 21, and the WATCH tier name is still 观察");
         check(trendRow != null
-                        && trendRow.equals("<td>机器生成倾向</td><td>" + DuplicateEngine.AIGC_UNCALIBRATED + "</td>")
+                        && trendRow.equals("<td>机器生成倾向</td><td>" + AigcRhythm.NOT_LOADED + "</td>")
                         && !trendRow.contains("%"),
-                "the AIGC cell is exactly the refusal, nothing else: " + trendRow);
+                "the AIGC cell is exactly the not-installed sentence, nothing else: " + trendRow);
         check(metricRow(html, DuplicateEngine.AIGC_SCORE_LABEL) == null && !html.contains("17.5")
                         && !html.contains("17.50%"),
                 "the weighted sentence score row is gone entirely while uncalibrated, not relabelled");
@@ -1389,15 +1392,15 @@ public final class DetectRegression {
                         && !html.contains("<td>去除引用重复比</td>") && !html.contains("<td>自编率</td>"),
                 "no duplication rate survives an unfinished run");
         String trendRow = metricRow(html, "机器生成倾向");
-        // 手算：可疑 6 个字 / 全文 20 个有效字符。0.7.2 起这一格只给拒绝句，那两个绝对量单独钉住：
-        // 撤掉一格数字，不许顺手把账本口径也弄丢（判据方向没验正是撤它的理由，不是重算账的理由）。
+        // 手算：可疑 6 个字 / 全文 20 个有效字符。这一格现在只说"判据表没装载"，那两个绝对量单独钉住：
+        // 撤掉一格数字，不许顺手把账本口径也弄丢。
         check(DuplicateEngine.trendMachineChars(report) == 6 && DuplicateEngine.trendTotalChars(report) == 20
                         && DuplicateEngine.aigcTierName(report.aigc.tier).equals("观察"),
                 "the two character counts behind that cell are still 6 of 20, tier WATCH spells 观察");
         check(trendRow != null
-                        && trendRow.equals("<td>机器生成倾向</td><td>" + DuplicateEngine.AIGC_UNCALIBRATED + "</td>")
+                        && trendRow.equals("<td>机器生成倾向</td><td>" + AigcRhythm.NOT_LOADED + "</td>")
                         && !trendRow.contains("%"),
-                "an unfinished report refuses the AIGC figure too: " + trendRow);
+                "an unfinished report also says the instrument is not installed: " + trendRow);
         check(metricRow(html, DuplicateEngine.AIGC_SCORE_LABEL) == null && !html.contains("10.7"),
                 "the 10.7 weighted score row is not printed while the scorer is uncalibrated");
         check(!html.contains("AIGC 生成比例") && occurrences(html, "比例") == 0,

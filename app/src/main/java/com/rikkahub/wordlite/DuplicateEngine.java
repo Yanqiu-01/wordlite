@@ -108,15 +108,17 @@ public final class DuplicateEngine {
     static final int MAX_ABSTRACT_UNITS = 4000;
     /** 每次检索请求的响应留档行数上限（A4）：MAX_REQUESTS 120 次加上万方换页的补帧，150 行装得下。 */
     static final int MAX_SHAPE_ROWS = 150;
-    /** 「机器腔均分」那一栏的名字：它是一条 0-100 的分而不是占比，所以不许挂"比例"两个字。 */
-    public static final String AIGC_SCORE_LABEL = "机器腔均分";
+    /**
+     * 倾向指数那一栏的名字。它是段落分按有效字符加权的均值，不是占比，所以名字里不许出现"比例"，
+     * 也不许再叫"均分"——那个名字是启发式那套留下的，读数口径早就换了。
+     */
+    public static final String AIGC_SCORE_LABEL = "AI 倾向指数";
     private static final String AIGC_TIER_INSUFFICIENT = "样本不足";
     private static final String AIGC_NOT_RUN = "本机 AIGC 分析未执行";
-    /**
-     * 判据未标定那一格的说法。它必须自带方向，因为这一版错的方向是"冤枉真人"，
-     * 只写"未标定"三个字会被读成"大概没问题，只是没测"。实测数字在 AigcScorer.UNCALIBRATED_NOTE 里。
-     */
-    static final String AIGC_UNCALIBRATED = "判据未标定（方向实测为反：真人句分比机器句分更高）";
+    // 这里原来钉着一句"判据未标定（方向实测为反：真人句分比机器句分更高）"，供"机器生成倾向"那一格用。
+    // 随包判据表换成 instrument-19 之后这句话不再是真的：那把尺子按 2531 对真人/机器配对定过标，方向为正。
+    // 现在这一格只在判据表装不上时说不装载（AigcRhythm.NOT_LOADED）。方向为反那件事仍然成立，
+    // 但它说的是没进分数的 AigcScorer 与 AigcNgramModel，由 tests/AigcFeatureAuditRegression 逐字钉着。
     public interface Progress { void step(String label, int done, int total); }
     public static final class Report {
         /* 0.7.1 起这三个比率全部出自 ledger 那一次划分：分子分母同一把尺，自编率已减掉已判重复的字符，
@@ -796,20 +798,44 @@ public final class DuplicateEngine {
         return report.aigc == null ? 0 : report.aigc.flaggedChars;
     }
 
-    /** 样本不足、或者这一轮压根没跑 AIGC：都不许印出任何看起来像结论的数。 */
+    /**
+     * 这一轮到底有没有量到数。今天只剩三种情况算"没量到"：没跑这一项、样本不足、判据表没装载。
+     *
+     * <p>{@link AigcScorer#calibrated()} 不再参与这一位：那套手写启发式的方向确实在标注语料上是反的，
+     * 但它今天根本不参与打分，拿它去挡住另一件自带定标与误报率的仪器，等于让报告整格空白。
+     * 标定不足的数照样印，只是那一格必须自带置信档与"只作复核排序线索"那句话。
+     */
     public static boolean aigcUnmeasured(Report report) {
         if (report == null || report.aigc == null) return true;
-        // 判据方向没验正过，和"没跑这一项"是同一档：量出来的数不可比，就不许印出去。
-        return !AigcScorer.calibrated() || report.aigcInsufficient || report.aigc.insufficientSample;
+        return report.aigcInsufficient || report.aigc.insufficientSample
+                || !AigcDetector.indexable(report.aigc);
     }
 
-    /** 未量到的三种说法之一：没跑 / 样本不足 / 判据未标定。面板、HTML、存档都读这一个出处。 */
+    /** 同一件事的裸读法：本机 AIGC 那条路手里只有 {@link AigcDetector.Result}，没有 Report。 */
+    public static boolean aigcUnmeasuredOf(AigcDetector.Result aigc) {
+        return aigc == null || aigc.insufficientSample || !AigcDetector.indexable(aigc);
+    }
+
+    /**
+     * 上面那条说法的人话版。不成立的原因直接引
+     * {@link AigcDetector#measurement}：样本不足、判据表没装载、整段凑不够句数
+     * 这三种原因只在那一处说一次，两处各说一半一定漂移。指数成立时返回空串。
+     */
+    public static String aigcUnmeasuredReasonOf(AigcDetector.Result aigc) {
+        if (aigc == null) return AIGC_NOT_RUN;
+        if (!AigcDetector.indexable(aigc)) return AigcDetector.measurement(aigc);
+        return "";
+    }
+
+    /** 没跑这一项的说法。存档里遇到空结果时用它，别留空白。 */
+    public static String aigcNotRun() {
+        return AIGC_NOT_RUN;
+    }
+
+    /** 未量到的三种说法之一：没跑 / 样本不足 / 判据表没装载。面板、HTML、存档都读这一个出处。 */
     public static String aigcUnmeasuredReason(Report report) {
         if (report == null || report.aigc == null) return AIGC_NOT_RUN;
-        if (report.aigcInsufficient || report.aigc.insufficientSample)
-            return AIGC_TIER_INSUFFICIENT + "（有效字符 " + report.aigc.comparedChars + " 字，门槛 "
-                    + AigcDetector.MIN_DOCUMENT_CHARS + " 字）";
-        return AIGC_UNCALIBRATED;
+        return aigcUnmeasuredReasonOf(report.aigc);
     }
 
     /**
@@ -824,15 +850,38 @@ public final class DuplicateEngine {
     }
 
     /**
-     * 字符加权句分（Σ 句分 x 有效字符 / Σ 有效字符）留档但不冒充比例：值不带百分号、名字带"均分"、
-     * 同一格里写死"非占比"。样本不足时给空串，这一格宁可不画。
+     * 倾向指数：段落分按有效字符加权的均值（Σ 段分 x 有效字符 / Σ 有效字符）。它不带百分号，
+     * 同一格里写死"非占比"，并跟一句真人论文正文的刻度，否则单看一个数没人知道是高是低。
+     * 真没量到时给空串，这一格不画。
      */
     public static String aigcScoreLine(Report report) {
-        // 未标定与样本不足都走这一条：整格不画。这一位是 AigcScorer.calibrated() 的唯一对外出口之一，
-        // 想在报告里看到一个句分，先把 VERSION 与方向一起改对（见 AigcScorer#calibrated）。
         if (report == null || aigcUnmeasured(report)) return "";
-        return String.format(java.util.Locale.US, "%.1f", Double.valueOf(clamp(report.aigcRate)))
-                + "（字符加权句分，非占比）";
+        return AigcDetector.indexText(aigcIndexValue(report)) + "（段落分按有效字符加权，非占比）";
+    }
+
+    /** 指数的原值。{@link Report#aigcRate} 是被 0~100 夹过的那一份，这里给没夹的。 */
+    public static double aigcIndexValue(Report report) {
+        return report == null || report.aigc == null ? 0d : report.aigc.rate;
+    }
+
+    /** ①真人刻度那一行：中位 / 九成 / 九成九。表没装载时它自己会说"刻度还没装载"。 */
+    public static String aigcScaleLine(Report report) {
+        return AigcDetector.scaleLine(report == null ? null : report.aigc);
+    }
+
+    /** ②疑似机器生成字数与占比；零的时候只能说"未发现"。 */
+    public static String aigcFlaggedLine(Report report) {
+        if (aigcUnmeasured(report)) return aigcUnmeasuredReason(report);
+        return AigcDetector.flaggedLine(report.aigc);
+    }
+
+    /** ④出处那一行：仪器版本 + 实测 AUC 与误报 + 还没验过什么 + 置信档 + 已知软肋。 */
+    public static String aigcProvenanceLine(Report report) {
+        if (report == null || report.aigc == null) return AIGC_NOT_RUN;
+        String line = report.aigc.provenance == null ? "" : report.aigc.provenance;
+        if (line.length() > 0) return line;
+        return AigcDetector.instrumentName(report.aigc) + "；" + AigcRhythm.describe()
+                + "。" + AigcDetector.NOT_A_VERDICT;
     }
     /** 两段成对区间接在一起，交给 mergeSpans 合并。 */
     static int[] concat(int[] first, int[] second) {

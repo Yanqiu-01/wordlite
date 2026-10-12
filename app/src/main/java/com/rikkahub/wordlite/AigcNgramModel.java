@@ -438,6 +438,16 @@ public final class AigcNgramModel {
     public static String describe() {
         AigcNgramModel m = active;
         if (m == null) return "离线模型未装载";
-        return "离线模型 " + m.manifest.version + "（" + m.manifest.what + "）；" + m.manifest.provenance;
+        // 清单里那句"有一条或两条不过……界面不印任何 AIGC 百分比"是 0.7.x 的旧口径（资产文件本身不许改）。
+        // 现在这一档说的是这台模型自己参不参与打分，不是整份报告能不能有数：指数出自本机判据表。
+        // 所以那一截换成现口径再印，别把退役的规矩带到出处行里。
+        String note = m.manifest.provenance;
+        int at = note.indexOf("出厂门槛只认第三档");
+        if (at >= 0) {
+            note = note.substring(0, at) + "出厂门槛只认第三档：AUC 不低于 " + GATE_HOLDOUT_AUC
+                    + " 且真人误报不高于 " + GATE_HUMAN_FP_PER_MILLE
+                    + " 句/千句；这一档不过，这台模型就不参与打分，界面上的指数出自本机判据表，与它无关。";
+        }
+        return "离线模型 " + m.manifest.version + "（" + m.manifest.what + "）；" + note;
     }
 }

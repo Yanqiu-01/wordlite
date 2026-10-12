@@ -42,6 +42,11 @@ public final class ReportStore {
     public static final int MAX_EVIDENCE = 40;
     /** AI 分段的上限：命中地图要的是位置分布，八十段足够画出形状，超出部分只报总数。 */
     public static final int MAX_AI_SEGMENTS = 80;
+    /**
+     * 套话与词表类线索（不计分的那批证据）最多留几条。界面上列的是工单行（同一条只出一行），
+     * 导出报告要用的是同一批，所以这一处也得有上限；超出的只报总数。
+     */
+    public static final int MAX_TELL_ROWS = 24;
     /** 摘要层逐句证据的条数上限：面板只画这些，全貌看 abstractEvidenceTotal。 */
     public static final int MAX_ABSTRACT_EVIDENCE = 20;
     /**
@@ -68,6 +73,11 @@ public final class ReportStore {
     public static final String STATE_COMPLETE = "完整检索";
     public static final String STATE_PARTIAL = "部分完成";
     public static final String STATE_UNFINISHED = "未完成查重";
+    /**
+     * 只跑本机 AIGC 检测的记录：没联网、没检索、没有查重那几栏。它必须是独立状态，
+     * 不然历史列表会拿查重比率去画它，读者就以为这篇没有重复问题。
+     */
+    public static final String STATE_AIGC_ONLY = "本机 AIGC 检测";
 
     /** 证据表的一行：一个字符区间加它的出处，点它就要能跳回正文那一段。 */
     public static final class Evidence {
@@ -92,6 +102,11 @@ public final class ReportStore {
         public int chars;
         public double score;
         public boolean flagged;
+        /** 这一段凭什么可疑：判据中文名，用、连着写。只有可疑段落才有。 */
+        public String criteria = "";
+        /** 段首摘要，报告里点它跳正文；snippetCut 表示被长度上限砍过。 */
+        public String snippet = "";
+        public boolean snippetCut;
 
         public boolean usable(int totalChars) {
             return start >= 0 && end > start && end <= totalChars;
@@ -102,6 +117,21 @@ public final class ReportStore {
      * 摘要层证据的一行：本文那一句（snippet，按正文偏移能跳回去）+ 撞上的那句摘要（matched）
      * + 来源题名。它刻意不与 evidence 同表——两张表混起来，摘要层的数就能冒充正文级的数。
      */
+    /**
+     * 一条套话/词表类线索（{@link AigcTells} 的工单行）：命中处数、每千字硬上限、改法。
+     * 这批线索一律不计分，所以它出现在哪个界面上，{@link AigcTells#CAVEAT} 那句就必须跟着出现在哪里。
+     */
+    public static final class TellRow {
+        public String ruleId = "", name = "", cap = "", hint = "";
+        public int hits;
+
+        /** 界面上那一行：名字 + 上限 + 改法。 */
+        public String line() {
+            return name + "：" + (cap.length() == 0 ? "按提示改" : cap)
+                    + (hint.length() == 0 ? "" : "；" + hint);
+        }
+    }
+
     public static final class AbstractEvidence {
         public int start, end;
         /** 这一句的最大袋 Dice，0..1。 */
@@ -210,6 +240,36 @@ public final class ReportStore {
         public double aigcScore;
         public String aigcVerdict = "";
         public boolean aigcUnmeasured;
+        /* ---- 2026-10-12 分级披露：界面那四样各自的落盘字段 ---- */
+        /** 没夹到 0~100 的指数原值（真人中位在 0.28 上下，比这还低就是负数）。 */
+        public double aigcIndexRaw;
+        /** 真人论文正文的三把刻度：中位 / 九成 / 九成九。 */
+        public double aigcScaleP50, aigcScaleP90, aigcScaleP99;
+        /** 划线那一档的真人误报率（每千段）与 AI 味特征密度（每千字）。 */
+        public double aigcFalsePositivesPerMille, aigcDensity;
+        /** 疑似机器生成字数与它占参与判定正文的占比。 */
+        public int aigcFlaggedChars;
+        public double aigcShare;
+        /** 参与判定（没被引用与结构性文本排除掉）的有效字数。 */
+        public int aigcComparedChars;
+        /** 置信档、仪器名、出处行，加上①②那两行的原样文案。 */
+        public String aigcConfidence = "", aigcInstrument = "", aigcProvenance = "";
+        public String aigcScaleLine = "", aigcFlaggedLine = "";
+        /** 降重闭环那一条前后对照，没降过重就空着。 */
+        public String aigcRewriteLine = "";
+        /** 置信档那一格怎么读：结论还是只作排序线索（{@link AigcConfidence#use()}）。 */
+        public String aigcConfidenceUse = "";
+        /** 可疑段落列表：位置、段分、主要判据、段首摘要，点它回正文。 */
+        public final ArrayList<AiSegment> aigcParagraphs = new ArrayList<AiSegment>();
+        public int aigcParagraphsTotal;
+        public boolean aigcParagraphsTruncated;
+        /**
+         * 套话与词表类线索（不计分）：界面上列了它们，导出的报告就得有它们，
+         * 否则"屏幕上看得见、分享出去看不见"就是两份互相矛盾的报告。
+         */
+        public final ArrayList<TellRow> tells = new ArrayList<TellRow>();
+        public int tellsTotal;
+        public boolean tellsTruncated;
 
         /* ---- 字符账本：四个比率的分子分母，指标卡的注脚全靠它 ---- */
         public int comparedChars, duplicateChars, citedDuplicateChars, selfWrittenChars, machineChars, excludedChars;
@@ -263,7 +323,11 @@ public final class ReportStore {
 
         /** 比率类指标只在问出过东西的前提下成立：什么都没查出来时一个数都不许印。 */
         public boolean metricsValid() {
-            return !STATE_UNFINISHED.equals(state);
+            /* 黑名单口径，不改白名单：老记录（读盘缺 state 那一路）今天照样按"没说不成立"过——
+               ZeroRateAudit H2 把这条钉着，改成白名单会把历史记录的比率一夜之间抹掉。
+               这里只多挡一种新状态：本机 AIGC 检测那条从没跑过检索，三率全是字段默认值，
+               印出来就是 0.00%，那是拿"没查"冒充"查出来是零"。 */
+            return !STATE_UNFINISHED.equals(state) && !STATE_AIGC_ONLY.equals(state);
         }
 
         /** 该条证据还能不能拿去跳正文。 */
@@ -275,7 +339,8 @@ public final class ReportStore {
         void normalize() {
             fileName = cut(fileName, MAX_NAME_CHARS);
             detectedAt = cut(detectedAt, 40);
-            state = STATE_COMPLETE.equals(state) || STATE_PARTIAL.equals(state) || STATE_UNFINISHED.equals(state)
+            state = STATE_COMPLETE.equals(state) || STATE_PARTIAL.equals(state)
+                    || STATE_UNFINISHED.equals(state) || STATE_AIGC_ONLY.equals(state)
                     ? state : STATE_COMPLETE;
             reason = cut(reason, MAX_NOTE_CHARS);
             coverageNote = cut(coverageNote, MAX_NOTE_CHARS);
@@ -285,6 +350,55 @@ public final class ReportStore {
             selfWrittenRate = rate(selfWrittenRate);
             citedDuplicateRate = rate(citedDuplicateRate);
             aigcScore = rate(aigcScore);
+            aigcIndexRaw = finite(aigcIndexRaw);
+            aigcScaleP50 = rate(aigcScaleP50);
+            aigcScaleP90 = rate(aigcScaleP90);
+            aigcScaleP99 = rate(aigcScaleP99);
+            aigcFalsePositivesPerMille = rate(aigcFalsePositivesPerMille);
+            aigcDensity = rate(aigcDensity);
+            aigcShare = rate(aigcShare);
+            aigcFlaggedChars = atLeastZero(aigcFlaggedChars);
+            aigcComparedChars = atLeastZero(aigcComparedChars);
+            aigcConfidence = cut(aigcConfidence, 8);
+            aigcConfidenceUse = cut(aigcConfidenceUse, MAX_NOTE_CHARS);
+            aigcInstrument = cut(aigcInstrument, MAX_NOTE_CHARS);
+            aigcProvenance = cut(aigcProvenance, 4 * MAX_NOTE_CHARS);
+            aigcScaleLine = cut(aigcScaleLine, MAX_NOTE_CHARS);
+            aigcFlaggedLine = cut(aigcFlaggedLine, MAX_NOTE_CHARS);
+            aigcRewriteLine = cut(aigcRewriteLine, MAX_NOTE_CHARS);
+            aigcParagraphsTotal = Math.max(aigcParagraphsTotal, aigcParagraphs.size());
+            while (aigcParagraphs.size() > MAX_AI_SEGMENTS) {
+                aigcParagraphs.remove(aigcParagraphs.size() - 1);
+                aigcParagraphsTruncated = true;
+            }
+            for (int i = aigcParagraphs.size() - 1; i >= 0; i--) {
+                AiSegment seg = aigcParagraphs.get(i);
+                if (seg == null || seg.end <= seg.start) {
+                    aigcParagraphs.remove(i);
+                    aigcParagraphsTruncated = true;
+                    continue;
+                }
+                seg.criteria = cut(seg.criteria, MAX_NOTE_CHARS);
+                seg.snippetCut = seg.snippet.length() > MAX_SNIPPET_CHARS;
+                seg.snippet = cut(seg.snippet, MAX_SNIPPET_CHARS);
+            }
+            tellsTotal = Math.max(tellsTotal, tells.size());
+            while (tells.size() > MAX_TELL_ROWS) {
+                tells.remove(tells.size() - 1);
+                tellsTruncated = true;
+            }
+            for (int i = tells.size() - 1; i >= 0; i--) {
+                TellRow row = tells.get(i);
+                if (row == null || row.name.trim().length() == 0) {
+                    tells.remove(i);
+                    tellsTruncated = true;
+                    continue;
+                }
+                row.name = cut(row.name, 60);
+                row.cap = cut(row.cap, MAX_NOTE_CHARS);
+                row.hint = cut(row.hint, MAX_NOTE_CHARS);
+                row.hits = atLeastZero(row.hits);
+            }
             comparedChars = atLeastZero(comparedChars);
             duplicateChars = atLeastZero(duplicateChars);
             fullTextDuplicateChars = atLeastZero(fullTextDuplicateChars);
@@ -469,6 +583,22 @@ public final class ReportStore {
                     .append(",\"aigcScore\":").append(num(aigcScore))
                     .append(",\"aigcVerdict\":").append(ApiJson.quote(aigcVerdict))
                     .append(",\"aigcUnmeasured\":").append(aigcUnmeasured ? "true" : "false")
+                    .append(",\"aigcIndex\":").append(plain(aigcIndexRaw))
+                    .append(",\"aigcP50\":").append(num(aigcScaleP50))
+                    .append(",\"aigcP90\":").append(num(aigcScaleP90))
+                    .append(",\"aigcP99\":").append(num(aigcScaleP99))
+                    .append(",\"aigcFp\":").append(num(aigcFalsePositivesPerMille))
+                    .append(",\"aigcDensity\":").append(num(aigcDensity))
+                    .append(",\"aigcShare\":").append(num(aigcShare))
+                    .append(",\"aigcFlaggedChars\":").append(aigcFlaggedChars)
+                    .append(",\"aigcComparedChars\":").append(aigcComparedChars)
+                    .append(",\"aigcConfidence\":").append(ApiJson.quote(aigcConfidence))
+                    .append(",\"aigcInstrument\":").append(ApiJson.quote(aigcInstrument))
+                    .append(",\"aigcProvenance\":").append(ApiJson.quote(aigcProvenance))
+                    .append(",\"aigcScaleLine\":").append(ApiJson.quote(aigcScaleLine))
+                    .append(",\"aigcFlaggedLine\":").append(ApiJson.quote(aigcFlaggedLine))
+                    .append(",\"aigcRewriteLine\":").append(ApiJson.quote(aigcRewriteLine))
+                    .append(",\"aigcConfidenceUse\":").append(ApiJson.quote(aigcConfidenceUse))
                     .append("},\"ledger\":{\"compared\":").append(comparedChars)
                     .append(",\"duplicate\":").append(duplicateChars)
                     .append(",\"cited\":").append(citedDuplicateChars)
@@ -526,10 +656,38 @@ public final class ReportStore {
                 AiSegment seg = aiSegments.get(i);
                 out.append("{\"start\":").append(seg.start).append(",\"end\":").append(seg.end)
                         .append(",\"chars\":").append(seg.chars).append(",\"score\":").append(num(seg.score))
-                        .append(",\"flagged\":").append(seg.flagged ? "true" : "false").append('}');
+                        .append(",\"flagged\":").append(seg.flagged ? "true" : "false")
+                        .append(",\"criteria\":").append(ApiJson.quote(seg.criteria))
+                        .append(",\"snippet\":").append(ApiJson.quote(seg.snippet))
+                        .append(",\"snippetCut\":").append(seg.snippetCut ? "true" : "false").append('}');
             }
             out.append("],\"aiTotal\":").append(aiSegmentsTotal)
                     .append(",\"aiTruncated\":").append(aiSegmentsTruncated ? "true" : "false")
+                    .append(",\"aigcParagraphs\":[");
+            for (int i = 0; i < aigcParagraphs.size(); i++) {
+                if (i > 0) out.append(',');
+                AiSegment seg = aigcParagraphs.get(i);
+                out.append("{\"start\":").append(seg.start).append(",\"end\":").append(seg.end)
+                        .append(",\"chars\":").append(seg.chars).append(",\"score\":").append(plain(seg.score))
+                        .append(",\"criteria\":").append(ApiJson.quote(seg.criteria))
+                        .append(",\"snippet\":").append(ApiJson.quote(seg.snippet))
+                        .append(",\"snippetCut\":").append(seg.snippetCut ? "true" : "false").append('}');
+            }
+            out.append("],\"aigcParagraphsTotal\":").append(aigcParagraphsTotal)
+                    .append(",\"aigcParagraphsTruncated\":")
+                    .append(aigcParagraphsTruncated ? "true" : "false")
+                    .append(",\"tells\":[");
+            for (int i = 0; i < tells.size(); i++) {
+                if (i > 0) out.append(',');
+                TellRow row = tells.get(i);
+                out.append("{\"ruleId\":").append(ApiJson.quote(row.ruleId))
+                        .append(",\"name\":").append(ApiJson.quote(row.name))
+                        .append(",\"cap\":").append(ApiJson.quote(row.cap))
+                        .append(",\"hint\":").append(ApiJson.quote(row.hint))
+                        .append(",\"hits\":").append(row.hits).append('}');
+            }
+            out.append("],\"tellsTotal\":").append(tellsTotal)
+                    .append(",\"tellsTruncated\":").append(tellsTruncated ? "true" : "false")
                     .append(",\"abstract\":{\"rate\":").append(num(abstractLayerRate))
                     .append(",\"compared\":").append(abstractSentencesCompared)
                     .append(",\"matched\":").append(abstractSentencesMatched)
@@ -580,6 +738,22 @@ public final class ReportStore {
                 record.aigcScore = real(metrics.get("aigcScore"));
                 record.aigcVerdict = text(metrics.get("aigcVerdict"));
                 record.aigcUnmeasured = truth(metrics.get("aigcUnmeasured"));
+                record.aigcIndexRaw = signed(metrics.get("aigcIndex"));
+                record.aigcScaleP50 = real(metrics.get("aigcP50"));
+                record.aigcScaleP90 = real(metrics.get("aigcP90"));
+                record.aigcScaleP99 = real(metrics.get("aigcP99"));
+                record.aigcFalsePositivesPerMille = real(metrics.get("aigcFp"));
+                record.aigcDensity = real(metrics.get("aigcDensity"));
+                record.aigcShare = real(metrics.get("aigcShare"));
+                record.aigcFlaggedChars = (int) whole(metrics.get("aigcFlaggedChars"));
+                record.aigcComparedChars = (int) whole(metrics.get("aigcComparedChars"));
+                record.aigcConfidence = text(metrics.get("aigcConfidence"));
+                record.aigcInstrument = text(metrics.get("aigcInstrument"));
+                record.aigcProvenance = text(metrics.get("aigcProvenance"));
+                record.aigcScaleLine = text(metrics.get("aigcScaleLine"));
+                record.aigcFlaggedLine = text(metrics.get("aigcFlaggedLine"));
+                record.aigcRewriteLine = text(metrics.get("aigcRewriteLine"));
+                record.aigcConfidenceUse = text(metrics.get("aigcConfidenceUse"));
             }
             Map<?, ?> ledger = asMap(map.get("ledger"));
             if (ledger != null) {
@@ -645,10 +819,43 @@ public final class ReportStore {
                 row.chars = (int) whole(seg.get("chars"));
                 row.score = real(seg.get("score"));
                 row.flagged = truth(seg.get("flagged"));
+                row.criteria = text(seg.get("criteria"));
+                row.snippet = text(seg.get("snippet"));
+                row.snippetCut = truth(seg.get("snippetCut"));
                 record.aiSegments.add(row);
             }
             record.aiSegmentsTotal = (int) whole(map.get("aiTotal"));
             record.aiSegmentsTruncated = truth(map.get("aiTruncated"));
+            for (Object item : asList(map.get("aigcParagraphs"))) {
+                Map<?, ?> seg = asMap(item);
+                if (seg == null) continue;
+                AiSegment row = new AiSegment();
+                row.start = (int) whole(seg.get("start"));
+                row.end = (int) whole(seg.get("end"));
+                row.chars = (int) whole(seg.get("chars"));
+                row.score = signed(seg.get("score"));
+                row.flagged = true;
+                row.criteria = text(seg.get("criteria"));
+                row.snippet = text(seg.get("snippet"));
+                row.snippetCut = truth(seg.get("snippetCut"));
+                record.aigcParagraphs.add(row);
+            }
+            record.aigcParagraphsTotal = (int) whole(map.get("aigcParagraphsTotal"));
+            record.aigcParagraphsTruncated = truth(map.get("aigcParagraphsTruncated"));
+            /* 套话线索：老记录没这一位，读回来就是空列表，界面上那一节整块不画。 */
+            for (Object item : asList(map.get("tells"))) {
+                Map<?, ?> seg = asMap(item);
+                if (seg == null) continue;
+                TellRow row = new TellRow();
+                row.ruleId = text(seg.get("ruleId"));
+                row.name = text(seg.get("name"));
+                row.cap = text(seg.get("cap"));
+                row.hint = text(seg.get("hint"));
+                row.hits = (int) whole(seg.get("hits"));
+                record.tells.add(row);
+            }
+            record.tellsTotal = (int) whole(map.get("tellsTotal"));
+            record.tellsTruncated = truth(map.get("tellsTruncated"));
             Map<?, ?> abstractLayer = asMap(map.get("abstract"));
             if (abstractLayer != null) {
                 record.abstractLayerRate = real(abstractLayer.get("rate"));
@@ -963,6 +1170,7 @@ public final class ReportStore {
         record.aigcScore = DuplicateEngine.aigcUnmeasured(report) ? 0d : report.aigcRate;
         record.aigcVerdict = DuplicateEngine.aigcTrend(report);
         record.aigcUnmeasured = DuplicateEngine.aigcUnmeasured(report);
+        applyAigc(record, report.aigc, report.sourceText);
         record.state = report.retrievalIncomplete ? STATE_UNFINISHED
                 : (report.retrievalPartial ? STATE_PARTIAL : STATE_COMPLETE);
         String reason = STATE_UNFINISHED.equals(record.state) ? report.retrievalReason : report.retrievalPartialReason;
@@ -1183,6 +1391,268 @@ public final class ReportStore {
      * 为什么不改调用方传进来的那份：调用方手里那份还挂在界面内存上，砍它就等于屏幕上
      * 出现一份"看起来存下来了、其实盘上没有"的报告。
      */
+    /**
+     * 把一次 AIGC 检测的四个读数写进记录：指数与真人刻度、可疑字数与占比、可疑段落列表、出处行。
+     * 查重那条路（{@link #recordFor}）与本机 AIGC 这条路（{@link #recordForAigc}）共用这一份，
+     * 两处各写一遍迟早一边一个口径。
+     */
+    static void applyAigc(Record record, AigcDetector.Result aigc, String source) {
+        if (record == null || aigc == null) return;
+        boolean measured = !DuplicateEngine.aigcUnmeasuredOf(aigc);
+        record.aigcConfidence = aigc.confidence == null ? "" : aigc.confidence.label();
+        record.aigcConfidenceUse = aigc.confidence == null ? "" : aigc.confidence.use();
+        record.aigcInstrument = aigc.instrument;
+        record.aigcProvenance = aigc.provenance;
+        record.aigcComparedChars = aigc.comparedChars;
+        record.aigcIndexRaw = aigc.rate;
+        record.aigcScaleP50 = aigc.scaleP50;
+        record.aigcScaleP90 = aigc.scaleP90;
+        record.aigcScaleP99 = aigc.scaleP99;
+        record.aigcFalsePositivesPerMille = aigc.falsePositivesPerMille;
+        record.aigcDensity = aigc.densityPer1000;
+        record.aigcFlaggedChars = aigc.flaggedChars;
+        record.aigcShare = AigcDetector.share(aigc);
+        record.aigcScaleLine = AigcDetector.scaleLine(aigc);
+        record.aigcFlaggedLine = AigcDetector.flaggedLine(aigc);
+        record.aigcParagraphsTotal = aigc.suspiciousParagraphs.size();
+        for (int i = 0; i < aigc.suspiciousParagraphs.size()
+                && record.aigcParagraphs.size() < MAX_AI_SEGMENTS; i++) {
+            AigcDetector.Paragraph paragraph = aigc.suspiciousParagraphs.get(i);
+            if (paragraph == null || paragraph.end <= paragraph.start) continue;
+            AiSegment row = new AiSegment();
+            row.start = paragraph.start;
+            row.end = paragraph.end;
+            row.chars = paragraph.chars;
+            row.score = paragraph.score;
+            row.flagged = true;
+            StringBuilder criteria = new StringBuilder();
+            for (int k = 0; k < paragraph.criteria.size(); k++) {
+                if (k > 0) criteria.append("、");
+                criteria.append(paragraph.criteria.get(k));
+            }
+            row.criteria = criteria.toString();
+            row.snippet = source == null ? "" : snippetOf(source, paragraph.start, paragraph.end);
+            row.snippetCut = row.snippet.length() > MAX_SNIPPET_CHARS;
+            record.aigcParagraphs.add(row);
+        }
+        record.aigcParagraphsTruncated = record.aigcParagraphsTotal > record.aigcParagraphs.size();
+        /* 套话工单行：同一条只留一行（AigcTells.workOrder 已经归并过），带上命中处数。
+           它不计分，所以谁画它谁就得同时画出 AigcTells.CAVEAT——界面上、导出的报告里，同一条纪律。 */
+        ArrayList<AigcTells.Hit> order = AigcTells.workOrder(aigc.tells);
+        record.tellsTotal = order.size();
+        for (int i = 0; i < order.size() && record.tells.size() < MAX_TELL_ROWS; i++) {
+            AigcTells.Hit hit = order.get(i);
+            if (hit == null) continue;
+            TellRow row = new TellRow();
+            row.ruleId = hit.ruleId;
+            row.name = hit.name;
+            row.cap = hit.capOr("");
+            row.hint = hit.hint;
+            for (int k = 0; k < aigc.tells.size(); k++) {
+                AigcTells.Hit other = aigc.tells.get(k);
+                if (other != null && hit.ruleId.equals(other.ruleId)) row.hits++;
+            }
+            record.tells.add(row);
+        }
+        record.tellsTruncated = record.tellsTotal > record.tells.size();
+        if (!measured) {
+            record.aigcScore = 0d;
+            record.aigcIndexRaw = 0d;
+            record.aigcFlaggedLine = DuplicateEngine.aigcUnmeasuredReasonOf(aigc);
+        }
+    }
+
+    /** 段首摘要：报告里点一行回正文，靠的就是这段能认出来的开头。 */
+    private static String snippetOf(String source, int start, int end) {
+        if (source == null || start < 0 || end <= start) return "";
+        int stop = Math.min(source.length(), Math.min(end, start + MAX_SNIPPET_CHARS + 40));
+        int from = Math.min(source.length(), start);
+        if (stop <= from) return "";
+        return source.substring(from, stop);
+    }
+
+    /**
+     * 本机 AIGC 检测的记录：没联网、没检索，所以查重那几栏一律是零，状态单独一档。
+     * 报告卡上那四样和查重报告存的是同一批字段，历史里翻出来长得也一样。
+     */
+    public static Record recordForAigc(AigcDetector.Result aigc, String text, String fileName,
+                                       long elapsedMillis) {
+        return recordForAigc(aigc, text, fileName, elapsedMillis, "");
+    }
+
+    /**
+     * 上面那一个，再多带一句"降重之后重新量过"的前后对照（{@link AigcRewrite.Result#indexLine()}）。
+     * 为什么要多这一个参数而不是让调用方拼完之后自己往字段上写：HTML 就是在这里拼的，
+     * 晚一步写上去，导出的那份报告里就没有这一行——界面上看得见、分享出去没有，正是最容易被抓的错。
+     */
+    public static Record recordForAigc(AigcDetector.Result aigc, String text, String fileName,
+                                       long elapsedMillis, String rewriteLine) {
+        Record record = new Record();
+        record.aigcRewriteLine = rewriteLine == null ? "" : rewriteLine;
+        record.fileName = fileName == null ? "" : fileName;
+        record.createdAt = System.currentTimeMillis();
+        record.detectedAt = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm",
+                java.util.Locale.CHINA).format(new java.util.Date());
+        record.elapsedMillis = Math.max(0L, elapsedMillis);
+        record.state = STATE_AIGC_ONLY;
+        record.comparedChars = 0;
+        record.sourceChars = text == null ? 0 : text.length();
+        record.aigcUnmeasured = aigc == null || DuplicateEngine.aigcUnmeasuredOf(aigc);
+        record.aigcScore = record.aigcUnmeasured ? 0d : aigc.rate;
+        /* 档位那一格在未量到的时候不许走 aigcTierName：判据表没装载时档位天然是 NONE，
+           名字是"一般"，连起来就是"一般（可疑 0 字 / 参与判定 1200 字）"——仪器没装上被读成稿子干净，
+           正是这一路最贵的一句错话。未量到一律换成 aigcUnmeasuredReasonOf 那句（没跑 / 样本不足 / 表没装载）。 */
+        record.aigcVerdict = aigc == null ? DuplicateEngine.aigcNotRun()
+                : record.aigcUnmeasured ? DuplicateEngine.aigcUnmeasuredReasonOf(aigc)
+                : DuplicateEngine.aigcTierName(aigc.tier) + "（可疑 " + aigc.flaggedChars
+                        + " 字 / 参与判定 " + aigc.comparedChars + " 字）";
+        if (aigc != null) {
+            applyAigc(record, aigc, text);
+            record.excludedChars = aigc.excludedChars;
+            record.machineChars = aigc.flaggedChars;
+            /* 分区视图也存档：命中地图那条色带画的就是它。以前这条路只存可疑段落列表，
+               于是"本机 AIGC"那条历史在报告中心永远画不出地图，图例上那句"AI 可疑 N 字"成了空话。 */
+            record.aiSegmentsTotal = aigc.segments.size();
+            for (int i = 0; i < aigc.segments.size() && record.aiSegments.size() < MAX_AI_SEGMENTS; i++) {
+                AigcDetector.Segment seg = aigc.segments.get(i);
+                if (seg == null) continue;
+                AiSegment row = new AiSegment();
+                row.start = seg.start;
+                row.end = seg.end;
+                row.chars = seg.chars;
+                row.score = seg.score;
+                row.flagged = seg.flagged;
+                record.aiSegments.add(row);
+            }
+            record.aiSegmentsTruncated = record.aiSegmentsTotal > record.aiSegments.size();
+        }
+        record.notes.add("只跑了本机 AIGC 检测：没联网检索，重复率、来源分布这些栏位这次没有测");
+        /* 先收口再拼 HTML：段首摘要、判据这些字段被上限砍过之后再画，导出的报告与详情页
+           用的就是同一份字，不会出现屏上 160 字、分享出去 200 字这种两份报告。 */
+        record.normalize();
+        record.html = aigcHtml(record, aigc);
+        return record;
+    }
+
+    /**
+     * 判定线那一句：整段分数高过真人论文正文的九成九分位才算可疑。刻度没装载（或这一轮根本没量到）时
+     * 给空串——印一个"可疑线 0.00"出去，等于把没装上的仪器画成一条量得出线的尺。
+     */
+    public static String aigcGateLine(Record record) {
+        if (record == null || record.aigcUnmeasured || record.aigcScaleP99 <= 0d) return "";
+        return "可疑线 " + AigcDetector.scaleText(record.aigcScaleP99);
+    }
+
+    /**
+     * 可疑段落那一行的文案：段号 + 段分 + 可疑字数 + 判定线 + 主要判据。
+     * 报告中心与导出的 HTML 共用这一份。两处各写一遍，早晚写成两句不同的话，
+     * 而这两处并列摆在用户面前时，哪句都不能信。
+     */
+    public static String aigcParagraphLine(Record record, int index) {
+        if (record == null || index < 0 || index >= record.aigcParagraphs.size()) return "";
+        AiSegment seg = record.aigcParagraphs.get(index);
+        StringBuilder out = new StringBuilder("第 ").append(index + 1).append(" 段 · 指数 ")
+                .append(AigcDetector.indexText(seg.score))
+                .append(" · 可疑 ").append(seg.chars).append(" 字");
+        String gate = aigcGateLine(record);
+        if (gate.length() > 0) out.append(" · ").append(gate);
+        if (seg.criteria.length() > 0) out.append(" · 主要判据：").append(seg.criteria);
+        return out.toString();
+    }
+
+    /**
+     * AIGC 报告的 HTML：①指数与真人刻度 ②可疑字数与占比 ③可疑段落（段号 + 段分 + 可疑字数 + 判定线 +
+     * 判据 + 原文开头）④出处一行，再加套话工单与它那一句 CAVEAT、降重之后的前后对照。
+     * 导出与分享用的就是这一份。量不到的那一轮每一格都换成"为什么量不到"：
+     * 这里不许出现 0.0 分，也不许出现听起来像结论的"未发现可疑段落"。
+     */
+    private static String aigcHtml(Record record, AigcDetector.Result aigc) {
+        StringBuilder out = new StringBuilder("<html><head><meta charset=\"utf-8\">")
+                .append("<title>AIGC 检测 ").append(htmlEscape(record.fileName)).append("</title></head><body>");
+        out.append("<h2>本机 AIGC 检测：").append(htmlEscape(record.fileName)).append("</h2>");
+        out.append("<p>").append(htmlEscape(record.detectedAt)).append(" · 用时 ")
+                .append(record.elapsedMillis / 1000L).append(" 秒</p>");
+        out.append("<table>");
+        if (record.aigcUnmeasured) {
+            /* 未量到只有"量不到的原因"这一件事可说，而 verdict 与 flaggedLine 在这一轮是同一句话，
+               一行只印一次；上一版两行都印，读的人以为得到了两个互相印证的读数。 */
+            row(out, "本机读数", record.aigcVerdict);
+            if (record.aigcProvenance.length() > 0) row(out, "出处", record.aigcProvenance);
+        } else {
+            row(out, "AI 倾向指数", AigcDetector.indexText(record.aigcIndexRaw)
+                    + " 分（段落分按有效字符加权，不是占比） · " + record.aigcScaleLine);
+            row(out, "可疑字数与占比", record.aigcFlaggedLine);
+            row(out, "置信档", record.aigcConfidence
+                    + (record.aigcConfidenceUse.length() == 0 ? "" : "（" + record.aigcConfidenceUse + "）"));
+            row(out, "出处", record.aigcProvenance);
+        }
+        out.append("</table>");
+        /* 未量到那一轮标题里不许带"0 段"：一个数都没量出来的时候，"可疑段落 0 段"读起来就是
+           "查过了，一段都不脏"。标题只留名字，段数只在真数过之后才出现。 */
+        if (record.aigcUnmeasured) {
+            out.append("<h3>可疑段落</h3><p>这一篇量不出来：").append(htmlEscape(record.aigcVerdict))
+                    .append("。量不到不等于没有机器腔。</p>");
+        } else {
+            out.append("<h3>可疑段落 ").append(record.aigcParagraphsTotal).append(" 段</h3>");
+            if (record.aigcParagraphs.isEmpty()) {
+                out.append("<p>")
+                        .append(htmlEscape(AigcDetector.NOT_FOUND + "（" + AigcRhythm.WEAK_UNDETECTED + "）"))
+                        .append("</p>");
+            } else {
+                out.append("<ol>");
+                for (int i = 0; i < record.aigcParagraphs.size(); i++) {
+                    AiSegment seg = record.aigcParagraphs.get(i);
+                    out.append("<li>").append(htmlEscape(aigcParagraphLine(record, i))).append("<br>")
+                            .append(htmlEscape(seg.snippet))
+                            .append(seg.snippetCut ? "……" : "").append("</li>");
+                }
+                out.append("</ol>");
+                if (record.aigcParagraphsTruncated)
+                    out.append("<p>本轮共 ").append(record.aigcParagraphsTotal)
+                            .append(" 段过线，本报告只列出前 ").append(record.aigcParagraphs.size())
+                            .append(" 段。</p>");
+            }
+        }
+        /* 套话工单：不计分的那批线索，量不到指数的那一轮照样列（词表该命中还是命中了），
+           而列出来就必须带上表自己那句 CAVEAT——界面上、导出的报告里，同一条纪律。 */
+        if (!record.tells.isEmpty()) {
+            out.append("<h3>套话类线索（只列证据，不参与打分）</h3><ol>");
+            for (int i = 0; i < record.tells.size(); i++)
+                out.append("<li>").append(htmlEscape(record.tells.get(i).line()))
+                        .append(record.tells.get(i).hits > 1 ? "（命中 " + record.tells.get(i).hits + " 处）" : "")
+                        .append("</li>");
+            out.append("</ol><p>").append(htmlEscape(AigcTells.CAVEAT)).append("</p>");
+            if (record.tellsTruncated)
+                out.append("<p>本轮这类线索共 ").append(record.tellsTotal).append(" 条，本报告只列出前 ")
+                        .append(record.tells.size()).append(" 条。</p>");
+        }
+        if (record.aigcRewriteLine != null && record.aigcRewriteLine.length() > 0) {
+            out.append("<h3>降重之后重新量过</h3><p>")
+                    .append(htmlEscape(record.aigcRewriteLine)).append("</p>");
+        }
+        return out.append("</body></html>").toString();
+    }
+
+    private static void row(StringBuilder out, String name, String value) {
+        out.append("<tr><th>").append(htmlEscape(name)).append("</th><td>")
+                .append(htmlEscape(value == null ? "" : value)).append("</td></tr>");
+    }
+
+    /** 报告里的每个数都要能贴进 HTML 而不被当成标签吃掉，这里就是那一遍。 */
+    private static String htmlEscape(String value) {
+        if (value == null) return "";
+        StringBuilder out = new StringBuilder(value.length() + 16);
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '&') out.append("&amp;");
+            else if (c == '<') out.append("&lt;");
+            else if (c == '>') out.append("&gt;");
+            else if (c == '"') out.append("&quot;");
+            else out.append(c);
+        }
+        return out.toString();
+    }
+
     public Record save(Record input) {
         load();
         if (input == null) {
@@ -1471,6 +1941,21 @@ public final class ReportStore {
 
     private static String num(double value) {
         return Double.toString(rate(value));
+    }
+
+    /** 指数可以低于 0（真人中位只有 0.28），所以它不能走 rate() 那道 0~100 的夹子。 */
+    private static String plain(double value) {
+        return Double.toString(Double.isNaN(value) || Double.isInfinite(value) ? 0d : value);
+    }
+
+    private static double signed(Object value) {
+        if (!(value instanceof Number)) return 0d;
+        double out = ((Number) value).doubleValue();
+        return Double.isNaN(out) || Double.isInfinite(out) ? 0d : out;
+    }
+
+    private static double finite(double value) {
+        return Double.isNaN(value) || Double.isInfinite(value) ? 0d : value;
     }
 
     static String cut(String value, int limit) {

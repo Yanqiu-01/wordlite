@@ -165,25 +165,36 @@ public final class ApiRegression {
         check(DuplicateEngine.trendMachineChars(panel) == 11 && DuplicateEngine.trendTotalChars(panel) == 21
                         && DuplicateEngine.aigcTierName(AigcDetector.Tier.NEEDS_REVIEW).equals("复核"),
                 "那一格背后的两个绝对量还是手算的 11 与 21，复核档的名字也仍由这一处供给");
-        check(DuplicateEngine.aigcTrend(panel).equals(DuplicateEngine.AIGC_UNCALIBRATED),
-                "面板那一格现在只说方向：" + DuplicateEngine.aigcTrend(panel));
+        // 这台 JVM 上没有 assets，判据表装不上，那一格只能讲"仪器没装上"。真机上装着表，
+        // 同一格给档位与可疑字数，那一条由 tests/ReportStoreRegression.aigcChain 钉着。
+        check(DuplicateEngine.aigcTrend(panel).equals(AigcRhythm.NOT_LOADED),
+                "判据表没装载时这一格只说没装载，不假装量过：" + DuplicateEngine.aigcTrend(panel));
         check(DuplicateEngine.aigcScoreLine(panel).isEmpty(),
                 "句分 45.26 不再被打成一位小数印出去：整格空串，宁可不画");
         check(!DuplicateEngine.aigcTrend(panel).contains("%") && !DuplicateEngine.aigcTrend(panel).contains("比例"),
                 "这一格既没有百分号也不叫比例");
         String html = CheckReport.html("panel.docx", panel);
-        check(html.contains("<td>机器生成倾向</td><td>" + DuplicateEngine.AIGC_UNCALIBRATED + "</td>")
+        check(html.contains("<td>机器生成倾向</td><td>" + AigcRhythm.NOT_LOADED + "</td>")
                         && !html.contains("机器腔均分") && !html.contains("45.3"),
                 "HTML 报告与面板同一份拒绝文案，那个 45.3 在整份报告里一个字符都不存在");
         check(!html.contains("AIGC 生成比例"), "报告里再也没有 AIGC 生成比例这一格");
         panel.aigc.insufficientSample = true;
         panel.aigcInsufficient = true;
-        check(DuplicateEngine.aigcTrend(panel).equals("样本不足（有效字符 630 字，门槛 400 字）")
+        // 门槛那个数从常量拼，不写死 400；句子后半句是"只列触发的判据，不给倾向指数"。
+        check(DuplicateEngine.aigcTrend(panel).startsWith(
+                        "样本不足（有效字符 630 字，门槛 " + AigcDetector.MIN_DOCUMENT_CHARS + " 字）")
+                        && DuplicateEngine.aigcTrend(panel).contains("不给倾向指数")
+                        && !DuplicateEngine.aigcTrend(panel).contains("%")
                         && DuplicateEngine.aigcScoreLine(panel).isEmpty(),
-                "样本不足只报差多少字：档位格写门槛，均分格整格不给");
-        check(CheckReport.html("short.docx", panel).contains(
-                "<td>机器生成倾向</td><td>样本不足（有效字符 630 字，门槛 400 字）</td>"),
-                "样本不足时 HTML 那一格也不印 0.00% 之类的假数");
+                "样本不足只报差多少字与不给倾向指数：档位格写门槛，均分格整格不给，全程不带百分号");
+        String shortHtml = CheckReport.html("short.docx", panel);
+        int cellAt = shortHtml.indexOf("<td>机器生成倾向</td><td>");
+        check(cellAt >= 0, "样本不足时 HTML 里仍有机器生成倾向那一格");
+        String cell = shortHtml.substring(cellAt + "<td>机器生成倾向</td><td>".length());
+        cell = cell.substring(0, cell.indexOf("</td>"));
+        check(cell.startsWith("样本不足（有效字符 630 字，门槛 " + AigcDetector.MIN_DOCUMENT_CHARS + " 字）")
+                        && cell.contains("不给倾向指数") && !cell.contains("%"),
+                "样本不足时 HTML 那一格只说差多少字与不给倾向指数，不印 0.00% 之类的假数");
         panel.aigc = null;
         check(DuplicateEngine.aigcTrend(panel).equals("本机 AIGC 分析未执行")
                         && DuplicateEngine.aigcScoreLine(panel).isEmpty(),

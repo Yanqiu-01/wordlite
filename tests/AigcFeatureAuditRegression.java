@@ -385,17 +385,24 @@ public final class AigcFeatureAuditRegression {
         AigcDetector.Result live = AigcDetector.detect(doc.toString());
         check(live.comparedChars >= AigcDetector.MIN_DOCUMENT_CHARS && !live.insufficientSample,
                 "下面这份样本过了 400 字门槛（实测 " + live.comparedChars + " 字）：拒绝给数不可能是因为样本不足");
-        check(live.verdict.contains("不给生成比例") && live.verdict.contains("方向已实测为反"),
-                "detect 的结论句先认错再谈数：" + live.verdict);
+        check(!AigcRhythm.engaged() && AigcRhythm.NOT_LOADED.equals(live.verdict)
+                        && live.verdict.indexOf("倾向指数") > 0
+                        && live.verdict.indexOf("%") < 0 && !live.verdict.contains("45.3"),
+                "判据表不在场（这一套从头到尾没装表）时，结论句只说不给数的这一个理由，"
+                        + "指数那一格连现场那个 45.3 都不许复活；方向已实测为反那一句归"
+                        + " AigcScorer.UNCALIBRATED_NOTE 与机器生成倾向那一格管，下面两条继续钉："
+                        + live.verdict);
         DuplicateEngine.Report rep = new DuplicateEngine.Report();
         rep.sourceText = doc.toString();
         rep.aigc = live;
         rep.aigcRate = 45.3d;
         check(DuplicateEngine.aigcUnmeasured(rep), "判据未标定与没跑同一档：这一轮算没量到");
         check(DuplicateEngine.aigcScoreLine(rep).isEmpty(), "句分那一格给空串，整格不画");
-        check(DuplicateEngine.aigcTrend(rep).contains("判据未标定")
-                        && DuplicateEngine.aigcTrend(rep).contains("真人句分比机器句分更高"),
-                "机器生成倾向那一格自带方向：" + DuplicateEngine.aigcTrend(rep));
+        check(DuplicateEngine.aigcTrend(rep).indexOf(AigcRhythm.NOT_LOADED) == 0
+                        && DuplicateEngine.aigcTrend(rep).indexOf("%") < 0
+                        && !DuplicateEngine.aigcTrend(rep).contains("45.3"),
+                "机器生成倾向那一格在仪器不在场时只说这一轮为什么没数，方向那件事归 AigcScorer.UNCALIBRATED_NOTE 管（上面逐字钉过）："
+                        + DuplicateEngine.aigcTrend(rep));
         String html = CheckReport.html("audit.docx", rep);
         String section = aigcSection(html);
         check(!html.contains("机器腔均分") && !html.contains("45.3"),

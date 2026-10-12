@@ -4,8 +4,10 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import java.io.File;
 import java.io.InputStream;
 import java.io.OutputStream;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -204,14 +206,15 @@ public class EditorActivity extends Activity {
         checkPanel = new LinearLayout(this);
         checkPanel.setGravity(Gravity.CENTER_VERTICAL);
         checkPanel.setPadding(dp(4), 0, dp(4), 0);
-        Button checkNow = button("查重", 13), aigc = button("AIGC", 13), rewrite = button("降重", 13),
+        Button checkNow = button("查重", 13), aigc = button("AIGC 检测", 13), rewrite = button("降重", 13),
                 apiSettings = button("设置", 13);
         checkNow.setTextColor(viewInk); aigc.setTextColor(viewInk); rewrite.setTextColor(viewInk);
         apiSettings.setTextColor(viewInk);
         checkNow.setTag("bottom-check-now"); aigc.setTag("bottom-aigc"); rewrite.setTag("bottom-rewrite");
         apiSettings.setTag("bottom-api-settings");
         checkNow.setOnClickListener(v -> api.checkMenu());
-        aigc.setOnClickListener(v -> api.aigc());
+        // 这一条走本机：随包的节奏判据表离线就能算，不必联网检索，几秒出结果。
+        aigc.setOnClickListener(v -> runLocalAigcCheck());
         rewrite.setOnClickListener(v -> api.rewriteMenu());
         apiSettings.setOnClickListener(v -> api.settings(ApiConfig.Service.CHECK));
         checkPanel.addView(checkNow, new LinearLayout.LayoutParams(0, dp(40), 1));
@@ -450,6 +453,259 @@ public class EditorActivity extends Activity {
         detail.setTextIsSelectable(true);
         card.addView(detail, wrap());
         pageStack.addView(card, wrap());
+    }
+
+    /* ================= 本机 AIGC 检测（不联网） ================= */
+
+    private TextSelection lastAigcSelection;
+    private AigcDetector.Result lastAigc;
+
+    /**
+     * 对整篇正文跑一次本机 AIGC 检测：随包判据表 + 本机模型，全程不联网。
+     * 引文与参考文献表照样排除在外，与完整查重里那一次 AIGC 用的是同一套排除口径。
+     */
+    private void runLocalAigcCheck() {
+        if (document == null) {
+            Toast.makeText(this, "没有找到要检测的文档", Toast.LENGTH_LONG).show();
+            return;
+        }
+        syncAll();
+        AigcRhythm.loadFromAssets(this);
+        AigcTells.loadFromAssets(this);
+        AigcBaseline.loadFromAssets(this);
+        final TextSelection selection = TextSelection.all(document);
+        if (selection == null || selection.text.trim().isEmpty()) {
+            Toast.makeText(this, "文档没有正文内容", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        setBusy(true);
+        final long started = System.currentTimeMillis();
+        new Thread(new Runnable() {
+            public void run() {
+                int[] quoted = DuplicateEngine.concat(DuplicateEngine.citationSpans(selection, document),
+                        TextCorpus.structure(selection.text).spanArray());
+                final AigcDetector.Result result = AigcDetector.detect(selection.text, quoted);
+                final ReportStore.Record record = ReportStore.recordForAigc(result, selection.text,
+                        fileName == null ? "未命名" : fileName, System.currentTimeMillis() - started);
+                ReportStore store = new ReportStore(new File(getFilesDir(), "wordlite-reports"));
+                store.save(record);
+                final String error = store.lastError();
+                lastAigcSelection = selection;
+                lastAigc = result;
+                runOnUiThread(new Runnable() {
+                    public void run() {
+                        setBusy(false);
+                        showLocalAigc(result, record, error);
+                    }
+                });
+            }
+        }, "wordlite-aigc").start();
+    }
+
+    /** 报告卡：①指数与真人刻度 ②可疑字数与占比 ③可疑段落（点一行跳回正文）④出处一行。 */
+    private void showLocalAigc(final AigcDetector.Result result, ReportStore.Record record, String error) {
+        LinearLayout body = column();
+        body.setPadding(dp(16), dp(8), dp(16), 0);
+        final int ink = viewInk;
+        final int faint = MUTED;
+        /* 档位那一句话排第一："成段机器腔（3 段 / 412 字），建议整节复核"，或者是那三条认错句
+           （样本不足 / 判据表没装载 / 段落普遍不足 N 句）。这张卡以前只有分与字数，读不出这一算什么档。 */
+        body.addView(text(AigcDetector.measurement(result), 15, ink));
+        /* 量不到的那一轮这四行整排不出：指数在存档侧已被归零，画出来就是个像数的 0.0；刻度那一行会说
+           "还没装载"，可这一轮连绝对分都没有；可疑字数那一行只是把第一句原因再说一遍；而"可疑段落 0 段"
+           最要命——一个数都没量出来时它读起来就是"查过了，一段都不脏"。 */
+        if (!record.aigcUnmeasured) {
+            body.addView(text("AI 倾向指数 " + AigcDetector.indexText(record.aigcIndexRaw)
+                    + " 分（段落分按有效字符加权，不是占比）", 15, ink));
+            body.addView(text(AigcDetector.scaleLine(result), 12, faint));
+            body.addView(text(record.aigcFlaggedLine, 13, ink));
+            body.addView(text((record.aigcParagraphsTotal > 0
+                    ? "可疑段落 " + record.aigcParagraphsTotal + " 段 · 置信档 " : "置信档 ")
+                    + result.confidence.label() + " · " + result.confidence.use(), 13, ink));
+        }
+        /* 逐段那几行走存档侧同一份文案（段号 / 指数 / 可疑字数 / 判定线 / 主要判据 + 段首原文）：
+           这张卡、报告中心、导出的 HTML 三处必须是同一句话，各写一遍早晚对不上。 */
+        for (int i = 0; i < record.aigcParagraphs.size(); i++) {
+            final ReportStore.AiSegment seg = record.aigcParagraphs.get(i);
+            TextView row = text(ReportStore.aigcParagraphLine(record, i) + "\n"
+                    + seg.snippet + (seg.snippetCut ? "……" : ""), 13, ink);
+            row.setPadding(0, dp(8), 0, dp(8));
+            row.setTextIsSelectable(true);
+            row.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View view) { jumpToOffset(seg.start, seg.end); }
+            });
+            body.addView(row);
+        }
+        if (record.aigcParagraphsTruncated)
+            body.addView(text("本轮共 " + record.aigcParagraphsTotal + " 段过线，这张卡只留下前 "
+                    + record.aigcParagraphs.size() + " 段。", 12, faint));
+        StringBuilder advice = new StringBuilder();
+        for (int i = 0; i < result.suspiciousParagraphs.size() && i < 3; i++) {
+            AigcDetector.Paragraph paragraph = result.suspiciousParagraphs.get(i);
+            for (int k = 0; k < paragraph.criteria.size(); k++) {
+                String tip = AigcRhythm.adviceOf(paragraph.criteria.get(k));
+                if (tip.length() == 0 || advice.indexOf(tip) >= 0) continue;
+                if (advice.length() > 0) advice.append("；");
+                advice.append(tip);
+            }
+        }
+        if (advice.length() > 0)
+            body.addView(text("可以这样改：" + advice + "。每千字留两三处轻微特征就够，不必擦得一个不剩。", 12, faint));
+        if (record.tells.size() > 0) {
+            body.addView(text("套话类线索（只列证据，不参与打分）", 12, faint));
+            for (int i = 0; i < record.tells.size(); i++) {
+                ReportStore.TellRow tell = record.tells.get(i);
+                body.addView(text(tell.line() + (tell.hits > 1 ? "（命中 " + tell.hits + " 处）" : ""), 12, faint));
+            }
+            // 不计分的证据必须自带这一句：以前这里是一句手写的"只作改稿参考"，把"不能当判决"写丢了。
+            body.addView(text(AigcTells.CAVEAT, 12, faint));
+            if (record.tellsTruncated)
+                body.addView(text("这类线索本轮共 " + record.tellsTotal + " 条，只留下前 "
+                        + record.tells.size() + " 条。", 12, faint));
+        }
+        body.addView(text(result.provenance, 11, faint));
+        if (error != null && error.length() > 0) body.addView(text("历史没存上：" + error, 11, faint));
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(body);
+        new AlertDialog.Builder(this)
+                .setTitle("AIGC 检测（本机）")
+                .setView(scroll)
+                .setPositiveButton("降重并复测", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface dialog, int which) { runLocalAigcRewrite(); }
+                })
+                .setNeutralButton("关闭", null)
+                .show();
+    }
+
+    /**
+     * 降重并复测：只改判可疑的那几段，改完用同一件仪器整篇重量一遍；
+     * 可疑占比没压下半分就整篇退回原文，正文一个字都不动。
+     */
+    private void runLocalAigcRewrite() {
+        final TextSelection selection = lastAigcSelection;
+        if (selection == null || document == null) return;
+        setBusy(true);
+        new Thread(new Runnable() {
+            public void run() {
+                int[] quoted = DuplicateEngine.concat(DuplicateEngine.citationSpans(selection, document),
+                        TextCorpus.structure(selection.text).spanArray());
+                final AigcRewrite.Result rewrite = AigcRewrite.run(selection.text, quoted,
+                        new ArrayList<String>());
+                runOnUiThread(new Runnable() {
+                    public void run() {
+                        setBusy(false);
+                        applyAigcRewrite(rewrite);
+                    }
+                });
+            }
+        }, "wordlite-aigc-rewrite").start();
+    }
+
+    /**
+     * 落笔：从最后一段往前改，前面的段内偏移才不会因为字数变化错位；每段落笔前先存一次撤销。
+     * 改完不是就地弹一句"改好了"就完事：正文换完之后这篇得拿同一件仪器重新量一遍，
+     * 存成一条新历史，前后对照（指数 A → B、可疑 M 字 → N 字）跟着记录一起落下。
+     * 以前这一句只活在弹框里，关掉就没处可查——报告中心与导出的 HTML 里那一格
+     * "降重之后重新量过"从来没有人往里写过一个字。
+     */
+    private void applyAigcRewrite(final AigcRewrite.Result rewrite) {
+        if (rewrite == null) return;
+        int applied = 0;
+        for (int i = rewrite.accounts.size() - 1; i >= 0; i--) {
+            AigcRewrite.Region region = rewrite.accounts.get(i);
+            if (!region.changed || lastAigcSelection == null) continue;
+            // 落笔用的是**原文**坐标。region.start/end 是"改完之后那篇"里的位置（复测与结果框读它），
+            // 屏幕上这篇还是改前那篇：拿改完的偏移往改前的正文里写，一处改写就把后面全部挪位，
+            // 正文里会留下半截残渣（审计量到过"…提升其生存质量。高其生存质量。"这种重复尾巴）。
+            ArrayList<TextSelection.Range> ranges = lastAigcSelection.ranges(region.originStart, region.originEnd);
+            if (ranges.size() != 1) continue;
+            TextSelection.Range range = ranges.get(0);
+            DocxDocument.ParagraphBlock paragraph = TextSelection.find(document, range.paragraphIndex);
+            if (paragraph == null) continue;
+            pushUndo(range.paragraphIndex);
+            TextRewriter.replace(document, paragraph, range.start, range.end, region.adopted);
+            applied++;
+        }
+        if (applied > 0) {
+            syncAll();
+            renderDocument();
+        }
+        final String verdict = rewrite.verdict();
+        /* 以编辑器此刻的正文为准重新量：有的段落落不下去（跨段、整段受保护），那种场合
+           rewrite.text 与屏幕上这篇并不相同，量 rewrite.text 就是去量另一篇稿子。 */
+        final TextSelection after = TextSelection.all(document);
+        if (after == null || after.text.trim().isEmpty()) {
+            showRewriteResult(rewrite, verdict, "正文空了，没有可重量的一遍");
+            return;
+        }
+        final int[] quoted = DuplicateEngine.concat(DuplicateEngine.citationSpans(after, document),
+                TextCorpus.structure(after.text).spanArray());
+        setBusy(true);
+        new Thread(new Runnable() {
+            public void run() {
+                final long started = System.currentTimeMillis();
+                final AigcDetector.Result rescored = AigcDetector.detect(after.text, quoted);
+                final ReportStore.Record record = ReportStore.recordForAigc(rescored, after.text,
+                        fileName == null ? "未命名" : fileName,
+                        System.currentTimeMillis() - started, verdict);
+                ReportStore store = new ReportStore(new File(getFilesDir(), "wordlite-reports"));
+                store.save(record);
+                final String error = store.lastError();
+                // 跳正文与再来一轮降重都该对着改完这一篇，别再拿改之前的偏移。
+                lastAigcSelection = after;
+                lastAigc = rescored;
+                runOnUiThread(new Runnable() {
+                    public void run() {
+                        setBusy(false);
+                        showRewriteResult(rewrite, verdict, error);
+                    }
+                });
+            }
+        }, "wordlite-aigc-rescore").start();
+    }
+
+    /**
+     * 降重结果框：整篇前后对照一行（{@link AigcRewrite.Result#verdict()} 里含 indexLine 的并排读数）、
+     * 逐段改前改后、降重工单与它那句 CAVEAT，最后说这一遍存没存进历史。
+     */
+    private void showRewriteResult(AigcRewrite.Result rewrite, String verdict, String error) {
+        final int ink = viewInk;
+        final int faint = MUTED;
+        LinearLayout body = column();
+        body.setPadding(dp(16), dp(8), dp(16), 0);
+        body.addView(text(verdict, 14, ink));
+        for (int i = 0; i < rewrite.accounts.size(); i++)
+            body.addView(text("第 " + (i + 1) + " 段 " + AigcRewrite.regionLine(rewrite.accounts.get(i)),
+                    12, faint));
+        if (rewrite.workOrder.size() > 0) {
+            body.addView(text("套话类线索（只列证据，不参与打分）", 12, faint));
+            for (int i = 0; i < rewrite.workOrder.size(); i++)
+                body.addView(text(rewrite.workOrder.get(i).name + "："
+                        + rewrite.workOrder.get(i).capOr("按提示改") + "；" + rewrite.workOrder.get(i).hint,
+                        12, faint));
+            // 工单行也是不计分的词表证据，同一句提醒，不许换个界面上就把"不能当判决"省掉。
+            body.addView(text(AigcTells.CAVEAT, 12, faint));
+        }
+        body.addView(text(rewrite.workOrderNote, 11, faint));
+        body.addView(text(error != null && error.length() > 0
+                ? "这一遍没存上：" + error
+                : "这一遍已存进报告中心：前后对照跟着记录一起存，导出的报告里也有这一行。", 11, faint));
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(body);
+        new AlertDialog.Builder(this).setTitle("降重之后重新量过").setView(scroll)
+                .setNeutralButton("关闭", null).show();
+    }
+
+    /** 从报告卡跳回正文：把服务文本偏移换成段落内偏移，选中并滚过去。 */
+    private void jumpToOffset(int start, int end) {
+        if (lastAigcSelection == null) return;
+        ArrayList<TextSelection.Range> ranges = lastAigcSelection.ranges(start, end);
+        if (ranges.isEmpty()) return;
+        TextSelection.Range range = ranges.get(0);
+        navigateReview(range.paragraphIndex, range.start);
+        if (activeEditor != null)
+            activeEditor.setSelection(Math.min(range.start, activeEditor.length()),
+                    Math.min(range.end, activeEditor.length()));
     }
 
     private void renderDocument() {

@@ -338,7 +338,26 @@ public final class CheckReport {
         if (report.aigc != null && report.aigc.verdict != null && report.aigc.verdict.length() > 0)
             out.append("<p>").append(escape(report.aigc.verdict)).append("</p>");
         AigcDetector.Result aigc = report.aigc;
-        if (aigc == null || aigc.sentences.isEmpty()) { out.append("<p>未标记出高倾向句子。</p>"); return; }
+        /* ②疑似机器生成字数与占比。量不到的那一轮不出这一行——那一行只会把上面结论句里的原因再说一遍。 */
+        if (aigc != null && !DuplicateEngine.aigcUnmeasured(report)) {
+            out.append("<p>").append(escape(AigcDetector.flaggedLine(aigc))).append("</p>");
+            /* ④出处那一整行：仪器版本号、定标规模、实测 AUC、划线误报率、置信档、还没验过什么、
+               两条已知软肋，末尾一句"这是复核线索，不是判决"。结论句里不带这一串（一处只说一次），
+               报告里就必须单独给一行——没有它，这一节的数就是没出处的数。 */
+            out.append("<p><small>").append(escape(DuplicateEngine.aigcProvenanceLine(report))).append("</small></p>");
+        }
+        /* ③逐段可疑段落。这一节以前只有逐句那张表：界面上的"可疑段落"点得回正文，
+           导出的报告里却没有"哪几段可疑"这一级，同一份检测就成了两份对不上的东西。 */
+        suspiciousParagraphs(out, report);
+        if (aigc == null) return;
+        /* 词表类线索（套话那批）不计分，所以它出现在哪儿，CAVEAT 就得跟到哪儿。
+           下面那张句子表的"判定依据"里就有"套话线索：……"，所以这一句必须跟着那张表。 */
+        String caveat = aigc.evidenceCaveat == null ? "" : aigc.evidenceCaveat;
+        if (aigc.sentences.isEmpty()) {
+            out.append("<p>未标记出高倾向句子。</p>");
+            if (caveat.length() > 0) out.append("<p><strong>").append(escape(caveat)).append("</strong></p>");
+            return;
+        }
         // 判据未标定：句分那一列整列撤掉，只留"这句触发过哪几条判据"。留一个 0.00%~50.00% 的数在这里，
         // 就是拿一个方向反了的刻度冒充百分比（降级做法同"未完成查重不印比率"）。
         boolean scored = AigcScorer.calibrated();
@@ -357,8 +376,54 @@ public final class CheckReport {
         }
         out.append("</tbody></table>");
         if (!scored)
+            // 这句说明原文照旧：量不到的那一轮也画这一段，那时上面并没有可疑段落那张表，指不得。
             out.append("<p>上表按原文顺序列，<strong>不是可疑度排序</strong>：现判据在标注语料上把真人句分排在机器句分之上，"
                     + "任何排序都会把真人句子排到前面。要按可疑度排序，先等判据方向被带标注语料验正。</p>");
+        if (caveat.length() > 0)
+            out.append("<p><strong>").append(escape(caveat)).append("</strong></p>");
+    }
+
+    /**
+     * ③逐段可疑段落：段号、原文前 40 字、段分、判定线、可疑字数、主要判据。
+     * 判定线就是真人论文正文段落分的九成九分位，跟报告中心那一行同一个数；刻度没装载时写"刻度未装载"，
+     * 不印一个 0.00 冒充线。量不到的那一轮整节不出，理由见方法体第一句。
+     */
+    private static void suspiciousParagraphs(StringBuilder out, DuplicateEngine.Report report) {
+        AigcDetector.Result aigc = report.aigc;
+        /* 量不到的那一轮这一节整块不出。不是怕写字——是那三种场合下这张表只能是一张空表，
+           而"可疑段落 0 段"这个标题本身就会被读成"段落查过了，都干净"。量不到的原因本节上面已经
+           说过一次（结论段 + 指标格），这里再说第二遍只会让两处哪天说法不一致。 */
+        if (aigc == null || DuplicateEngine.aigcUnmeasured(report)) return;
+        out.append("<h3>可疑段落 ").append(aigc.suspiciousParagraphs.size()).append(" 段</h3>");
+        if (aigc.suspiciousParagraphs.isEmpty()) {
+            out.append("<p>").append(escape(AigcDetector.NOT_FOUND + "（" + AigcRhythm.WEAK_UNDETECTED + "）"))
+                    .append("</p>");
+            return;
+        }
+        String gate = Double.isNaN(aigc.scaleP99) ? "刻度未装载" : AigcDetector.scaleText(aigc.scaleP99);
+        out.append("<table><thead><tr><th>段号</th><th>原文前 40 字</th><th>段分</th><th>判定线</th>")
+                .append("<th>可疑字数</th><th>主要判据</th></tr></thead><tbody>");
+        for (int i = 0; i < aigc.suspiciousParagraphs.size(); i++) {
+            AigcDetector.Paragraph paragraph = aigc.suspiciousParagraphs.get(i);
+            if (paragraph == null) continue;
+            StringBuilder criteria = new StringBuilder();
+            for (int k = 0; k < paragraph.criteria.size(); k++) {
+                if (k > 0) criteria.append("、");
+                criteria.append(paragraph.criteria.get(k));
+            }
+            out.append("<tr><td>").append(i + 1).append("</td><td>")
+                    .append(escape(head(report.sourceText, paragraph.start, paragraph.end))).append("</td><td>")
+                    .append(AigcDetector.indexText(paragraph.score)).append("</td><td>").append(escape(gate))
+                    .append("</td><td>").append(paragraph.chars).append("</td><td>")
+                    .append(escape(criteria.toString())).append("</td></tr>");
+        }
+        out.append("</tbody></table>");
+    }
+
+    /** 段首那么多个字，够认出是哪一段就行；超出加省略号。 */
+    private static String head(String text, int start, int end) {
+        String value = snippet(text, start, end);
+        return value.length() <= 40 ? value : value.substring(0, 40) + "…";
     }
     /**
      * 这一格只说档位与字数，不说比例（0.7.1）：0.7.0 它叫"AIGC 生成比例"、打的却是字符加权句分，
@@ -371,6 +436,11 @@ public final class CheckReport {
         metricText(out, "机器生成倾向", DuplicateEngine.aigcTrend(report));
         String score = DuplicateEngine.aigcScoreLine(report);
         if (!score.isEmpty()) metricText(out, DuplicateEngine.AIGC_SCORE_LABEL, score);
+        /* 指数要跟真人论文正文的三把刻度并排才读得出高低：单摆一个 4.6 在这里，
+           它能被读成任何意思。文案与报告中心、导出报告同一份（AigcDetector.scaleLine）。
+           量不到的那一轮不摆这一行——那一格已经写着量不到的原因了，再补一句"刻度还没装载"是重复。 */
+        String scale = DuplicateEngine.aigcScaleLine(report);
+        if (!score.isEmpty() && scale.length() > 0) metricText(out, "真人论文正文刻度", scale);
     }
     /**
      * 摘要层（近似）那一屏。口径长在标题上（公开检索只到摘要），数字自带分子分母与阈值，

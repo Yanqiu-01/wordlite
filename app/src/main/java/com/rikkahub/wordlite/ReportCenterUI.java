@@ -42,6 +42,9 @@ public final class ReportCenterUI extends LinearLayout {
 
     /** 摘要层那一格与它的逐句证据：与 evidenceBox 分开，两笔账不许画进同一张表。 */
     private final LinearLayout abstractBox = new LinearLayout(getContext());
+    /** AIGC 那一节：指数与刻度、可疑字数与占比、可疑段落列表、出处行。 */
+    private final LinearLayout aigcBox = new LinearLayout(getContext());
+    private final LinearLayout aigcRows = new LinearLayout(getContext());
     private final LinearLayout abstractRows = new LinearLayout(getContext());
     private boolean abstractOpen;
     private final LinearLayout hitMapBox;
@@ -158,6 +161,18 @@ public final class ReportCenterUI extends LinearLayout {
         abstractRows.setVisibility(GONE);
         abstractBox.addView(abstractRows, new LayoutParams(-1, -2));
 
+        // AIGC 那一节排在摘要层之后、命中地图之前：查重看的是"撞了谁的"，这一节看的是"像不像机器写的"。
+        aigcBox.setOrientation(VERTICAL);
+        aigcBox.setTag("aigc-box");
+        TextView aigcTitle = section("AIGC 检测");
+        aigcTitle.setTag("aigc-title");
+        aigcBox.addView(aigcTitle, new LayoutParams(-1, -2));
+        aigcRows.setOrientation(VERTICAL);
+        aigcRows.setTag("aigc-rows");
+        aigcBox.addView(aigcRows, new LayoutParams(-1, -2));
+        aigcBox.setVisibility(GONE);
+        detailPane.addView(aigcBox, new LayoutParams(-1, -2));
+
         // 命中地图排在指标卡与注记之间：它回答"重复在哪几处"，是看完比率之后自然要问的第二件事。
         hitMapBox = new LinearLayout(context);
         hitMapBox.setOrientation(VERTICAL);
@@ -256,6 +271,7 @@ public final class ReportCenterUI extends LinearLayout {
         export.setVisibility(VISIBLE);
         title.setText(record.fileName);
         renderMetrics(record);
+        renderAigc(record);
         renderAbstract(record);
         renderHitMap(record);
         renderNotes(record);
@@ -296,19 +312,117 @@ public final class ReportCenterUI extends LinearLayout {
         final String id = summary.id;
         row.setOnClickListener(view -> open(id));
         boolean unfinished = ReportStore.STATE_UNFINISHED.equals(summary.state);
+        // 本机 AIGC 那条也没测重复率，历史行上同样不许印那个 0.00%。
+        boolean aigcOnly = ReportStore.STATE_AIGC_ONLY.equals(summary.state);
         // 未完成查重不印比率：什么都没查出来时，0.00% 会被读成"全文没有重复"，那是全应用最贵的一个误读。
-        String head = unfinished ? summary.fileName : summary.fileName + "   " + percent(summary.overallRate);
+        String head = unfinished || aigcOnly
+                ? summary.fileName : summary.fileName + "   " + percent(summary.overallRate);
         TextView name = text(head, 14, ink);
         name.setTypeface(medium);
         name.setMaxLines(2);
         row.addView(name, new LayoutParams(-1, -2));
         StringBuilder meta = new StringBuilder();
-        meta.append(summary.detectedAt).append(" · ").append(summary.state)
-                .append(" · 命中 ").append(summary.evidenceTotal).append(" 处");
+        meta.append(summary.detectedAt).append(" · ").append(summary.state);
+        meta.append(aigcOnly ? " · 未做查重" : " · 命中 " + summary.evidenceTotal + " 处");
         if (summary.truncated) meta.append(" · 已截断");
         TextView tail = text(meta.toString(), 12, muted);
         tail.setMaxLines(2);
         row.addView(tail, new LayoutParams(-1, -2));
+        return row;
+    }
+
+    /* ================= 详情：AIGC 那一节 ================= */
+
+    /**
+     * 固定四样：① 指数 + 真人三个刻度；② 疑似机器生成字数与占比（带划线误报率）；
+     * ③ 可疑段落列表，点一行跳回正文；④ 出处一行。少了哪样的原因也照样占一行，不许整节不画。
+     */
+    private void renderAigc(ReportStore.Record record) {
+        aigcRows.removeAllViews();
+        boolean empty = record.aigcProvenance.isEmpty() && record.aigcFlaggedLine.isEmpty()
+                && record.aigcVerdict.isEmpty();
+        aigcBox.setVisibility(empty ? GONE : VISIBLE);
+        if (empty) return;
+        /* 档位那一格（"复核（可疑 412 字 / 参与判定 6300 字）"或"判据表未装载"那句）。
+           查重那一轮它在指标卡第四格上，本机 AIGC 那一轮指标卡整排收起，这一节就是它唯一的落脚处；
+           量不到的那一轮更要写在这儿——不写，这一屏剩下就只有一个 0.0 分的指数。 */
+        if (ReportStore.STATE_AIGC_ONLY.equals(record.state) || record.aigcUnmeasured)
+            aigcRows.addView(text(record.aigcVerdict, 14, ink), new LayoutParams(-1, -2));
+        if (record.aigcUnmeasured) {
+            /* 量不到的一轮：0.0 分与"未发现"这类听起来像结论的字一个都不许多，只说为什么量不到。
+               可疑字数那一行在这一轮就是上面那句原因本身（存档侧同源），两句一样就只留一句。 */
+            if (!record.aigcFlaggedLine.isEmpty() && !record.aigcFlaggedLine.equals(record.aigcVerdict))
+                aigcRows.addView(text(record.aigcFlaggedLine, 13, ink), new LayoutParams(-1, -2));
+            if (!record.aigcProvenance.isEmpty())
+                aigcRows.addView(text(record.aigcProvenance, 11, muted), new LayoutParams(-1, -2));
+            return;
+        }
+        aigcRows.addView(text("AI 倾向指数 " + AigcDetector.indexText(record.aigcIndexRaw)
+                + " 分（段落分按有效字符加权，不是占比）", 14, ink), new LayoutParams(-1, -2));
+        if (!record.aigcScaleLine.isEmpty())
+            aigcRows.addView(text(record.aigcScaleLine, 12, muted), new LayoutParams(-1, -2));
+        if (!record.aigcFlaggedLine.isEmpty())
+            aigcRows.addView(text(record.aigcFlaggedLine, 13, ink), new LayoutParams(-1, -2));
+        aigcRows.addView(text("可疑段落 " + record.aigcParagraphsTotal + " 段"
+                + (record.aigcConfidence.isEmpty() ? "" : " · 置信档 " + record.aigcConfidence)
+                + (record.aigcConfidenceUse.isEmpty() ? "" : "（" + record.aigcConfidenceUse + "）"),
+                13, ink), new LayoutParams(-1, -2));
+        for (int i = 0; i < record.aigcParagraphs.size(); i++) aigcRows.addView(aigcRow(record, i));
+        if (record.aigcParagraphsTruncated)
+            aigcRows.addView(text("本轮共 " + record.aigcParagraphsTotal + " 段过线，本机只留下可跳转的前 "
+                    + record.aigcParagraphs.size() + " 段。", 11, muted), new LayoutParams(-1, -2));
+        renderTells(record);
+        if (record.aigcRewriteLine != null && record.aigcRewriteLine.length() > 0)
+            aigcRows.addView(text("降重之后重新量过：" + record.aigcRewriteLine, 13, ink),
+                    new LayoutParams(-1, -2));
+        if (!record.aigcProvenance.isEmpty())
+            aigcRows.addView(text(record.aigcProvenance, 11, muted), new LayoutParams(-1, -2));
+    }
+
+    /**
+     * 套话与词表类线索：这批东西不计分，所以它出现在屏幕上就得跟着 {@link AigcTells#CAVEAT}，
+     * 与导出的报告同一句、同一处纪律（ReportStore.aigcHtml 画的是同一个常量）。
+     */
+    private void renderTells(ReportStore.Record record) {
+        if (record.tells.isEmpty()) return;
+        aigcRows.addView(text("套话类线索（只列证据，不参与打分）", 12, muted), new LayoutParams(-1, -2));
+        for (int i = 0; i < record.tells.size(); i++) {
+            ReportStore.TellRow row = record.tells.get(i);
+            TextView line = text(row.line() + (row.hits > 1 ? "（命中 " + row.hits + " 处）" : ""), 12, muted);
+            line.setTag("aigc-tell-row");
+            line.setMinHeight(dp(32));
+            aigcRows.addView(line, new LayoutParams(-1, -2));
+        }
+        TextView caveat = text(AigcTells.CAVEAT, 12, muted);
+        caveat.setTag("aigc-tell-caveat");
+        aigcRows.addView(caveat, new LayoutParams(-1, -2));
+        if (record.tellsTruncated)
+            aigcRows.addView(text("这类线索本轮共 " + record.tellsTotal + " 条，只留下前 "
+                    + record.tells.size() + " 条。", 11, muted), new LayoutParams(-1, -2));
+    }
+
+    /** 可疑段落那一行：段分、字数、主要判据、段首摘要，点它跳回正文那个位置。 */
+    private TextView aigcRow(ReportStore.Record record, int index) {
+        final ReportStore.AiSegment seg = record.aigcParagraphs.get(index);
+        ReportStore.Evidence target = new ReportStore.Evidence();
+        target.start = seg.start;
+        target.end = seg.end;
+        target.score = seg.score;
+        target.title = "AIGC 可疑段落";
+        /* 那一行的文案出自存档侧（ReportStore.aigcParagraphLine）：段号、段分、可疑字数、判定线、
+           主要判据。导出的 HTML 画的就是同一句，屏上与报告里对不上这件事从此没有第二条路可走。 */
+        String line = ReportStore.aigcParagraphLine(record, index) + "\n"
+                + seg.snippet + (seg.snippetCut ? "……" : "");
+        TextView row = text(line, 13, ink);
+        row.setTag("aigc-segment-row");
+        row.setTextIsSelectable(true);
+        row.setPadding(0, dp(8), 0, dp(8));
+        if (record.canJump(target)) {
+            row.setBackgroundResource(selectable());
+            row.setOnClickListener(view -> {
+                if (listener != null && opened != null) listener.jumpTo(opened, target);
+            });
+        }
         return row;
     }
 
@@ -320,6 +434,16 @@ public final class ReportCenterUI extends LinearLayout {
         LinearLayout second = new LinearLayout(getContext());
         second.setOrientation(HORIZONTAL);
         metricStack.addView(second, new LayoutParams(-1, -2));
+        if (ReportStore.STATE_AIGC_ONLY.equals(record.state)) {
+            // 只跑了本机 AIGC：查重那三率一个都没测，卡片整排收起来，别让人看见三个 0.00%。
+            metricRow.setVisibility(GONE);
+            metricStack.setVisibility(GONE);
+            footLine.setText("");
+            banner.setVisibility(VISIBLE);
+            banner.setText(record.state + "：没联网检索，重复率与来源分布这次没有测。AIGC 那几项在下面。");
+            coverage.setText("");
+            return;
+        }
         if (!record.metricsValid()) {
             metricRow.setVisibility(GONE);
             metricStack.setVisibility(GONE);

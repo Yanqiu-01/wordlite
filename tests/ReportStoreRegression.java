@@ -613,6 +613,184 @@ public final class ReportStoreRegression {
         deleteTree(dir);
     }
 
+    /* ================= 本机 AIGC 那条路：仪器没装上 / 量得到 / 零段 / 降重复测 ================= */
+
+    /** 机器腔夹具：节奏判据在它上过真人那把尺子的九成九分位（与 AigcRegression 同一张随包表）。 */
+    private static final String AIGC_MACHINE = "AI 生成文本常以模板起始句式展开，同时通过并列连接词将论点串联为三段式结构，"
+            + "并在小结处复述前文以确保逻辑闭环，通过这一机制可以显著降低理解成本，进而提升文本的一致性与可读性。"
+            + "值得注意的是，该结论依赖于样本规模的充分性，总而言之，上述分析框架具有一定的普适性与解释力。";
+
+    /** 真人腔夹具：句子长短不齐、有具体名词，节奏判据在它上面不亮。 */
+    private static final String AIGC_HUMAN = "我在这个村子里住了十一年。村口那棵槐树是我爷爷那辈栽的，前年秋天让大风刮倒了，"
+            + "树干现在还压在沟边，树皮上有一道铁钉留下的印子，是我爸小时候钉秋千剩的。"
+            + "冬天烧炕的时候能听见风从瓦缝里钻进来，我妈就起来把窗户用塑料布再糊一层。"
+            + "那时候村里通电不久，电压不稳，电视看到一半就黑屏，大家都出门站在土路上说话。";
+
+    /** 三段：机器腔 / 真人 / 机器腔。自然段分开，量得到指数，也有段落过线。 */
+    private static String aigcText() {
+        return AIGC_MACHINE + "\n" + AIGC_HUMAN + "\n" + AIGC_MACHINE;
+    }
+
+    /** 同一批字连成一整段：指数量得出、段分被平均掉，一段都不过线——"零"该怎么写就看这一轮。 */
+    private static String aigcFlatText() {
+        return AIGC_MACHINE + AIGC_HUMAN + AIGC_MACHINE;
+    }
+
+    /**
+     * 出处行是按"；"一段一段拼的，每一段自己尾部那个句末标点会被抹掉（AigcDetector 拼装有这一段纪律）。
+     * 所以比对整句常量时得跟着抹掉尾标点，否则比的就不是同一句话，比的成了标点。
+     */
+    private static String prose(String value) {
+        String out = value == null ? "" : value;
+        while (out.length() > 0 && (out.endsWith("。") || out.endsWith("；") || out.endsWith("，")))
+            out = out.substring(0, out.length() - 1);
+        return out;
+    }
+
+    /** 随包两张表：装不上就直接抛，不许退化成"没装表也能过"。 */
+    private static void installInstrument() throws Exception {
+        java.io.InputStream table = new java.io.FileInputStream("app/src/main/assets/aigc/aigc-rhythm.tsv");
+        try {
+            AigcRhythm.install(table);
+        } finally {
+            table.close();
+        }
+        java.io.InputStream tells = new java.io.FileInputStream("app/src/main/assets/aigc/ai-tells.tsv");
+        try {
+            AigcTells.install(tells);
+        } finally {
+            tells.close();
+        }
+    }
+
+    /**
+     * 编辑器上那颗按钮走的那条路：AigcDetector → ReportStore.recordForAigc → 报告中心与导出的 HTML。
+     * 四组各管一件事：仪器没装上时只许说没装上；装上之后那四样读数一路到导出；一段都不过线时
+     * 只许写"未发现"；降重之后的前后对照必须落在存档与报告里，不能只活在弹框里。
+     */
+    private static void aigcChain() throws Exception {
+        String text = aigcText();
+        AigcRhythm.uninstall();
+        AigcTells.uninstall();
+
+        // ---- ① 判据表没装载：这一轮唯一能说的实话是"仪器没装上" ----
+        check(!AigcRhythm.engaged(), "先把判据表摘下来：这一组测的就是没装表那台手机");
+        AigcDetector.Result bare = AigcDetector.detect(text, new int[0]);
+        check(!AigcDetector.indexable(bare), "没装表时指数不成立，不是分数低那一档");
+        ReportStore.Record bareRecord = ReportStore.recordForAigc(bare, text, "没装表.docx", 40L);
+        same(bareRecord.state, ReportStore.STATE_AIGC_ONLY, "本机 AIGC 那一条走独立状态");
+        check(!bareRecord.metricsValid(), "只跑过本机 AIGC 的记录不许印查重三率（那三个是字段默认值）");
+        check(bareRecord.aigcUnmeasured, "这一轮整条记成量不到");
+        same(bareRecord.aigcVerdict, AigcRhythm.NOT_LOADED, "档位那一格说的是判据表没装载");
+        check(bareRecord.aigcVerdict.indexOf("一般") < 0,
+                "量不到时档位名一个都不许多：仪器没装上不能写成稿子干净——" + bareRecord.aigcVerdict);
+        same(ReportStore.aigcGateLine(bareRecord), "", "量不到就没有判定线可印，不许画一条 0.00 冒充尺子");
+        check(bareRecord.html.indexOf("0.0 分") < 0, "量不到的导出里没有一个像数的 0.0 分");
+        check(bareRecord.html.indexOf("可疑段落 0 段") < 0, "量不到时标题不写「可疑段落 0 段」这种假结论");
+        check(bareRecord.html.indexOf("未发现可疑段落") < 0, "量不到时也不写「未发现」，那同样是一句结论");
+        check(bareRecord.html.contains(AigcRhythm.NOT_LOADED), "导出的那一份同样只说仪器没装上");
+        check(bareRecord.html.contains("量不到不等于没有机器腔"), "量不到那句软肋提示跟着导出走");
+        ReportStore.Record bareBack = ReportStore.Record.fromJson(ApiJson.parse(bareRecord.toJson()));
+        check(bareBack.aigcUnmeasured && AigcRhythm.NOT_LOADED.equals(bareBack.aigcVerdict),
+                "量不到这件事过了磁盘还是那一句：翻历史时不会重新拼成一个档位");
+
+        // ---- ② 装上随包判据表：那四样读数一路走到存档、界面文案与导出 ----
+        installInstrument();
+        check(AigcRhythm.engaged(), "随包判据表装得上（下面每一条都以它为前提）");
+        AigcDetector.Result hit = AigcDetector.detect(text, new int[0]);
+        check(AigcDetector.indexable(hit), "这份夹具在这件仪器上量得出指数");
+        check(hit.flaggedChars > 0 && !hit.suspiciousParagraphs.isEmpty(),
+                "这份夹具量得出可疑段落：可疑 " + hit.flaggedChars + " 字 / "
+                        + hit.suspiciousParagraphs.size() + " 段");
+        String rewriteLine = "AI 倾向指数 6.1 → 2.4；疑似机器生成 149 字 → 0 字";
+        ReportStore.Record record = ReportStore.recordForAigc(hit, text, "机器腔.docx", 3400L, rewriteLine);
+        check(record.aigcVerdict.contains("可疑 " + hit.flaggedChars + " 字 / 参与判定 "
+                        + hit.comparedChars + " 字"),
+                "档位那一格自带分子分母：" + record.aigcVerdict);
+        check(record.aigcVerdict.indexOf('%') < 0, "那一格里没有百分号：它是档位与绝对字数，不是占比");
+        same(Integer.valueOf(record.machineChars), Integer.valueOf(hit.flaggedChars), "可疑字数与检测同源");
+        check(!record.aiSegments.isEmpty(), "分区视图也存档：本机 AIGC 那条历史画得出命中地图");
+        same(record.aigcConfidenceUse, hit.confidence.use(), "置信档那句说明存的是仪器自己那一句");
+        check(!record.tells.isEmpty(), "套话线索落盘：界面上列了的东西存档里必须有");
+        String gate = "可疑线 " + AigcDetector.scaleText(AigcRhythm.humanP99());
+        same(ReportStore.aigcGateLine(record), gate, "判定线就是真人论文正文的九成九分位，跟刻度同一个数");
+        String line = ReportStore.aigcParagraphLine(record, 0);
+        check(line.startsWith("第 1 段 · 指数 "), "逐段那一行从段号起头：" + line);
+        check(line.contains("可疑 " + record.aigcParagraphs.get(0).chars + " 字"),
+                "那一行写了这一段的可疑字数：" + line);
+        check(line.contains(gate), "那一行写了判定线：" + line);
+        check(line.contains("主要判据："), "那一行写了主要判据：" + line);
+        check(line.length() <= ReportStore.MAX_NOTE_CHARS, "那一行在上限之内，不会被存档侧裁断");
+        check(record.html.contains(line), "导出的报告与界面用的是同一句话，不各写一遍");
+        check(record.html.contains(AigcDetector.indexText(record.aigcIndexRaw) + " 分"), "导出里有整篇指数");
+        check(record.html.contains(record.aigcScaleLine), "指数旁边并着真人那三把刻度");
+        check(record.html.contains(record.aigcProvenance), "出处那一行整条进了导出");
+        check(record.html.contains(record.aigcConfidence), "置信档进了导出");
+        check(record.html.contains(AigcTells.CAVEAT), "列了套话线索就带上它那一句 CAVEAT");
+        check(record.html.contains(prose(AigcRhythm.WEAK_LAYOUT))
+                        && record.html.contains(prose(AigcRhythm.WEAK_UNDETECTED)),
+                "已知软肋那两句在出处里，界面与导出同一份");
+        check(record.html.contains("降重之后重新量过") && record.html.contains(rewriteLine),
+                "改前改后的并排读数落在导出的报告里，不是只活在弹框里");
+        check(ReportStore.recordForAigc(hit, text, "四参.docx", 10L).aigcRewriteLine.length() == 0,
+                "不带降重对照的那一版仍然留空：没降过重就不许编一行前后对比");
+
+        File dir = tempDir("aigc");
+        ReportStore store = new ReportStore(dir);
+        ReportStore.Record saved = store.save(record);
+        check(saved != null && saved.id.length() > 0, "本机 AIGC 这条记录存得进历史");
+        check(!saved.htmlCut, saved.bytes + " 字节，在单条上限之内：AIGC 那一节整节存着");
+        ReportStore.Record back = store.record(saved.id);
+        same(back.toJson(), saved.toJson(), "整条 AIGC 记录写进去什么就读回什么");
+        same(back.aigcConfidenceUse, record.aigcConfidenceUse, "置信档那句说明回来");
+        same(back.aigcRewriteLine, rewriteLine, "降重前后对照回来：报告中心与导出都读这一位");
+        same(ReportStore.aigcParagraphLine(back, 0), line, "逐段那一行过了磁盘还是同一句");
+        same(Integer.valueOf(back.tells.size()), Integer.valueOf(record.tells.size()), "套话线索条数回来");
+        check(back.tells.get(0).line().equals(record.tells.get(0).line())
+                        && back.tells.get(0).hits == record.tells.get(0).hits,
+                "套话那一行的名字、上限、改法与命中处数逐字回来：" + back.tells.get(0).line());
+        deleteTree(dir);
+
+        // ---- ③ 一段都不过线：零这个数只能写成"未发现" ----
+        String flat = aigcFlatText();
+        AigcDetector.Result none = AigcDetector.detect(flat, new int[0]);
+        check(AigcDetector.indexable(none) && none.suspiciousParagraphs.isEmpty(),
+                "同一批字连成一整段：量得出指数，但一段都不过线，零怎么写就看这一轮");
+        ReportStore.Record noneRecord = ReportStore.recordForAigc(none, flat, "连排.docx", 1200L);
+        same(Integer.valueOf(noneRecord.aigcParagraphsTotal), Integer.valueOf(0), "过线段数是 0");
+        check(noneRecord.html.contains(AigcDetector.NOT_FOUND), "零段就写「未发现可疑段落」");
+        check(noneRecord.html.contains(AigcRhythm.WEAK_UNDETECTED),
+                "可疑字数为 0 必须跟着那一句：没发现不等于没有机器生成");
+        check(noneRecord.html.indexOf("通过") < 0 && noneRecord.html.indexOf("没有 AI") < 0
+                        && noneRecord.html.indexOf("不是 AI") < 0,
+                "「未发现」之外不许多任何一句读起来像判决的话");
+        check(noneRecord.aigcVerdict.indexOf('%') < 0, "零段那一格也没有百分号");
+
+        // ---- ④ 查重那一路的导出报告：界面上有的那一节，报告里也得有 ----
+        DuplicateEngine.Report withAigc = new DuplicateEngine.Report();
+        withAigc.sourceText = text;
+        withAigc.aigc = hit;
+        String scan = CheckReport.html("thesis.docx", withAigc);
+        check(scan.contains("<h2>AIGC 倾向句</h2>"), "查重报告里 AIGC 那一节还在原来的位置上");
+        check(scan.contains("<th>原文前 40 字</th>"),
+                "查重报告的导出里也有逐段可疑段落：界面上有、报告里没有就是两份对不上的东西");
+        check(scan.contains(AigcTells.CAVEAT), "句表里列了套话线索，同一句 CAVEAT 跟着来");
+        check(scan.contains("真人论文正文刻度"), "指标表里指数旁边并着真人刻度");
+        check(scan.contains("机器生成倾向"), "指标卡那一格的名字没被改走");
+        check(scan.contains("不是可疑度排序"), "判据未标定那句撤分说明还在");
+
+        AigcRhythm.uninstall();
+        AigcTells.uninstall();
+        DuplicateEngine.Report noTable = new DuplicateEngine.Report();
+        noTable.sourceText = text;
+        noTable.aigc = AigcDetector.detect(text, new int[0]);
+        String bareScan = CheckReport.html("thesis.docx", noTable);
+        check(bareScan.contains(AigcRhythm.NOT_LOADED), "查重报告在没装表那一轮也直说仪器没装上");
+        check(bareScan.indexOf("<th>原文前 40 字</th>") < 0,
+                "没装表那一轮不画逐段表：一张只能空着的表会被读成段落都查过了、都干净");
+        check(bareScan.contains("不是可疑度排序"), "撤掉句分那一列那句说明与装不装表无关，仍然在");
+    }
+
     private static String repeat(char c, int times) {
         StringBuilder out = new StringBuilder();
         for (int i = 0; i < times; i++) out.append(c);
@@ -624,7 +802,8 @@ public final class ReportStoreRegression {
         caps();
         corruption();
         guardrails();
+        aigcChain();
         System.out.println("SUMMARY " + checks + " report-store assertions passed"
-                + "；一次比对落盘、原样读回、体积封顶、坏文件恢复，全程不联网不碰 Android");
+                + "；一次比对落盘、原样读回、体积封顶、坏文件恢复、本机 AIGC 那条链路，全程不联网不碰 Android");
     }
 }

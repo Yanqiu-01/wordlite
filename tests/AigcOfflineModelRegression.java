@@ -52,6 +52,12 @@ public final class AigcOfflineModelRegression {
     public static void main(String[] args) throws Exception {
         if (args.length > 0) assetDir = args[0];
         if (args.length > 1) corpusDir = args[1];
+        // 2026-10-12 起今天真正给分的是随包判据表。这一档验的是离线模型那一路的接线，
+        // 所以先把出厂那套仪器装齐：不装表就等量都没开，测出来的不是出厂状态。
+        AigcRhythm.install(stream(assetDir + "/aigc-rhythm.tsv"));
+        AigcTells.install(stream(assetDir + "/ai-tells.tsv"));
+        check(AigcRhythm.engaged(), "出厂判据表装上了并对上 19 条（" + AigcRhythm.version()
+                + "），模型这一档在真实仪器下测");
         loadsAndRefuses();
         goldenParity();
         threeTierManifest();
@@ -61,8 +67,9 @@ public final class AigcOfflineModelRegression {
         windowChannel();
         gateAndWiring();
         uninstallAndClose();
-        System.out.println("SUMMARY " + count + " assertions passed (offline n-gram model ships but is NOT calibrated; "
-                + "no AIGC percentage may be printed).");
+        System.out.println("SUMMARY " + count + " assertions passed (offline n-gram model ships but is NOT"
+                + " calibrated, so it stays out of the score; the index the user sees comes from the shipped"
+                + " criteria table, with its own measured AUC and false-positive rate attached).");
     }
 
     // ---------------------------------------------------------------- ① 装载与口径
@@ -338,7 +345,14 @@ public final class AigcOfflineModelRegression {
         check(!AigcNgramModel.engaged(), "开关没开，检测链路不会去问模型要分");
         AigcDetector.Result off = AigcDetector.detect(firstParagraph(corpusDir + "/aigc-label-machine-domain.txt"));
         check(off.modelSentences == 0, "模型未达标时 modelSentences=0（实际 " + off.modelSentences + "）");
-        check(off.verdict.indexOf("判据未标定") >= 0, "报告口径仍然是那句认错的话（判据未标定）");
+        // 2026-10-12 起"判据未标定"那句盖住整格的话退役了：现在给分的是随包判据表，它自带标定与误报率，
+        // 模型这条路没达标只是"这一件仪器没参与打分"，不再连累另一件仪器读数。这一轮正文只有 211 字，
+        // 量不到的真实原因是样本不足，报告必须只说这一个原因，也不许再吐出那句退役话。
+        check(off.verdict.indexOf("判据未标定") < 0 && off.verdict.indexOf("样本不足") == 0
+                        && off.verdict.indexOf("%") < 0,
+                "模型没达标不再让整格认错：这一轮只说量不到的那一个原因（" + off.verdict + "）");
+        check(off.confidence == AigcRhythm.confidence() && off.confidence != null,
+                "置信档出自真正给分那件仪器（" + off.confidence + "），模型没达标不冒充它，也不把它压成空白");
 
         // 公共留出 / 学术留出 / 跨域三栏全部刷成 0.96~0.9999：只要真稿那一档没过线，开关必须还是关的。
         // 本轮量出来 r(公共留出, 真稿) = -0.2275，那三栏的高分连方向都不保证，更不能拿来开门。
@@ -360,8 +374,12 @@ public final class AigcOfflineModelRegression {
         String prose = firstParagraph(corpusDir + "/aigc-label-machine-domain.txt");
         AigcDetector.Result on1 = AigcDetector.detect(prose);
         check(on1.modelSentences > 0, "模型达标后 " + on1.modelSentences + " 句改由离线模型打分");
-        check(on1.verdict.indexOf(on.manifest().version) >= 0,
-                "印出来的那一句带上了模型版本号 " + on.manifest().version + "（什么模型、在哪些数据上量的）");
+        // 版本号不再夹进结论句里（报告和界面把出处单独排一行，两处各说一次迟早对不上）：
+        // 它必须在仪器那一格与出处那一行里，而且模型真的参与了打分。
+        check(on1.instrument.indexOf(on.manifest().version) >= 0
+                        && on1.provenance.indexOf(on.manifest().version) >= 0,
+                "仪器那一格与出处那一行都带上了模型版本号 " + on.manifest().version
+                        + "（谁算的分、在哪些数据上量的）");
         check(countOccurrences(on1.verdict, "比例") <= 1, "一份报告的 verdict 里「比例」最多出现一次");
         check(on1.windowHits >= 0, "窗口命中计数 " + on1.windowHits + " 句（可疑字数只按整句计，不重不漏）");
         // 账本口径：同一批可疑区间交两遍，字数不许翻倍（AIGC 与重复的交集只计一次）。
@@ -389,8 +407,16 @@ public final class AigcOfflineModelRegression {
         check(AigcNgramModel.current() == null, "卸载之后没有模型在场");
         check(!AigcNgramModel.engaged() && !AigcNgramModel.calibrated(), "没有模型时开关一律关");
         AigcDetector.Result r = AigcDetector.detect(firstParagraph(corpusDir + "/real-prose.txt"));
-        check(r.verdict.indexOf("判据未标定") >= 0 && r.verdict.indexOf("%") < 0,
-                "没模型时报告既不印百分号也不装作量到了");
+        // 卸掉模型不等于卸掉整件仪器：判据表还在岗，量不到就是量不到，那一个原因说清楚，
+        // 既不印百分号，也不许把那句退役的"判据未标定"再搬出来。
+        check(AigcRhythm.engaged() && r.verdict.indexOf("判据未标定") < 0
+                        && r.verdict.indexOf("样本不足") == 0 && r.verdict.indexOf("%") < 0,
+                "没模型时判据表仍在岗，这一轮只说样本不足，不印百分号（" + r.verdict + "）");
+        // 这一条不许写成"是某个档就行"：模型没达标不许把整件仪器的置信档拖成 LOW。
+        check(r.confidence == AigcRhythm.confidence() && r.confidence == AigcConfidence.MEDIUM,
+                "没有模型在场时置信档仍由判据表自己的实测读数给（" + r.confidence
+                        + "＝段级 AUC " + AigcRhythm.current().segmentAuc + " / 划线误报 "
+                        + AigcRhythm.falsePositivePerMille() + " 每千段），不因模型没达标而降格");
     }
 
     // ---------------------------------------------------------------- 工具

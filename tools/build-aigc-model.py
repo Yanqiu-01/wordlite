@@ -36,6 +36,7 @@ GATE_HUMAN_WINDOW = 0     # 真人段不许有窗口进阈值
 FLAG_GATE = 0.45        # AigcDetector.SEGMENT_FLAG_GATE
 WINDOW_CHARS, WINDOW_STRIDE, WINDOW_MIN = 24, 8, 12
 MODEL_VERSION = "ngram-lr-2026-10-09b"
+CREATED = "2026-10-09"          # 随包清单的 created；export --created 可覆盖（导暂存那一份用新日期）
 
 # ---------------------------------------------------------------- 语料清单（含许可与可分发性）
 
@@ -90,6 +91,31 @@ CORPORA = [
     dict(code="ateeqq", kind="en", license="MIT", ship_raw=False, anon=True,
          url="https://huggingface.co/datasets/Ateeqq/AI-and-Human-Generated-Text/resolve/main/train.csv",
          file="ateeqq_train.csv", note="英文论文摘要人写/AI 写。中文模型不用，留着给拉丁族"),
+    # 2026-10-12 第四轮：子组在 ../aigc-corpus/selfbuild/ 自造的缺失档。这个目录到本轮收尾仍然没有 manifest.json，
+    # 来源按文件字段逐份核（gen / source）；machine_evasive.jsonl 本轮仍是 0 行，不进 CORPORA，等它有了再按同一套规矩接。
+    dict(code="sbwhole", kind="zh", license="自造（本机代理整节生成，无第三方许可约束；原文不进仓库）", ship_raw=False, anon=True,
+         local=True, url="", file="selfbuild/machine_wholesection.jsonl",
+         note="自造整篇直出档：12 个学科按学位论文口吻整节生成（gen=claude-agent-raw），只有学科级对齐、没有逐篇配对。"
+              "本轮这份读数用的是冻结副本 selfbuild-frozen2-20261012：180 行 / 2,040 计分句。"
+              "公开中文语料里没有这一档，真稿留出的 M-DOMAIN（与 H1 同学科同主题的机器整篇稿）正对着它。"
+              "与全体中文公共池逐字重复 0 句、与真稿留出逐字重复 0 句（py tools/build-aigc-model.py guard）"),
+    dict(code="sbstudent", kind="zh", license="自造（同上）", ship_raw=False, anon=True,
+         local=True, url="", file="selfbuild/machine_student_prompt.jsonl",
+         note="自造学生提示档：按'交上去的段落'这类学生提示生成的机器稿，最贴真稿里 M-RAW / M-EVADE 那一档的改写味。"
+              "本轮这份读数用的是冻结副本 selfbuild-frozen2-20261012：60 行 / 724 计分句。"
+              "与全体中文公共池、与真稿留出逐字重复均为 0 句"),
+    dict(code="sbevasive", kind="zh", license="自造（本机代理按规避提示生成，无第三方许可约束；原文不进仓库）", ship_raw=False, anon=True,
+         local=True, url="", file="selfbuild/machine_evasive.jsonl",
+         note="自造规避档：按『别被看出是机器写的』这类提示生成的整段（gen=claude-agent-evasive），对着真稿留出的 M-EVADE 那一档"),
+    dict(code="sbhuman", kind="zh",
+         license="开放获取论文正文（source 字段记到站点：oa-pdf:ojs.omniscient.sg / oa-pdf:cn.front-sci.com / "
+                 "oa-pdf:files.sciengine.com；按各刊开放获取声明使用，仓库里只进派生统计量）",
+         ship_raw=False, anon=True, local=True, url="", file="selfbuild/human_fulltext.jsonl",
+         note="自造真人整篇档（本轮这份读数用的是冻结副本 selfbuild-frozen2-20261012：6,409 行 / 35,614 计分句 / 15 学科，"
+              "其中 geoscience、physics、psychology 三个学科只有人写、没有机器料）：开放获取期刊 PDF 里抽的论文正文整段，"
+              "是这一轮唯一贴近学位论文正文分布的真人料。注意这个文件在子组手里换过一版——早上那 959 行是上游"
+              "公开集的重新打包（mgb-baike / drlx-book / hc3-baike），与全体中文公共池逐字重复 95.8%；"
+              "所以混池配置一律带 sb_dedupe（把与本池其他来源逐字相同的句子剔掉），并用 guard --pool 复核"),
 ]
 NOT_USED = [
     ("TUPE（任务书指定的多语平行学术语料，arXiv 2305.09992）",
@@ -160,6 +186,45 @@ HOLDOUT_TIERS = [
     ("M-DOMAIN", "tests/corpus/aigc-label-machine-domain.txt", 1, "与 H1 同领域同主题逐段配对的机器稿"),
 ]
 TEMPLATE_TIERS = [("TPL-CARTOON", "tests/corpus/aigc-cartoon.txt"), ("TPL-FRAMES", "tests/corpus/aigc-frames.txt")]
+
+# 自造语料（../aigc-corpus/selfbuild/，无 manifest.json，来源按文件字段核）：code -> label（1 = 机器）
+SELFBUILD_LABEL = {"sbwhole": 1, "sbstudent": 1, "sbevasive": 1, "sbhuman": 0}
+# 自造档没有逐篇配对（machine_wholesection 只有 topic，human_fulltext 是另一批上游文本），只有学科级对齐：
+# 同一学科的人写句与机器句共用一个 group_id，配对拟合才能在这一档上做"同学科 人写 vs 机器整篇"的差。
+SELFBUILD_GROUP = "sbd"
+# --selfbuild 指到一份冻结副本时，所有 local=True 的语料都从那里读。子组那边一边跑一边追加文件，
+# 一整张表就会打在不同版本上（本轮实测：一次 compare 跑到一半 machine_wholesection 被追加），必须能钉住。
+SELFBUILD_DIR = ""
+
+
+def sb_path(spec, data_dir):
+    """自建档的真实路径：默认 <data>/selfbuild/<file>，--selfbuild 指到副本就读副本。"""
+    if not spec.get("local"):
+        return os.path.join(data_dir, spec["file"])
+    return os.path.join(SELFBUILD_DIR or os.path.join(data_dir, "selfbuild"), os.path.basename(spec["file"]))
+_GUARD = {}
+
+
+def real_holdout_guard(norm, repo=REPO):
+    """真稿留出那批 tests/corpus 文件（含模板段）的逐字句集。训练侧读自造语料时逐句比对，
+    命中一句就整行不进训练——自造料和真稿可能同题同域，逐字排除是并进训练的前置条件，不是走过场。
+    粒度与训练单位一致：训练与打分都以"计分句"为单位，切句与归一化两边共用同一套函数。"""
+    key = id(norm)
+    if key not in _GUARD:
+        sents = set()
+        for code, rel, lab, note in list(HOLDOUT_TIERS) + [(t[0], t[1], 1, "") for t in TEMPLATE_TIERS]:
+            p = os.path.join(repo, rel.replace("/", os.sep))
+            if not os.path.exists(p):
+                raise SystemExit("逐字守卫缺文件：%s" % rel)
+            for line in io.open(p, encoding="utf-8"):
+                for s in split_sentences(line.rstrip("\n")):
+                    c = norm.compact(s)
+                    if c:
+                        sents.add(c)
+        _GUARD[key] = frozenset(sents)
+    return _GUARD[key]
+
+
 # ---------------------------------------------------------------- 归一化与切句（口径抄 TextCorpus）
 
 BLANKS = {0x20, 0x09, 0x0A, 0x0D, 0x0C, 0x0B, 0x85, 0xA0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000}
@@ -283,6 +348,9 @@ def stage_fetch(args):
     opener = urllib.request.build_opener(*handlers)
     print("代理：%s（清空 --proxy 即直连；本机直连不通，DNS 把 huggingface.co 污染到了别的地址）" % (proxy or "直连"))
     for spec in CORPORA:
+        if spec.get("local"):
+            print("跳过 %-34s 自造语料：本台不下载，放在 ../aigc-corpus/selfbuild/，接进训练前跑 guard" % spec["file"])
+            continue
         dst = os.path.join(args.data, spec.get("raw_file") or spec["file"])
         if os.path.exists(dst) and os.path.getsize(dst) > 1024 and not args.redo:
             print("已有 %-24s %8.1f MB" % (os.path.basename(dst), os.path.getsize(dst) / 1e6)); continue
@@ -363,12 +431,14 @@ def ensure_drlx_zh(data_dir, redo=False):
 
 def domain_of(code, src):
     """公共侧的"域"：按文本群体划分，专门用来量域偏移（同域配对的分 vs 跨域迁移的分）。"""
+    if code in SELFBUILD_LABEL:
+        return src                    # 自造档传进来的就是 selfbuild/<m|h>-<学科>；不认就会退回 code，学科域全丢
     if code == "hc3zh":
         return src                       # hc3-baike / hc3-law / hc3-medicine / ... 分开算域
     if code == "pangda":
         return "web-query"
     if code.startswith("prhpp"):
-        return "academic-abstract"
+        return src if str(src).startswith("academic-abstract") else "academic-abstract"
     if code == "setask8zh":
         return "web-ugc"
     if code == "anxzh":
@@ -378,18 +448,21 @@ def domain_of(code, src):
     return code
 
 
-def rows_of(data_dir, norm, only=None):
+def rows_of(data_dir, norm, only=None, subject_split=False):
     """[(group_id, source_code, label, raw_sentence, compact, domain)]，label 1 = 机器。
     group_id 里带来源行号/标题：同一条样本的人写与机器版本落进同一组，防止改写对跨划分泄漏。"""
     out, stats, dropped = [], Counter(), Counter()
     import csv
     ensure_drlx_zh(data_dir)                    # 有原始大数组但没抽过中文子集时先抽一次
+    # 自造语料要逐字比对真稿留出：命中一句整行不进训练（guard 子命令报的就是这个口径）
+    guard = real_holdout_guard(norm) if any(sp["code"] in SELFBUILD_LABEL and not (only and sp["code"] not in only)
+                                            for sp in CORPORA) else frozenset()
     for spec in CORPORA:
-        if spec["kind"] != "zh" or not os.path.exists(os.path.join(data_dir, spec["file"])):
+        path = sb_path(spec, data_dir)        # 自建档走 --selfbuild 那份（见 SELFBUILD_DIR 的注释）
+        if spec["kind"] != "zh" or not os.path.exists(path):
             continue
         if only and spec["code"] not in only:
             continue
-        path = os.path.join(data_dir, spec["file"])
         if spec["file"].endswith(".csv"):
             reader = (csv.DictReader(io.open(path, encoding="utf-8", errors="ignore", newline="")))
         else:
@@ -447,9 +520,23 @@ def rows_of(data_dir, norm, only=None):
                 gid = "drlxzh:%d" % i                      # 同一条指令的真人稿与机器稿在一行里，一起进同一组
                 pairs = [(row.get("human_written_text") or "", 0),
                          (row.get("llm_generated_text") or "", 1)]
+            elif code in SELFBUILD_LABEL:
+                lab = SELFBUILD_LABEL[code]
+                d0 = (str(row.get("domain") or "?").strip().lower() or "?")
+                dom = "selfbuild/%s-%s" % ("m" if lab else "h", d0)
+                gid = "%s:%s" % (SELFBUILD_GROUP, d0)      # 同学科的人写与机器句同组：见 SELFBUILD_GROUP 的注释
+                hit = [c for c in (norm.compact(s) for s in split_sentences(row.get("text") or "")) if c in guard]
+                if hit:                                    # 与真稿留出逐字相同：整行剔掉，一句都不进训练侧
+                    dropped["selfbuild-vs-real-holdout"] += 1
+                    continue
+                pairs = [(row.get("text") or "", lab)]
             else:
                 gid = "%s:%s" % (code, row.get("title") or i)
                 lab = int(row.get("label", 1)) if row.get("label") is not None else 1
+                if code.startswith("prhpp"):
+                    dom = "academic-abstract"
+                    if subject_split and row.get("category"):    # prhpp 的学科字段：摘要档再切学科子域
+                        dom = "academic-abstract/" + str(row["category"]).strip()
                 pairs = [(row.get("text") or "", lab)]
             for text, lab in pairs:
                 for sent in split_sentences(text or ""):
@@ -540,6 +627,255 @@ CONFIGS = [
          ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN_NEW, balance="domain"),
     dict(name="P-modern-evasive", only=["prhpp", "prhpp_te", "prhppgen", "magazh", "magaaug", "drlxzh"],
          ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN_NEW, balance="domain", prune="domain-sign"),
+    # 2026-10-12 新增：针对"公共侧过好、真稿侧崩"，一条路子一个配置，每个都有独立读数
+    # ① 配对拟合：同一篇人写原文与它的机器改写落同一折，且权重只从组内差样本里学
+    dict(name="Q-pairdiff-abstract", only=["prhpp", "prhpp_te", "prhppgen"], ngram=(2, 4), min_df=5,
+         C=1.0, pair="gdiff"),
+    # ② 配对 + 学科均衡：prhpp 的 category 字段把摘要档切成 13 个学科子域，再按 (学科, 类别) 配平
+    dict(name="R-pairdiff-subjectbal", only=["prhpp", "prhpp_te", "prhppgen"], ngram=(2, 4), min_df=5,
+         C=1.0, pair="gdiff", subject_split=True, balance="domain"),
+    # ③ 配对 + 正文级学术料：加 DetectRL-X 中文 Academic 档（真人正文 vs 现代模型整篇改写，同一行成对）
+    dict(name="S-pairdiff-academic", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 4),
+         min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic",)),
+    # ④ 同上但不筛域，六个域全上（"域越杂越像真稿"这件事到底成不成立）
+    dict(name="T-pairdiff-fullmix", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 4),
+         min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW),
+    # ⑤ 特征面按域 AUC 收窄：候选放宽到 3 倍，再用"域内单变量 AUC 一致率 + 幅度"筛回 20000 条
+    dict(name="U-domauc-prune", only=["prhpp", "prhpp_te", "prhppgen", "anxzh"], ngram=(2, 4), min_df=8,
+         C=1.0, balance="domain", prune="domain-auc", cand_mult=3, cap=CAP_PER_DOMAIN_NEW),
+    # ⑥ 域均衡 + 降权 + 句长带：远的料（SEO、网文、口语问答、摘要体整篇稿）压权，短句与超长句剔除
+    dict(name="V-lean-formal", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh", "anxzh"], ngram=(2, 4),
+         min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW, len_range=(20, 90),
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic", "drlx-news", "drlx-wiki", "news", "essay"),
+         domain_weight=[("drlx-novel", 0.3), ("drlx-seo", 0.3), ("drlx-webtext", 0.3), ("essay", 0.5)],
+         bias_pool="formal"),
+    # ⑦ 标定池单独一条：与 S 同一份权重，只把挑偏置用的那批真人句换成学术档
+    dict(name="Y-bias-formal", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 4),
+         min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic",), bias_pool="formal"),
+    # ⑧ 特征面收窄的另外两刀：正则化加强 / 去掉 4-gram（4-gram 最容易学到领域词汇）
+    dict(name="W-lowc", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 4),
+         min_df=8, C=0.1, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic",)),
+    dict(name="X-ngram23", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 3),
+         min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic",)),
+    # 同日第二轮：X 那一档（去掉 4-gram）真稿误报已经进门槛，围着它再切几刀，每刀一个独立读数
+    # X6 / X7 与 X 的权重完全一样（句级三档数一字不差），只把滑窗频率表的语料池从 formal 换成
+    # "这份配置读到的全部公开真人句"：句级打分不受影响，只动滑窗那两栏；X7 再加条数上限控体积
+    dict(name="X6-ngram23-humanfreq", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 3),
+         min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic",), freq_pool="human"),
+    dict(name="X7-ngram23-freqcap", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 3),
+         min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic",), freq_pool="human",
+         freq_cap_bi=40000, freq_cap_tri=60000),
+    dict(name="X2-ngram23-lowc", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 3),
+         min_df=8, C=0.3, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic",)),
+    dict(name="X3-ngram23-nopair", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 3),
+         min_df=8, C=1.0, balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic",)),
+    dict(name="X4-ngram23-drlxonly", only=["drlxzh"], ngram=(2, 3), min_df=8, C=1.0, pair="gdiff",
+         balance="domain", cap=CAP_PER_DOMAIN_NEW, keep_domains=("drlx-academic",)),
+    dict(name="X5-ngram23-fullmix", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 3),
+         min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW),
+    dict(name="L1-longform-bias", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 3),
+         min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic",), bias_pool="longform"),
+    dict(name="BL1-blend", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 3),
+         min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW, blend=1.0,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic",)),
+    # 把"按域 AUC 筛特征"重做一遍：域铺开到 19 个（上一版只有 2 个域，一致率一刀就刷光了），
+    # 阈值也放软（一致率 0.7、平均幅度 0.005），每域上限压到 12,000 句防内存
+    dict(name="Z2-domauc-wide", only=["prhpp", "prhpp_te", "prhppgen", "hc3zh", "pangda", "setask8zh",
+                                       "anxzh", "drlxzh"], ngram=(2, 3), min_df=10, C=1.0, pair="gdiff",
+         balance="domain", prune="domain-auc", cand_mult=3, min_share=0.7, min_gap=0.005, cap=12000),
+    # ⑩ 工作点单独一条：偏置是分数上的单调平移，改它 AUC 一个字都不动，能动的只有"真人误报"和"机器过线"。
+    #    出厂门槛的 2/千句是按 0.45 量的，挑偏置按 0.5，两边差着一截；这里把挑偏置的目标收紧，
+    #    看 ③ 那一栏跟不跟得下来。严格度（0.5、0.2）是我看过 ③ 误报之后定的，等于用掉了一次真稿留出，
+    #    文档里按这个口径标注，不算事前规则。
+    dict(name="Z3-strict-bias-d", only=["prhpp", "prhpp_te", "prhppgen", "pangda"], ngram=(2, 4),
+         min_df=10, C=1.0, cap=CAP_PER_DOMAIN, bias_fp_target=0.5,
+         bias_note="这一档的严格度（0.5/千句）是看过 ③ 真人误报之后定的：用掉了一次真稿留出，"
+                   "它的 ③ 误报不能当独立复核用"),
+    dict(name="Z4-strictest-bias-d", only=["prhpp", "prhpp_te", "prhppgen", "pangda"], ngram=(2, 4),
+         min_df=10, C=1.0, cap=CAP_PER_DOMAIN, bias_fp_target=0.2,
+         bias_note="同 Z3，严格度（0.2/千句）是看过 ③ 之后定的"),
+    dict(name="Z5-strict-bias-x", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 3),
+         min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic",), bias_fp_target=0.5,
+         bias_note="同 Z3，严格度（0.5/千句）是看过 ③ 之后定的"),
+    # ⑪ 上一条严格度是看过 ③ 才定的，这一条不是：只把挑偏置用的尺子换成出厂门槛那把（0.45，2/千句），
+    #    事前口径，权重与 D / X 一字不差，AUC 也一字不差，动的只有工作点。
+    dict(name="Z6-gatecal-d", only=["prhpp", "prhpp_te", "prhppgen", "pangda"], ngram=(2, 4),
+         min_df=10, C=1.0, cap=CAP_PER_DOMAIN, bias_at_gate=True),
+    dict(name="Z7-gatecal-x", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh"], ngram=(2, 3),
+         min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic",), bias_at_gate=True),
+    # 2026-10-12 第四轮：把子组自造的缺失档（../aigc-corpus/selfbuild/）并进训练。每一刀只在上一个配置上动一处，
+    # 逐字守卫（真稿留出命中即整行剔除）与 sb_dedupe（自造真人档与本池其他来源逐字相同的句子剔掉）都在 rows_of /
+    # fit_config 里，不在配置里选。对照的基线：D-no-hc3 ③ 0.5952 / 误报 9.62 / 机器过线 1.62%，X-ngram23 ③ 0.5754 / 1.60 / 0。
+    # SA：只加机器侧自造档（整篇直出 + 学生提示），与 D 唯一的差别就是这 1.2k 句新料
+    dict(name="SA-sb-mach", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN),
+    # SB：再加自造真人整篇档（对 D 这一档的池子来说它是新料：与 prhpp+pangda 逐字相同只有 4 句）
+    dict(name="SB-sb-both", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent", "sbhuman"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN, sb_dedupe=True),
+    # SC：自造那一档升权 4 倍（1.2k 句 vs 15 万句，不升权等于没说话）
+    dict(name="SC-sb-both-up", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent", "sbhuman"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN, sb_dedupe=True,
+         domain_weight=[("selfbuild/", 4.0)]),
+    # SD：同一份料改成域内类别配平（域均衡这条杠杆在有新档之后重测一次）
+    dict(name="SD-sb-both-bal", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent", "sbhuman"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN, sb_dedupe=True, balance="domain"),
+    # SE：SB 的工作点换成出厂那把尺子（0.45 / 2 千句）——AUC 与 SB 一字不差，动的只有误报与机器过线
+    dict(name="SE-sb-both-gatecal", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent", "sbhuman"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN, sb_dedupe=True, bias_at_gate=True),
+    # SF：配对那一档（X-ngram23）加自造档：同学科的人写句与机器整篇稿同组，配对差样本能吃到这一档
+    dict(name="SF-sb-x-pair", only=["prhpp", "prhpp_te", "prhppgen", "drlxzh", "sbwhole", "sbstudent", "sbhuman"],
+         ngram=(2, 3), min_df=8, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         keep_domains=ACADEMIC_DOMAINS + ("drlx-academic", "selfbuild"), sb_dedupe=True),
+    # SG：只用自造档训练（同学科 人写整篇 vs 机器整篇），量"最贴真稿分布的这一档单独能考多少"
+    dict(name="SG-sb-only", only=["sbwhole", "sbstudent", "sbhuman"], ngram=(2, 3), min_df=2, C=1.0,
+         pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW),
+    # 上面一轮（domain_of 还没修）里 SA 是唯一把 ③ 抬过 0.60 的一档，围着它再切：谁在出力 / 域均衡 / 升权 / 特征面 / 工作点
+    # SJ：只留整篇直出那一档，剥掉学生提示档——0.6477 里有多少是整篇直出带来的
+    dict(name="SJ-sb-whole-only", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN),
+    # SI：SA + 域内类别配平（域均衡这条杠杆在"新料只有机器侧"的池子里重测）
+    dict(name="SI-sb-mach-bal", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN, balance="domain"),
+    # SK：SA + 自造那一档升权 4 倍（1.2k 句 vs 7.5 万句）
+    dict(name="SK-sb-mach-up", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN, domain_weight=[("selfbuild/", 4.0)]),
+    # SH：SA 的工作点换成出厂那把尺子（0.45 / 2 千句），AUC 一字不差，只看误报与机器过线跟不跟下来
+    dict(name="SH-sb-mach-gatecal", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN, bias_at_gate=True),
+    # SM / SN：SA 去掉 4-gram（上一轮这一刀把 X 那一档的 ③ 误报从 4.81 压到 1.60），再配工作点
+    dict(name="SM-sb-mach-23", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent"],
+         ngram=(2, 3), min_df=10, C=1.0, cap=CAP_PER_DOMAIN),
+    dict(name="SN-sb-mach-23-gatecal", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent"],
+         ngram=(2, 3), min_df=10, C=1.0, cap=CAP_PER_DOMAIN, bias_at_gate=True),
+    # SG（只用自造档）③ 到了 0.7444，是这台机器上量过的最高值，但 ③ 误报 14.42；下面四条顺着"自造档权重越高越好"
+    # 这条梯度再切，并且把 SG 的工作点换成出厂那把尺子。注意：这四档是看过 ③ 之后才切的，等于又用掉一次真稿留出。
+    # SO：SG + 出厂尺子的工作点（事前口径，AUC 一字不差）
+    dict(name="SO-sb-only-gatecal", only=["sbwhole", "sbstudent", "sbhuman"], ngram=(2, 3), min_df=2, C=1.0,
+         pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW, bias_at_gate=True),
+    # SQ：SD（域均衡那一档）+ 出厂尺子
+    dict(name="SQ-sb-both-bal-gatecal", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent", "sbhuman"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN, sb_dedupe=True, balance="domain", bias_at_gate=True),
+    # SR / SS：把自造档升权拉到 10 倍——SK（4 倍）与 SG（只有自造档）之间这条梯度到底还有多少余量
+    dict(name="SR-sb-mach-up10", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN, domain_weight=[("selfbuild/", 10.0)]),
+    dict(name="SS-sb-both-up10-bal", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent", "sbhuman"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN, sb_dedupe=True, balance="domain",
+         domain_weight=[("selfbuild/", 10.0)]),
+    # 自建档补齐之后（machine_evasive 也到了，gen=claude-agent-evasive）再各加一条：规避档进得来吗
+    # ST：SQ（域均衡 + 出厂尺子）+ 规避档
+    dict(name="ST-sb-all-bal-gatecal", only=["prhpp", "prhpp_te", "prhppgen", "pangda", "sbwhole", "sbstudent",
+                                             "sbevasive", "sbhuman"],
+         ngram=(2, 4), min_df=10, C=1.0, cap=CAP_PER_DOMAIN, sb_dedupe=True, balance="domain", bias_at_gate=True),
+    # SU：只用自建档 + 出厂尺子（SO 加上规避档）
+    dict(name="SU-sb-all-only-gatecal", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW, bias_at_gate=True),
+    # SV：与 SU 同一套权重（句级三档数一字不差），只给滑窗频率表加条数上限——自建档句子长，
+    # 三字表一度涨到 85,342 条，随包三件合计 1,767 KB，超了 1.5 MB 的随包预算。
+    dict(name="SV-sb-all-freqcap", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, freq_cap_bi=15000, freq_cap_tri=30000),
+    # ---- 第二次冻结副本（../aigc-corpus/selfbuild-frozen2-20261012，05:03 追加之后）：
+    # 人写整篇 17,787 -> 35,614 计分句，整篇直出 1,819 -> 2,040，学生提示 523 -> 724，规避档 231 -> 730。
+    # 下面四档与 SU/SV 同口径，只是多了 sb_domain_pair：同一学科的 selfbuild/h-x 与 selfbuild/m-x 并成一个域。
+    # SW：SU + 学科域并档（学科配平这才真的在自建档上生效）
+    dict(name="SW-sb2-pairdom", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    # SX：SW + 按学科域内单变量 AUC 收窄特征面（一个特征要在多数学科里同向且幅度够才留）
+    dict(name="SX-sb2-pairdom-prune", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100,
+         freq_cap_bi=15000, freq_cap_tri=30000,
+         prune="domain-auc", auc_min_rows=100, cand_mult=3, min_share=0.75, min_gap=0.02),
+    # SY：SW + 按学科域内符号一致率收窄（同一件事的另一把尺子）
+    dict(name="SY-sb2-pairdom-sign", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100,
+         freq_cap_bi=15000, freq_cap_tri=30000, prune="domain-sign", min_share=0.8),
+    # SZ：SW 去掉配对拟合（并档之后把 pair 这一刀单独摘出来量）
+    dict(name="SZ-sb2-nopair", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    # TA：把"一组最多 12 对"的上限抬到 48——追加之后每个学科两侧各有几百句，12 对让配对实际只用 132 条差样本
+    dict(name="TA-sb2-pair48", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100, pair_per_group=48,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    # TB / TC：配对权重与普通权重按 1:blend 混合。SZ（不配对）③ AUC 最高但 ③ 误报 17.63，
+    # 配对把误报压死之外还倒贴一点 AUC——混合比就是这两者之间的滑杆。
+    dict(name="TB-sb2-blend05", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100, pair_per_group=48, blend=0.5,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    dict(name="TC-sb2-blend10", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100, pair_per_group=48, blend=1.0,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    # TD / TE：SZ 那一套权重不动（AUC 与工作点无关），只把公共侧挑偏置的目标从 2/千句 收到 0.2/千句，
+    # 看真稿那一侧的误报能不能跟着落到门槛以内。TE 再叠一条按学科域符号一致率筛特征。
+    dict(name="TD-sb2-nopair-strict", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100, bias_fp_target=0.2,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    dict(name="TE-sb2-nopair-sign", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100, bias_fp_target=0.2,
+         prune="domain-sign", min_share=0.8,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    # TE 是这台机器上第一版"③ AUC 往上走、③ 误报还留在校栏以内"的配置（0.8032 / 0.00），围着它再切四刀：
+    # TF：特征面放到 2-4 gram（筛特征之前候选面更宽）
+    dict(name="TF-sb2-sign-24", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 4), min_df=3, C=1.0, balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100, bias_fp_target=0.2,
+         prune="domain-sign", min_share=0.8,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    # TG：符号一致率门槛从 0.8 提到 0.9（筛得更狠）
+    dict(name="TG-sb2-sign-share90", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100, bias_fp_target=0.2,
+         prune="domain-sign", min_share=0.9,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    # TH：min_df 从 2 抬到 3（少见字符组合在真稿侧覆盖不到，先在公共侧就丢掉）
+    dict(name="TH-sb2-sign-mindf3", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=3, C=1.0, balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100, bias_fp_target=0.2,
+         prune="domain-sign", min_share=0.8,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    # TI：TE 的权重里掺 0.3 份配对权重——TE 的机器过线只有 3.77%，看配对能不能把召回换回来一点
+    dict(name="TI-sb2-sign-blend03", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100, bias_fp_target=0.2,
+         pair_per_group=48, blend=0.3, prune="domain-sign", min_share=0.8,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    # TI（0.8086 / 0.00）是这一轮综合最好的一版，最后围着它切三刀就收：min_df、特征面、混合比
+    dict(name="TJ-sb2-sign-blend03-mindf3", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=3, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100, bias_fp_target=0.2,
+         pair_per_group=48, blend=0.3, prune="domain-sign", min_share=0.8,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    dict(name="TK-sb2-sign-blend03-24", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 4), min_df=3, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100, bias_fp_target=0.2,
+         pair_per_group=48, blend=0.3, prune="domain-sign", min_share=0.8,
+         freq_cap_bi=15000, freq_cap_tri=30000),
+    dict(name="TL-sb2-sign-blend06", only=["sbwhole", "sbstudent", "sbevasive", "sbhuman"],
+         ngram=(2, 3), min_df=2, C=1.0, pair="gdiff", balance="domain", cap=CAP_PER_DOMAIN_NEW,
+         bias_at_gate=True, sb_domain_pair=True, balance_min_rows=100, bias_fp_target=0.2,
+         pair_per_group=48, blend=0.6, prune="domain-sign", min_share=0.8,
+         freq_cap_bi=15000, freq_cap_tri=30000),
 ]
 CACHE = {}
 LODO_MIN_ROWS = 400          # 一个域要两边各 >= 400 句才进跨域考核
@@ -647,29 +983,265 @@ def cap_by_domain(comps_gids, doms_row, cap):
     return keep
 
 
+# -------------------------------------------- 2026-10-12 新增：配对拟合、按域 AUC 筛特征、标定池、域降权
+
+def dom_in(d, names):
+    """域匹配：允许 "academic-abstract/工学" 这类学科子域挂在 "academic-abstract" 名下一起算。"""
+    for n in names:
+        if d == n or d.startswith(n + "/"):
+            return True
+    return False
+
+
+def academic_mask(dom):
+    return np.array([dom_in(d, ACADEMIC_DOMAINS) for d in dom], dtype=bool)
+
+
+class FlatModel(object):
+    """只剩一个权重向量和一个截距的"模型"。decision_function / coef_ / intercept_ 都在，
+    打分与导出两侧只用到这三样，所以两份权重线性混合之后还能当出厂那份用。"""
+
+    def __init__(self, w, b=0.0):
+        self.coef_ = np.array([np.asarray(w, dtype=np.float64)])
+        self.intercept_ = np.array([float(b)])
+
+    def decision_function(self, X):
+        return X.dot(self.coef_[0]) + self.intercept_[0]
+
+
+def _unit(v):
+    n = float(np.linalg.norm(v))
+    return np.asarray(v, dtype=np.float64) / (n if n > 1e-12 else 1.0)
+
+
+def choose_bias(scores, va, y, dom, cfg=None, comps=None):
+    """偏置只在公共真人留出侧挑：让 P>=0.5 的真人句比例不超过 2/1000（原来内联在 gate 与 compare 里，
+    现在两边共用一条口径）。bias_pool="formal" 时只用学术/新闻那几档的真人句挑——真稿正文的分数尾巴
+    像它们，不像口语问答；拿全体公共真人句一起挑，门槛会放得比真稿需要的松。仍然一个字不碰真稿留出。
+    bias_fp_target 覆盖这里的目标（默认就是出厂那条 2/千句）：调工作点用的，AUC 不受它影响。
+    bias_at_gate=True 把这里量的门槛从 0.5 换成出厂那把尺子用的 0.45（FLAG_GATE）——出厂门槛与导出清单
+    都在 0.45 上数真人误报，挑偏置却在 0.5 上数，两边本来就差着一截；换成同一条尺子是事前就能定的口径，
+    不看真稿留出。"""
+    m = va & (y == 0)
+    pool = cfg.get("bias_pool") if cfg else None
+    if pool == "formal" and dom is not None:
+        f = m & academic_mask(np.asarray(dom))
+        if int(f.sum()) >= 400:
+            m = f
+    elif pool == "longform" and comps is not None:
+        lo, hi = cfg.get("bias_len", (25, 90))      # 真稿 H1 句长中位 46；公共真人句普遍短得多
+        ln = np.array([len(c) for c in comps])
+        f = m & (ln >= lo) & (ln <= hi)
+        if int(f.sum()) >= 400:
+            m = f
+    hum = scores[m]
+    target = float(cfg.get("bias_fp_target", GATE_FP_PER_MILLE)) if cfg else float(GATE_FP_PER_MILLE)
+    thr = FLAG_GATE if (cfg and cfg.get("bias_at_gate")) else 0.5
+    bias = 0.0
+    for b in np.arange(0.0, -14.0, -0.02):
+        if float(np.mean(sigmoid(hum + b) >= thr)) <= target / 1000.0:
+            bias = float(b)
+            break
+    return bias
+
+
+def domain_style_weight(y, dom, rules):
+    """按域前缀降权/升权，rules = [("drlx-webtext", 0.3), ...]：与学位论文正文分布差太远的料少说话。
+    乘在域内配平之上，只动拟合侧的样本权重，不动句数、不动留出侧。"""
+    w = np.ones(len(y), dtype=np.float64)
+    for i, d in enumerate(dom):
+        for pre, mult in rules:
+            if d == pre or d.startswith(pre):
+                w[i] = float(mult)
+                break
+    return w
+
+
+PAIR_MAX_PER_GROUP = 12      # 一组（同一篇人类原文与它的机器改写版）最多取几对
+PAIR_MAX_TOTAL = 40000       # 差样本总条数上限：机器 16 GB，配对料再多也不许把内存吃穿
+
+
+def _even_pick(seq, k):
+    if len(seq) <= k:
+        return list(seq)
+    if k <= 1:
+        return [seq[0]]
+    return [seq[int(round(j * (len(seq) - 1) / float(k - 1)))] for j in range(k)]
+
+
+def pair_diff_fit(X, y, gids, dom, cfg, mask=None):
+    """配对拟合（配置里 pair="gdiff"）：只在同时有人写句与机器句的组内做差。
+    组内按句序一一配对（润色稿大体保留句序），两边句数不等时再补一条"组均值差"；每条差向量
+    和它的相反数各算一个样本，标签 1/0。同组两侧一样的东西——选题、学科、领域、作者习惯——
+    全被减掉，w 只能学改写痕迹。返回 (逻辑回归, 差样本条数, 用到的组数)。"""
+    from scipy import sparse as sp
+    sel = np.ones(len(y), dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+    groups = {}
+    for i, g in enumerate(gids):
+        if sel[i]:
+            groups.setdefault(g, []).append(i)
+    cands = []
+    for g, idx in groups.items():
+        h = [i for i in idx if y[i] == 0]
+        m = [i for i in idx if y[i] == 1]
+        if h and m:
+            cands.append((g, h, m))
+    cands.sort(key=lambda t: int(hashlib.md5(t[0].encode("utf-8")).hexdigest()[:8], 16))
+    total = int(cfg.get("pair_total", PAIR_MAX_TOTAL))
+    rows, wts, dcols = [], [], []
+    for g, h, m in cands:
+        if len(rows) >= total:
+            break
+        k = min(len(h), len(m), int(cfg.get("pair_per_group", PAIR_MAX_PER_GROUP)))
+        hh, mm = _even_pick(h, k), _even_pick(m, k)
+        diffs = [X[j] - X[i] for i, j in zip(hh, mm)]
+        if len(h) != len(m):
+            diffs.append(sp.csr_matrix((np.asarray(X[m].mean(axis=0)).ravel() -
+                                        np.asarray(X[h].mean(axis=0)).ravel()).reshape(1, -1)))
+        wt = 1.0 / len(diffs)          # 一组一票：长文档不许靠句数压过短文档
+        for d, j in zip(diffs, mm):
+            rows.append(d)
+            wts.append(wt)
+            dcols.append(dom[j])
+    if not rows:
+        return None, 0, 0
+    D = sp.vstack(rows).tocsr()
+    Xd = sp.vstack([D, -D]).tocsr()
+    yd = np.r_[np.ones(D.shape[0], dtype=np.int64), np.zeros(D.shape[0], dtype=np.int64)]
+    w = np.array(wts + wts, dtype=np.float64)
+    dcols = np.array(dcols + dcols)
+    for d in set(dcols.tolist()):      # 域之间等权，与 domain_balance_weight 同一口径
+        s = dcols == d
+        if s.sum():
+            w[s] *= 1.0 / float(s.sum())
+    w *= len(w) / w.sum()
+    mdl = lr(float(cfg.get("C", 1.0)), 3000)
+    mdl.fit(Xd, yd, sample_weight=w)
+    return mdl, int(D.shape[0]), len(cands)
+
+
+def _auc_hist(M, yy, ncol, cap=63):
+    """一域一矩阵：每个候选列在该域内的单变量 AUC（机器句的原始计数排在真人句之上的概率，并列记 0.5；
+    两边都没出现过这个特征也算并列）。计数截到 cap，按 (列, 计数) 直方图整域一次算完，不逐列排序。"""
+    nh, nm = int((yy == 0).sum()), int((yy == 1).sum())
+    if not nh or not nm:
+        return np.full(ncol, 0.5, dtype=np.float32)
+    hist = []
+    for lab in (0, 1):
+        s = M[yy == lab].tocsr()          # csr 的 indices 就是列号，直方图按 (列, 计数) 建
+        col = s.indices.astype(np.int64)
+        v = np.minimum(np.asarray(s.data, dtype=np.int64), cap)
+        u, c = np.unique(col * (cap + 1) + v, return_counts=True)
+        hist.append((u, c.astype(np.float64)))
+    allk = np.union1d(hist[0][0], hist[1][0])
+    if not len(allk):
+        return np.full(ncol, 0.5, dtype=np.float32)
+
+    def align(u, c):
+        p = np.clip(np.searchsorted(u, allk), 0, len(u) - 1)
+        hit = u[p] == allk
+        a = np.zeros(len(allk), dtype=np.float64)
+        a[hit] = c[p[hit]]
+        return a
+
+    v0, v1 = align(*hist[0]), align(*hist[1])
+    col = allk // (cap + 1)
+    starts = np.flatnonzero(np.r_[np.ones(1, dtype=bool), col[1:] != col[:-1]])
+    grp = np.repeat(np.arange(len(starts)), np.diff(np.r_[starts, len(col)]))
+    cs0 = np.cumsum(v0)
+    before = np.r_[0.0, cs0[starts[1:] - 1]]       # 每列起点之前的累计人头：取起点前一位的前缀和                 # 每列起点之前的人头累计
+    excl = cs0 - before[grp] - v0                         # 同列里计数严格更小的人头
+    tot0 = np.bincount(col, weights=v0, minlength=ncol)
+    tot1 = np.bincount(col, weights=v1, minlength=ncol)
+    z0, z1 = nh - tot0, nm - tot1                         # 该特征没出现在那些行里
+    win = v1 * (z0[col] + excl + 0.5 * v0)
+    num = np.bincount(col, weights=win, minlength=ncol) + 0.5 * z1 * z0
+    return (num / float(nh * nm)).astype(np.float32)
+
+
+def domain_auc_matrix(vec, cand, comps, y, dom, tr, cfg):
+    """每个候选特征在每个域内的单变量 AUC。只用拟合侧的行，一个域最多抽 auc_rows 句。
+    这是"按域"而不是"按公共侧总体"：一个特征必须在多数域里都朝着同一边、而且差得够多才算数，
+    公共侧总 AUC 很高但只在两三个域里有用的那种特征会被刷掉。真稿留出全程不参与。"""
+    inv = {v: k for k, v in vec.vocabulary_.items()}
+    vocab, keep_cols = {}, []
+    for c in cand:
+        g = inv.get(c)
+        if g is not None and g not in vocab:
+            vocab[g] = len(keep_cols)
+            keep_cols.append(c)
+    vc = CountVectorizer(analyzer="char", ngram_range=tuple(vec.ngram_range), lowercase=False, vocabulary=vocab)
+    doms = both_class_domains(y[tr], dom[tr], min_rows=int(cfg.get("auc_min_rows", 300)))
+    A = np.full((len(doms), len(keep_cols)), 0.5, dtype=np.float32)
+    n_rows = int(cfg.get("auc_rows", 20000))
+    for di, d in enumerate(doms):
+        idx = np.where(tr & (dom == d))[0]
+        if len(idx) > n_rows:
+            idx = idx[np.linspace(0, len(idx) - 1, n_rows).astype(int)]
+        yy = y[idx]
+        if int(yy.sum()) == 0 or int(yy.sum()) == len(yy):
+            continue
+        A[di] = _auc_hist(vc.transform([comps[i] for i in idx]), yy, len(keep_cols))
+    return A, doms, np.array(keep_cols, dtype=np.int64)
+
+
+def select_by_domain_auc(A, doms, cfg):
+    """按域 AUC 矩阵挑特征：符号一致率 >= min_share 且域间平均 |AUC-0.5| >= min_gap 才留，
+    留下的按 一致率 × 平均幅度 排序。返回 (候选下标, 诊断)。"""
+    dev = A - 0.5
+    sgn = np.sign(dev.mean(axis=0))
+    share = (np.sign(dev) == sgn[None, :]).mean(axis=0)
+    mag = np.abs(dev).mean(axis=0)
+    worst = np.abs(dev).min(axis=0)
+    ok = (sgn != 0) & (share >= float(cfg.get("min_share", 0.75))) & (mag >= float(cfg.get("min_gap", 0.02)))
+    score = np.where(ok, share * mag, -1.0)
+    keep = [int(i) for i in np.argsort(-score) if ok[i]]
+    diag = dict(n_domains=len(doms), n_candidates=int(A.shape[1]), n_kept=len(keep),
+                min_share=float(cfg.get("min_share", 0.75)), min_gap=float(cfg.get("min_gap", 0.02)),
+                mag_p50_kept=round(float(np.median(mag[keep])), 4) if keep else None,
+                worst_p50_kept=round(float(np.median(worst[keep])), 4) if keep else None)
+    return np.array(keep, dtype=np.int64), diag
+
+
 def fit_config(data_dir, norm, cfg, want_lodo=True, verbose=True):
-    rows, stats = rows_of(data_dir, norm, only=cfg.get("only"))
+    rows, stats = rows_of(data_dir, norm, only=cfg.get("only"), subject_split=bool(cfg.get("subject_split")))
     if cfg.get("drop"):
         rows = [r for r in rows if not any(r[0].startswith(d) for d in cfg["drop"])]
-    gids = np.array([r[0] for r in rows])
-    codes = np.array([r[1] for r in rows])
-    doms_row = np.array([r[5] for r in rows])
-    y = np.array([r[2] for r in rows])
-    comps = [r[4] for r in rows]
+    if cfg.get("sb_domain_pair"):      # 自建档每个学科本来是两个域（selfbuild/h-x 与 selfbuild/m-x，各自只有一个类别），
+        def _sb_dom(d):                # 于是 both_class_domains 在一个自建档域里都找不到，域配平和按域 AUC 筛特征
+            if not d.startswith("selfbuild/"):      # 在这一档上全都空转。这里把同一学科的人写与机器并成一个域。
+                return d
+            t = d[len("selfbuild/"):]
+            return "selfbuild/" + (t[2:] if t[:2] in ("h-", "m-") else t)
+        rows = [r[:5] + (_sb_dom(r[5]),) for r in rows]
+    if cfg.get("len_range"):          # 只筛训练侧句长（短句、问答体、摘要体离学位论文正文太远）；
+        lo, hi = cfg["len_range"]     # 真稿留出永远全量照判，这一条不改口径
+        rows = [r for r in rows if lo <= len(r[4]) <= hi]
+
+    def rearray(rs):
+        return (np.array([q[0] for q in rs]), np.array([q[1] for q in rs]), np.array([q[5] for q in rs]),
+                np.array([q[2] for q in rs]), [q[4] for q in rs])
+
+    gids, codes, doms_row, y, comps = rearray(rows)
     if cfg.get("keep_domains"):
-        keep_d = np.isin(doms_row, list(cfg["keep_domains"]))
+        keep_d = np.array([dom_in(d, cfg["keep_domains"]) for d in doms_row])
         rows = [r for r, k in zip(rows, keep_d) if k]
-        gids, codes, doms_row, y, comps = (np.array([r[0] for r in rows]), np.array([r[1] for r in rows]),
-                                           np.array([r[5] for r in rows]), np.array([r[2] for r in rows]),
-                                           [r[4] for r in rows])
+        gids, codes, doms_row, y, comps = rearray(rows)
+    if cfg.get("sb_dedupe"):        # 自造真人整篇档是上游公开集的重新打包（与全体中文公共池逐字重复 95.8%）：
+        pub = set(c for c, cd in zip(comps, codes) if cd not in SELFBUILD_LABEL)   # 与本池其他来源逐字相同的句子
+        if pub:                                        # 一律剔掉，剩下的才算这一档带来的新料
+            drop_sb = np.array([cd in SELFBUILD_LABEL and c in pub for c, cd in zip(comps, codes)])
+            if int(drop_sb.sum()):
+                print("[%s] 自造档去重：剔掉与本池其他来源逐字相同的 %d 句（剩 %d 句自造料）" %
+                      (cfg["name"], int(drop_sb.sum()), int((~drop_sb & np.isin(codes, list(SELFBUILD_LABEL))).sum())))
+                rows = [r for r, k in zip(rows, ~drop_sb) if k]
+                gids, codes, doms_row, y, comps = rearray(rows)
     kept = cap_by_domain(list(gids), doms_row, cfg.get("cap"))
     if not kept.all():
         print("[%s] 每域上限 %d 句：%d -> %d（被砍掉的是句数最多的那几个域，按组哈希整组砍）" %
               (cfg["name"], cfg["cap"], len(rows), int(kept.sum())))
         rows = [r for r, k in zip(rows, kept) if k]
-        gids, codes, doms_row, y, comps = (np.array([r[0] for r in rows]), np.array([r[1] for r in rows]),
-                                           np.array([r[5] for r in rows]), np.array([r[2] for r in rows]),
-                                           [r[4] for r in rows])
+        gids, codes, doms_row, y, comps = rearray(rows)
     fv = np.array([fold_of(g) for g in gids])
     tr, va = fv != 0, fv == 0
     # 跨语料逐字重复：同一条 HC3 句子在镜像集里也出现过，训练侧必须剔掉公共留出里出现过的原句
@@ -677,23 +1249,49 @@ def fit_config(data_dir, norm, cfg, want_lodo=True, verbose=True):
     dup = np.array([c in va_set for c in comps]) & tr
     n_dup = int(dup.sum())
     tr = tr & ~dup
-    bd = both_class_domains(y[tr], doms_row[tr])
+    bd = both_class_domains(y[tr], doms_row[tr], min_rows=int(cfg.get("balance_min_rows", LODO_MIN_ROWS)))
     vec = CountVectorizer(analyzer="char", ngram_range=tuple(cfg["ngram"]), lowercase=False,
                           min_df=cfg["min_df"])
     vec.fit([comps[i] for i in np.where(tr)[0]])
     X = vectors(comps, vec)
     share = None
     if cfg.get("prune") == "domain-sign":
-        share, _ = domain_sign_share(X, y, doms_row, both_class_domains(y, doms_row))
+        share, _ = domain_sign_share(X, y, doms_row, both_class_domains(
+            y, doms_row, min_rows=int(cfg.get("balance_min_rows", LODO_MIN_ROWS))))
     keep_mask = None if share is None else (share >= cfg.get("min_share", 0.75))
     sw = domain_balance_weight(y, doms_row, bd) if cfg.get("balance") == "domain" else None
+    if cfg.get("domain_weight"):                   # 域降权：配平先把域拉平，再按"离论文正文远不远"缩放
+        mult = domain_style_weight(y, doms_row, cfg["domain_weight"])
+        sw = mult if sw is None else sw * mult
+        sw = sw * (len(sw) / sw.sum())
     m1 = fit_side(X, y, tr, sw, cfg["C"])
     w_all = m1.coef_[0]
     rank = np.abs(w_all) if keep_mask is None else np.where(keep_mask, np.abs(w_all), -1.0)
-    cols = np.sort(np.argsort(-rank)[:KEEP_FEATURES])
+    pool = np.sort(np.argsort(-rank)[:(KEEP_FEATURES * int(cfg.get("cand_mult", 1)))])
+    dauc = None
+    if cfg.get("prune") == "domain-auc":           # 候选面放宽，再按"域内单变量 AUC"收窄到 KEEP_FEATURES
+        A, adoms, cand = domain_auc_matrix(vec, pool, comps, y, doms_row, tr, cfg)
+        sel_idx, dauc = select_by_domain_auc(A, adoms, cfg)
+        pool = cand[sel_idx] if len(sel_idx) else pool
+    cols = np.sort(pool[:KEEP_FEATURES])
     sub = X[:, cols]
     sub = sub.multiply((1.0 / np.maximum(np.sqrt(np.asarray(sub.multiply(sub).sum(axis=1)).ravel()), 1e-9))[:, None]).tocsr()
-    m2 = fit_side(sub, y, tr, sw, cfg["C"])
+    n_pair = n_pair_groups = 0
+    if cfg.get("pair") == "gdiff":                 # 权重由组内差样本学出来，特征子集与上面同一套
+        m2, n_pair, n_pair_groups = pair_diff_fit(sub, y, gids, doms_row, cfg, mask=tr)
+        if m2 is None:
+            print("[%s] 警告：没有同时含人写句与机器句的组，配对拟合退回普通拟合" % cfg["name"])
+            m2 = fit_side(sub, y, tr, sw, cfg["C"])
+    else:
+        m2 = fit_side(sub, y, tr, sw, cfg["C"])
+    if cfg.get("blend") is not None and n_pair:   # 两份权重各归一化再相加：还是"一个权重向量"，导出格式不变
+        w_plain = fit_side(sub, y, tr, sw, cfg["C"]).coef_[0]
+        w_pair0 = m2.coef_[0]
+        w_new = _unit(w_pair0) + float(cfg["blend"]) * _unit(w_plain)
+        # 混合后的尺度与逻辑回归系数完全不同，不先把尺度对回来，后面挑偏置那一步会被顶穿
+        zp = np.asarray(sub[tr].dot(w_pair0)).ravel()
+        zn = np.asarray(sub[tr].dot(w_new)).ravel()
+        m2 = FlatModel(w_new * (float(np.std(zp)) / max(1e-9, float(np.std(zn)))), 0.0)   # 两份权重各归一化再相加：还是"一个权重向量"，导出格式不变
     p = m2.decision_function(sub)
     kept_share = None if share is None else share[cols]
     per = {}
@@ -715,11 +1313,16 @@ def fit_config(data_dir, norm, cfg, want_lodo=True, verbose=True):
             te = va & (doms_row == d)
             if int(sel.sum()) < 1000 or int(te.sum()) < 200:
                 continue
-            mm = fit_side(sub, y, sel, sw, cfg["C"], max_iter=300)
+            mm = None
+            if cfg.get("pair") == "gdiff":
+                mm, _, _ = pair_diff_fit(sub, y, gids, doms_row, cfg, mask=sel)
+            if mm is None:
+                mm = fit_side(sub, y, sel, sw, cfg["C"], max_iter=300)
             lodo[d] = dict(n=int(te.sum()), n_train=int(sel.sum()),
                            auc=round(auc(y[te], mm.decision_function(sub[te])), 4))
     res = dict(name=cfg["name"], rows=rows, y=y, tr=tr, va=va, vec=vec, cols=cols, model=m2,
                vocab=len(vec.vocabulary_), n=len(rows), n_sent=int(tr.sum()), n_dup=n_dup,
+               n_pair=n_pair, n_pair_groups=n_pair_groups, domain_auc=dauc,
                auc_tr=round(auc(y[tr], p[tr]), 4), auc_va=round(auc(y[va], p[va]), 4),
                per=per, per_domain=per_dom, lodo=lodo, share_kept=kept_share,
                domains=sorted(set(doms_row)), both_class=both_class_domains(y, doms_row),
@@ -728,6 +1331,12 @@ def fit_config(data_dir, norm, cfg, want_lodo=True, verbose=True):
         print("[%s] 句 %-8d 重复剔除 %-6d 词表 %-7d 导出 %-5d  公共拟合 %.4f 公共留出 %.4f  分域 %s" %
               (res["name"], res["n"], res["n_dup"], res["vocab"], len(cols), res["auc_tr"], res["auc_va"],
                {k: v["auc"] for k, v in sorted(per_dom.items())}))
+        if n_pair:
+            print("      配对拟合：%d 个组同时有人写句与机器句，取 %d 条组内差样本（每条连它的相反数一起进拟合）" %
+                  (n_pair_groups, n_pair))
+        if dauc:
+            print("      按域 AUC 筛特征：%d 个域 × %d 个候选，留下 %d 条（一致率>=%s 且平均|AUC-0.5|>=%s）" %
+                  (dauc["n_domains"], dauc["n_candidates"], dauc["n_kept"], dauc["min_share"], dauc["min_gap"]))
         if lodo:
             vals = [v["auc"] for v in lodo.values()]
             print("      跨域留出（轮流撤掉整个域再考它）均值 %.4f 最差 %.4f  明细 %s" %
@@ -780,7 +1389,17 @@ def stage_train(args):
     if not ok:
         print("警告：这批配置都没有学术配对档，退回按公共留出挑——调试用，正式跑全量不许这样")
         ok = results
-    pick = max(ok, key=lambda r: (r["proxy"], r["auc_va"]))
+    rule_pick = max(ok, key=lambda r: (r["proxy"], r["auc_va"]))
+    pick = rule_pick
+    if getattr(args, "pick", ""):
+        hit = [r for r in results if r["name"] == args.pick]
+        if not hit:
+            raise SystemExit("--pick 指定的配置不在这一批里：%s（这一批：%s）" %
+                             (args.pick, ",".join(r["name"] for r in results)))
+        pick = hit[0]
+        print("注意：--pick 强行指定了 %s；按公共侧规则那一条选的是 %s。"
+              "按真稿成绩挑配置等于把真稿留出用掉一次，这份产物的真稿数不能再当独立复核用。" %
+              (pick["name"], rule_pick["name"]))
     for r in results:
         ls = r["lodo_sum"] or dict(mean=float("nan"), worst=float("nan"), n_domains=0)
         print("[%s] 公共留出 %.4f  学术档 %.4s  跨域均值 %.4f 跨域最差 %.4f（%d 个域）  同号特征 %s" %
@@ -789,11 +1408,14 @@ def stage_train(args):
                "-" if r["share_kept"] is None else "%.2f" % float(np.mean(r["share_kept"]))))
         print("      现代模型同域那一栏（学术域：真人摘要 vs 2024-2025 模型整篇生成）= %s" %
               (("%.4f" % r["modern_proxy"]) if r.get("modern_proxy") is not None else "这批配置里没有 MAGA 的学术档"))
-    print("\n选择规则=公共侧学术档配对留出最高（不看真稿留出）：选 %s（学术档 %.4f，公共留出 %.4f）" %
-          (pick["name"], pick["proxy"], pick["auc_va"]))
+    print("\n选择规则=公共侧学术档配对留出最高（不看真稿留出）：选 %s（学术档 %s，公共留出 %.4f）" %
+          (pick["name"], ("%.4f" % pick["proxy"]) if pick["proxy"] is not None
+           else "无：这一档的公共侧没有学术配对档（只用自建档的配置就是这种）", pick["auc_va"]))
     summary = [dict(name=r["name"], n=r["n"], n_dup_with_valid=r["n_dup"], vocab=r["vocab"],
                     features=len(r["cols"]), auc_fit=r["auc_tr"], auc_valid=r["auc_va"],
                     academic_proxy=r["proxy"], modern_academic_proxy=r.get("modern_proxy"),
+                    pair_diff_rows=r.get("n_pair", 0), pair_diff_groups=r.get("n_pair_groups", 0),
+                    domain_auc_filter=r.get("domain_auc"),
                     per_source=r["per"], per_domain=r["per_domain"],
                     lodo=r["lodo"], lodo_summary=r["lodo_sum"],
                     share_kept=None if r["share_kept"] is None else dict(
@@ -803,7 +1425,8 @@ def stage_train(args):
                         min=round(float(np.min(r["share_kept"])), 4)),
                     cfg={k: v for k, v in r["cfg"].items() if k != "drop"})
                for r in results]
-    json.dump(dict(picked=pick["name"], rule="公共侧学术配对档（人写原稿 vs 同一篇的 ChatGPT 润色）逐来源 AUC 最差值最大；"
+    json.dump(dict(picked=pick["name"], rule_pick=rule_pick["name"],
+                   forced_pick=bool(getattr(args, "pick", "")), rule="公共侧学术配对档（人写原稿 vs 同一篇的 ChatGPT 润色）逐来源 AUC 最差值最大；"
                     "跨域均值与真稿留出都不参与选择",
                    configs=summary),
               io.open(os.path.join(ART, "train-summary.json"), "w", encoding="utf-8"),
@@ -821,7 +1444,9 @@ def stage_train(args):
 
 # ---------------------------------------------------------------- 困惑度滑窗
 
-def build_freq(texts, min_bi=3, min_tri=5, alpha=4.0):
+def build_freq(texts, min_bi=3, min_tri=5, alpha=4.0, cap_bi=0, cap_tri=0):
+    """cap_bi / cap_tri：随包频率表有条数上限（三个导出文件加起来必须 <= 1.5 MB），
+    超了就按出现次数留最稳的那批；三字表回退时查不到的二字项退回单字，与 Java 侧 t->b->u 一致。"""
     uni, bi, tri, ctx_b, ctx_t = Counter(), Counter(), Counter(), Counter(), Counter()
     for t in texts:
         s = "^" + t + "$"
@@ -840,11 +1465,17 @@ def build_freq(texts, min_bi=3, min_tri=5, alpha=4.0):
             continue
         pu = 2.0 ** lu.get(g[1], oov)
         lb[g] = math.log2((n + alpha * pu) / (ctx_b[g[0]] + alpha))
+    if cap_bi and len(lb) > int(cap_bi):          # 二字表超出上限：留出现次数最多的那些
+        for g in sorted(lb, key=lambda k: -bi[k])[int(cap_bi):]:
+            del lb[g]
     for g, n in tri.items():
         if n < min_tri or len(g) != 3:
             continue
         pb = 2.0 ** lb.get(g[1:], lu.get(g[2], oov))
         lt[g] = math.log2((n + alpha * pb) / (ctx_t[g[:2]] + alpha))
+    if cap_tri and len(lt) > int(cap_tri):
+        for g in sorted(lt, key=lambda k: -tri[k])[int(cap_tri):]:
+            del lt[g]
     return lu, oov, lb, lt
 
 
@@ -872,6 +1503,73 @@ def windows(s, w=WINDOW_CHARS, stride=WINDOW_STRIDE):
             break
         i += stride
 
+def window_block(repo, norm, rows, cfg=None):
+    """滑窗困惑度代理：频率表只用公开真人语料，阈值取公共真人窗口的 p0.1。
+    从 gate 里抽出来是给 compare --window 用的，两边同一条口径。
+    freq_pool：formal（默认，学术/百科/法律/医学/金融那几档真人句）/ human（全部公开真人句）；
+    freq_cap_bi / freq_cap_tri：二字、三字表条数上限（随包三件加起来要 <= 1.5 MB）。
+    返回 (window 那一节 dict, (lu, oov, lb, lt, thr))。"""
+    cfg = cfg or {}
+    human_public = [r[4] for r in rows if r[2] == 0]
+    formal = [r[4] for r in rows if r[2] == 0 and (r[1].startswith("prhpp") or
+              r[1] == "hc3zh" and r[0].split(":")[1] in ("baike", "medicine", "law", "finance") or
+              r[1] == "anxzh" and r[5] == "news")]
+    pool = [r[4] for r in rows if r[2] == 0 and (
+        r[1].startswith("prhpp") or r[1] == "hc3zh" or
+        (r[1] == "anxzh" and r[5] in ("news", "essay")))] if cfg.get("freq_pool") == "formal+" else \
+        (human_public if cfg.get("freq_pool") == "human" else formal)
+    if not pool:
+        pool = human_public or formal
+    lu, oov, lb, lt = build_freq(pool, min_bi=int(cfg.get("freq_min_bi", 3)),
+                                 min_tri=int(cfg.get("freq_min_tri", 5)),
+                                 cap_bi=cfg.get("freq_cap_bi"), cap_tri=cfg.get("freq_cap_tri"))
+    pub_win = [bits_per_char(s[a:b], lu, oov, lb, lt)
+               for s in human_public[:40000] for a, b in windows(norm.compact(s)) if b - a >= WINDOW_MIN]
+    pub_win = np.array(pub_win)
+    pools = template_rows(repo, norm)
+    cache_win = [(code, lab, [(a, b, bits_per_char(c[a:b], lu, oov, lb, lt))
+                              for a, b in windows(c) if b - a >= WINDOW_MIN])
+                 for code, lab, _, raw, c in pools]
+
+    def sweep(thr):
+        seg_stat, win_tot = {}, {0: [0, 0], 1: [0, 0]}
+        for code, lab, ws in cache_win:
+            hits = [1 if v < thr else 0 for _, _, v in ws]
+            d = seg_stat.setdefault(code, dict(lab=lab, segs=0, segs_hit=0, wins=0, wins_hit=0))
+            d["segs"] += 1; d["wins"] += len(ws); d["wins_hit"] += sum(hits); d["segs_hit"] += (1 if sum(hits) else 0)
+            win_tot[lab][0] += len(ws); win_tot[lab][1] += sum(hits)
+        tpl = [d for d in seg_stat.values() if d["lab"] == 1]
+        hum2 = [d for d in seg_stat.values() if d["lab"] == 0]
+        return seg_stat, win_tot, \
+            float(sum(d["segs_hit"] for d in tpl)) / max(1, sum(d["segs"] for d in tpl)), \
+            float(sum(d["segs_hit"] for d in hum2)) / max(1, sum(d["segs"] for d in hum2))
+
+    thr = float(np.percentile(pub_win, 0.1))
+    seg_stat, win_tot, tpl_hit, hum_hit = sweep(thr)
+    curve = []
+    for pct in (0.1, 1.0, 5.0, 25.0, 50.0):
+        s, w, th, hh = sweep(float(np.percentile(pub_win, pct)))
+        curve.append(dict(public_percentile=pct, threshold_bits=round(float(np.percentile(pub_win, pct)), 3),
+                          template_segment_hit=round(th, 4), human_segment_hit=round(hh, 4),
+                          human_window=round(100.0 * w[0][1] / max(1, w[0][0]), 3),
+                          machine_window=round(100.0 * w[1][1] / max(1, w[1][0]), 3)))
+    best = None
+    for b in np.arange(float(np.percentile(pub_win, 90)), float(np.percentile(pub_win, 0.1)), -0.05):
+        s, w, th, hh = sweep(float(b))
+        if hh <= GATE_HUMAN_WINDOW and (best is None or th > best[1]):
+            best = (float(b), th, hh)
+    sweep_best = None if best is None else dict(threshold_bits=round(best[0], 3),
+                                                template_segment_hit=round(best[1], 4),
+                                                human_segment_hit=round(best[2], 4))
+    return dict(threshold_bits_per_char=round(thr, 4), table=dict(uni=len(lu), bi=len(lb), tri=len(lt)),
+                public_windows=len(pub_win),
+                template_segment_hit_rate=round(tpl_hit, 4), human_segment_hit_rate=round(hum_hit, 4),
+                human_window_rate=round(100.0 * win_tot[0][1] / max(1, win_tot[0][0]), 3),
+                machine_window_rate=round(100.0 * win_tot[1][1] / max(1, win_tot[1][0]), 3),
+                per_tier=seg_stat, threshold_curve=curve, freq_pool=cfg.get("freq_pool", "formal"),
+                best_zero_human_point=sweep_best), (lu, oov, lb, lt, thr)
+
+
 # ---------------------------------------------------------------- 出厂门槛
 
 def stage_compare(args):
@@ -890,12 +1588,7 @@ def stage_compare(args):
         vec, cols, m2 = r["vec"], r["cols"], r["model"]
         y, va, scores = r["y"], r["va"], r["scores"]
         dom = np.asarray([q[5] for q in r["rows"]])
-        hum = scores[va & (y == 0)]
-        bias = 0.0
-        for b in np.arange(0.0, -14.0, -0.02):
-            if float(np.mean(sigmoid(hum + b) >= 0.5)) <= GATE_FP_PER_MILLE / 1000.0:
-                bias = float(b)
-                break
+        bias = choose_bias(scores, va, y, dom, cfg, comps=[q[4] for q in r["rows"]])
 
         def side(p, yy):
             nh = max(1, int((yy == 0).sum()))
@@ -912,14 +1605,37 @@ def stage_compare(args):
                else dict(n=0, auc=None, fp_per_mille=None, machine_hit_percent=None))
         p = sigmoid(m2.decision_function(vectors([q[4] for q in ho], vec, cols)) + bias)
         real = side(p, yh)
+        wb = None
+        if getattr(args, "window", False):      # 滑窗两栏只依赖频率表（公开真人语料），要就算，不碰标签
+            wb, _ = window_block(args.repo, norm, r["rows"], cfg)
         out_rows.append(dict(name=cfg["name"], n=r["n"], features=len(cols),
                              academic_proxy=academic_proxy(r), public=pub, academic=aca, holdout=real,
-                             modern_academic_proxy=modern_academic_proxy(r)))
+                             modern_academic_proxy=modern_academic_proxy(r),
+                             pair_diff_rows=r.get("n_pair", 0), pair_diff_groups=r.get("n_pair_groups", 0),
+                             domain_auc_filter=r.get("domain_auc"),
+                             window=None if wb is None else dict(
+                                 threshold_bits=wb["threshold_bits_per_char"],
+                                 table=wb["table"], freq_pool=wb["freq_pool"],
+                                 template_segment_hit=wb["template_segment_hit_rate"],
+                                 human_segment_hit=wb["human_segment_hit_rate"],
+                                 best_zero_human_point=wb["best_zero_human_point"])))
         print("[%s] 句 %-7d  ① 公共 %.4f / 误报 %.2f  ② 学术 %s / 误报 %s  ③ 真稿 %.4f / 误报 %.2f / 机器过线 %.2f%%" %
               (cfg["name"], r["n"], pub["auc"], pub["fp_per_mille"],
                ("%.4f" % aca["auc"]) if aca["auc"] is not None else "  —  ",
                ("%.2f" % aca["fp_per_mille"]) if aca["fp_per_mille"] is not None else "  —  ",
                real["auc"], real["fp_per_mille"], real["machine_hit_percent"]), flush=True)
+        extra = []
+        if r.get("n_pair"):
+            extra.append("配对差样本 %d 条 / %d 组" % (r["n_pair"], r["n_pair_groups"]))
+        if r.get("domain_auc"):
+            extra.append("按域 AUC 筛特征：%d 域 × %d 候选 -> 留 %d 条" %
+                         (r["domain_auc"]["n_domains"], r["domain_auc"]["n_candidates"],
+                          r["domain_auc"]["n_kept"]))
+        if wb is not None:
+            extra.append("滑窗 模板段 %.1f%% / 真人段 %.1f%%（门槛 90%% / 0%%）" %
+                         (100 * wb["template_segment_hit_rate"], 100 * wb["human_segment_hit_rate"]))
+        if extra:
+            print("      " + "　".join(extra))
 
     def pear(a, b):
         if len(a) < 3:
@@ -1089,12 +1805,9 @@ def stage_gate(args, cache=None):
     vec, cols, model = cache["vec"], cache["cols"], cache["model"]
     rows, y, va, scores = cache["rows"], cache["y"], cache["va"], cache["scores"]
     dom = np.asarray(cache.get("domains")) if cache.get("domains") is not None else None
-    # 偏置只在公共真人验证侧挑：让 P>=0.5 的真人句比例不超过 2/1000
-    hum = scores[va & (y == 0)]
-    bias = 0.0
-    for b in np.arange(0.0, -14.0, -0.02):
-        if float(np.mean(sigmoid(hum + b) >= 0.5)) <= GATE_FP_PER_MILLE / 1000.0:
-            bias = float(b); break
+    # 偏置只在公共真人验证侧挑：让 P>=0.5 的真人句比例不超过 2/1000（口径见 choose_bias）
+    cfg_g = cache.get("cfg") or {}
+    bias = choose_bias(scores, va, y, dom, cfg_g, comps=[q[4] for q in rows])
     valid_p = sigmoid(scores[va] + bias)
     y_va, dom_va = y[va], None if dom is None else dom[va]
 
@@ -1165,6 +1878,17 @@ def stage_gate(args, cache=None):
             s = np.isin(codes, [hc, mc])
             pair_auc[hc + "_vs_" + mc] = round(auc((codes[s] == mc).astype(int), p[s]), 4)
     len_only_auc = round(auc(yh, hlen), 4)
+    # 留出集的语料文件开头有 # 说明行（语料作者写的元数据），它们也按所属文件的标签进了计分句。
+    # 这一栏只诊断"这批元数据行在多大程度上影响了读数"，出厂门槛仍按全量判，口径不动。
+    hdr = np.array([r[3].lstrip().startswith("#") for r in ho])
+    body = ~hdr
+    nh0 = max(1, int((body & (yh == 0)).sum()))
+    holdout_no_header = dict(
+        n_excluded=int(hdr.sum()), n_kept=int(body.sum()),
+        per_file_excluded={c: int(((codes == c) & hdr).sum()) for c in sorted(set(codes)) if int(((codes == c) & hdr).sum())},
+        auc=round(auc(yh[body], p[body]), 4),
+        fp_per_mille_at_045=round(1000.0 * float(np.sum(p[body & (yh == 0)] >= FLAG_GATE)) / nh0, 3),
+        note="# 说明行不是被打分的稿子（M-DOMAIN 那份 110 句里占 38 句）；这一栏只说明门槛数受它影响多大，不参与门槛判定")
 
     # 域差量两个不碰标签的数：模型那两万条特征在这批字上点亮多少，以及分数落在哪个带子
     vidx = np.where(va)[0]
@@ -1209,50 +1933,8 @@ def stage_gate(args, cache=None):
                       for k in sorted(pv_v))
     norm_probe["note"] = "分数 = Σ(1+ln 次数)·权重 再除以某种长度；l2 是出厂这一份。这一列只用来证明换归一化不是出路"
 
-    # 滑窗困惑度：频率表只用公开真人语料，阈值取公共真人窗口的 p0.1
-    human_public = [r[4] for r in rows if r[2] == 0]
-    formal = [r[4] for r in rows if r[2] == 0 and (r[1].startswith("prhpp") or
-              r[1] == "hc3zh" and r[0].split(":")[1] in ("baike", "medicine", "law", "finance") or
-              r[1] == "anxzh" and r[5] == "news")]
-    lu, oov, lb, lt = build_freq(formal)
-    pub_win = [bits_per_char(s[a:b], lu, oov, lb, lt)
-               for s in human_public[:40000] for a, b in windows(norm.compact(s)) if b - a >= WINDOW_MIN]
-    pub_win = np.array(pub_win)
-    pools = template_rows(args.repo, norm)
-    cache_win = [(code, lab, [(a, b, bits_per_char(c[a:b], lu, oov, lb, lt))
-                              for a, b in windows(c) if b - a >= WINDOW_MIN])
-                 for code, lab, _, raw, c in pools]
-
-    def sweep(thr):
-        seg_stat, win_tot = {}, {0: [0, 0], 1: [0, 0]}
-        for code, lab, ws in cache_win:
-            hits = [1 if v < thr else 0 for _, _, v in ws]
-            d = seg_stat.setdefault(code, dict(lab=lab, segs=0, segs_hit=0, wins=0, wins_hit=0))
-            d["segs"] += 1; d["wins"] += len(ws); d["wins_hit"] += sum(hits); d["segs_hit"] += (1 if sum(hits) else 0)
-            win_tot[lab][0] += len(ws); win_tot[lab][1] += sum(hits)
-        tpl = [d for d in seg_stat.values() if d["lab"] == 1]
-        hum2 = [d for d in seg_stat.values() if d["lab"] == 0]
-        return seg_stat, win_tot, \
-            float(sum(d["segs_hit"] for d in tpl)) / max(1, sum(d["segs"] for d in tpl)), \
-            float(sum(d["segs_hit"] for d in hum2)) / max(1, sum(d["segs"] for d in hum2))
-
-    thr = float(np.percentile(pub_win, 0.1))
-    seg_stat, win_tot, tpl_hit, hum_hit = sweep(thr)
-    curve = []
-    for pct in (0.1, 1.0, 5.0, 25.0, 50.0):
-        s, w, th, hh = sweep(float(np.percentile(pub_win, pct)))
-        curve.append(dict(public_percentile=pct, threshold_bits=round(float(np.percentile(pub_win, pct)), 3),
-                          template_segment_hit=round(th, 4), human_segment_hit=round(hh, 4),
-                          human_window=round(100.0 * w[0][1] / max(1, w[0][0]), 3),
-                          machine_window=round(100.0 * w[1][1] / max(1, w[1][0]), 3)))
-    best = None
-    for b in np.arange(float(np.percentile(pub_win, 90)), float(np.percentile(pub_win, 0.1)), -0.05):
-        s, w, th, hh = sweep(float(b))
-        if hh <= GATE_HUMAN_WINDOW and (best is None or th > best[1]):
-            best = (float(b), th, hh)
-    sweep_best = None if best is None else dict(threshold_bits=round(best[0], 3),
-                                                template_segment_hit=round(best[1], 4),
-                                                human_segment_hit=round(best[2], 4))
+    # 滑窗困惑度：口径抽到 window_block，compare --window 走的是同一份代码
+    win, (lu, oov, lb, lt, thr) = window_block(args.repo, norm, rows, cfg_g)
     lodo = cache.get("lodo") or {}
     lodo_vals = [v["auc"] for v in lodo.values() if v["auc"] == v["auc"]]
     out = dict(model_version=MODEL_VERSION, bias=round(float(bias), 4),
@@ -1266,18 +1948,14 @@ def stage_gate(args, cache=None):
                             per_file=per_file, pair_auc=pair_auc, length_only_auc=len_only_auc,
                             fp_per_mille_at_045=round(fp, 3), fp_per_mille_at_050=round(fp05, 3),
                             machine_hit_percent_at_045=round(hit, 2), tiers=tiers,
-                            operating_point=operating_point(p, yh)),
-               window=dict(threshold_bits_per_char=round(thr, 4), table=dict(uni=len(lu), bi=len(lb), tri=len(lt)),
-                           public_windows=len(pub_win),
-                           template_segment_hit_rate=round(tpl_hit, 4), human_segment_hit_rate=round(hum_hit, 4),
-                           human_window_rate=round(100.0 * win_tot[0][1] / max(1, win_tot[0][0]), 3),
-                           machine_window_rate=round(100.0 * win_tot[1][1] / max(1, win_tot[1][0]), 3),
-                           per_tier=seg_stat, threshold_curve=curve,
-                           best_zero_human_point=sweep_best),
+                            operating_point=operating_point(p, yh),
+                            without_header_lines=holdout_no_header),
+               window=win,
                gates=dict(auc_required=GATE_AUC, fp_required=GATE_FP_PER_MILLE,
                           template_required=GATE_TEMPLATE_HIT, human_window_allowed=GATE_HUMAN_WINDOW,
                           auc_pass=sent_auc >= GATE_AUC, fp_pass=fp <= GATE_FP_PER_MILLE,
-                          template_pass=tpl_hit >= GATE_TEMPLATE_HIT, human_window_pass=hum_hit <= GATE_HUMAN_WINDOW))
+                          template_pass=win["template_segment_hit_rate"] >= GATE_TEMPLATE_HIT,
+                          human_window_pass=win["human_segment_hit_rate"] <= GATE_HUMAN_WINDOW))
     out["gates"]["calibrated"] = bool(out["gates"]["auc_pass"] and out["gates"]["fp_pass"])
     out["gates"]["window_calibrated"] = bool(out["gates"]["template_pass"] and out["gates"]["human_window_pass"])
     json.dump(out, io.open(os.path.join(ART, "gate.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
@@ -1296,7 +1974,7 @@ def stage_gate(args, cache=None):
               (float(np.mean(lodo_vals)), float(np.min(lodo_vals)), len(lodo_vals)))
     print(json.dumps({k: out[k] for k in ("holdout", "gates")}, ensure_ascii=False, indent=1)[:1600])
     print("滑窗：阈值 %.3f bits/字  模板段落点 %.1f%%（门槛 90%%）  真人段落点 %.1f%%（门槛 0%%）  窗口级 真人 %.2f%% / 机器 %.2f%%"
-          % (thr, 100 * tpl_hit, 100 * hum_hit, out["window"]["human_window_rate"], out["window"]["machine_window_rate"]))
+          % (thr, 100 * win["template_segment_hit_rate"], 100 * win["human_segment_hit_rate"], out["window"]["human_window_rate"], out["window"]["machine_window_rate"]))
     print("真稿留出逐文件：")
     for d in per_file:
         print("    %-8s %-2s n=%-4d 句长中位 %-3d p50 %.3f p90 %.3f 过线 %.2f%%   %s" %
@@ -1339,7 +2017,12 @@ def fmt(x):
 
 
 def stage_export(args):
+    """导出随包三件。默认写 app/src/main/assets/aigc/；--out 指到别处就只写那份暂存，
+    assets 一个字节都不动（本轮的活是把当前最好那版放到 artifacts/agent-aigc-offline/export/ 等着复核）。"""
     import pickle
+    out_dir = getattr(args, "out", "") or ASSETS
+    version = getattr(args, "model_version", "") or MODEL_VERSION
+    created = getattr(args, "created", "") or CREATED
     gate = json.load(io.open(os.path.join(ART, "gate.json"), encoding="utf-8"))
     with open(os.path.join(ART, "model-cache.pkl"), "rb") as f:
         cache = pickle.load(f)
@@ -1347,20 +2030,23 @@ def stage_export(args):
         freq = pickle.load(f)
     vec, cols, model = cache["vec"], cache["cols"], cache["model"]
     only = cache["cfg"].get("only")
-    uses = (lambda code: True) if only is None else (lambda code: code in only)
+    present = set(r[1] for r in cache["rows"])      # 这一版真正读到、且没被域筛/每域上限清零的来源才算"训练用过"
+    uses = (lambda code: code in present) if only is None else (lambda code: code in only and code in present)
     inv = {v: k for k, v in vec.vocabulary_.items()}
     w = model.coef_[0]
-    os.makedirs(ASSETS, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
     pairs = [(inv[c], float(w[i])) for i, c in enumerate(cols) if c in inv]
     pairs.sort(key=lambda kv: -abs(kv[1]))
-    wp = os.path.join(ASSETS, "aigc-zh-weights.tsv")
+    wp = os.path.join(out_dir, "aigc-zh-weights.tsv")
     with io.open(wp, "w", encoding="utf-8", newline="\n") as f:
         f.write("# Wordlite 离线 AIGC 打分权重：逻辑回归系数，键是字符 n-gram（已按 TextCorpus.normalize 折叠并去掉空白）\n")
         f.write("# 列：w<TAB>ngram<TAB>weight　　分数 = sigmoid(截距 + Σ (1+ln 次数)*权重 / L2 长度)\n")
-        f.write("# 来源与许可见 aigc-model.tsv；模型未达标，calibrated=false，界面不许印百分比\n")
+        f.write("# 来源与许可见 aigc-model.tsv；calibrated=%s，%s\n" % (
+            "true" if gate["gates"]["calibrated"] else "false",
+            "界面可以印百分比" if gate["gates"]["calibrated"] else "有一条或两条没过，界面不许印百分比"))
         for gram, weight in pairs:
             f.write("w\t%s\t%s\n" % (gram, fmt(weight)))
-    fp_path = os.path.join(ASSETS, "aigc-zh-freq.tsv")
+    fp_path = os.path.join(out_dir, "aigc-zh-freq.tsv")
     with io.open(fp_path, "w", encoding="utf-8", newline="\n") as f:
         f.write("# Wordlite 字级 n-gram 频率表（只由公开真人语料估计）：滑窗困惑度代理用，log2 概率\n")
         f.write("# 列：ns<TAB>字串<TAB>log2p　　ns=u 单字 / b 二字 / t 三字；查表顺序 t->b->u，查不到用 oov\n")
@@ -1387,11 +2073,11 @@ def stage_export(args):
     cd_text = ("跨域留出（轮流撤掉整个域再考它）均值 %s，最差 %s。" % (cd["mean"], cd["worst"])
                if cd["mean"] is not None else
                "跨域留出：无（这份配置的公共侧只有一个域，撤掉就没题可考，逐域明细见 per_domain_public）。")
-    mp = os.path.join(ASSETS, "aigc-model.tsv")
+    mp = os.path.join(out_dir, "aigc-model.tsv")
     metrics = gate
     mrows = [
-        ("model_version", MODEL_VERSION),
-        ("created", "2026-10-09"),
+        ("model_version", version),
+        ("created", created),
         ("what", "字符 2/3/4-gram + 词表 + 逻辑回归（CPU 训练，手机侧纯手写打分，无 ONNX、无新依赖）；"
                  "另附字级 1/2/3-gram 频率表做滑窗困惑度代理"),
         ("trained_on", "；".join("%s（%s，%s）" % (s["code"], s["license"], s["note"])
@@ -1468,16 +2154,33 @@ def stage_export(args):
             f.write("golden\t%s\t%s\t%.4f\n" % (g["text"].replace("\t", " ").replace("\n", " "), g["side"], g["p"]))
         for g in gw:
             f.write("golden_bits\t%s\t%.4f\n" % (g["text"].replace("\t", " ").replace("\n", " "), g["bits"]))
-    if os.path.exists(os.path.join(ASSETS, "aigc-model.json")):
-        os.remove(os.path.join(ASSETS, "aigc-model.json"))
+    if os.path.exists(os.path.join(out_dir, "aigc-model.json")):
+        os.remove(os.path.join(out_dir, "aigc-model.json"))
 
-    manifest = dict(   # 只用于打印与自检，进仓库的清单是上面那份 aigc-model.tsv
-        model_version=MODEL_VERSION,
-        created="2026-10-09",
+    cfg_m = cache["cfg"]
+    manifest = dict(   # 随包清单是上面那份 aigc-model.tsv；这份 json 只给暂存目录复核用
+        model_version=version,
+        created=created,
+        config=cache.get("name", "?"),
+        config_options={k: (list(v) if isinstance(v, tuple) else v)
+                        for k, v in cfg_m.items() if k != "name"},
         what="字符 2/3/4-gram + 词表 + 逻辑回归（CPU 训练，手机侧纯手写打分，无 ONNX、无新依赖）"
              "；另附字级 1/2/3-gram 频率表做滑窗困惑度代理",
+        operating_point=dict(
+            bias=round(float(gate["bias"]), 4),
+            flag_gate=FLAG_GATE,
+            rule=("公共真人留出上 P>=%s 的比例 <= %s/千句（bias_at_gate=True：与出厂门槛同一把尺子）"
+                  % (FLAG_GATE, cfg_m.get("bias_fp_target", GATE_FP_PER_MILLE))
+                  if cfg_m.get("bias_at_gate") else
+                  "公共真人留出上 P>=0.5 的比例 <= %s/千句" % cfg_m.get("bias_fp_target", GATE_FP_PER_MILLE)),
+            bias_pool=cfg_m.get("bias_pool", "all（全体公共真人留出句）"),
+            disclosure=cfg_m.get("bias_note", "偏置只看了公共侧，没看真稿留出"),
+            note="偏置是分数上的单调平移：改它 AUC 一个字不动，只动误报与过线两栏"),
         trained_on=[dict(code=s["code"], license=s["license"], redistributable_raw=s["ship_raw"],
-                         note=s["note"], url=s["url"].split("/resolve/")[0]) for s in CORPORA if s["kind"] == "zh"],
+                         note=s["note"], url=s["url"].split("/resolve/")[0])
+                    for s in CORPORA if s["kind"] == "zh" and uses(s["code"])],
+        trained_domains=(sorted(set(str(d) for d in cache["domains"]))
+                         if cache.get("domains") is not None else []),
         not_used=[dict(what=w, why=why) for w, why in NOT_USED],
         split="按来源行/标题分组随机十等分，第 0 份留出；同一条样本的人写与机器版本落进同一组",
         features=dict(ngram_min=cache["cfg"]["ngram"][0], ngram_max=cache["cfg"]["ngram"][1],
@@ -1497,10 +2200,57 @@ def stage_export(args):
         golden_scores=golden, golden_bits=gw,
         files=dict(weights="aigc-zh-weights.tsv", freq="aigc-zh-freq.tsv"),
     )
+    if os.path.abspath(out_dir) != os.path.abspath(ASSETS):
+        # 随包的只有那三个 tsv（Java 只认 tsv）；这份 json 是暂存目录里给人复核用的清单副本
+        json.dump(manifest, io.open(os.path.join(out_dir, "aigc-manifest.json"), "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=1)
     for pth in (wp, fp_path, mp):
         print("%-34s %7.1f KB" % (os.path.basename(pth), os.path.getsize(pth) / 1024.0))
+    if os.path.abspath(out_dir) != os.path.abspath(ASSETS):
+        print("%-34s %7.1f KB" % ("aigc-manifest.json（不进包）",
+                                  os.path.getsize(os.path.join(out_dir, "aigc-manifest.json")) / 1024.0))
     print("导出权重 %d 条，频率表 %d 条，黄金样本 %d 条" % (len(pairs), len(freq["lu"]) + len(freq["lb"]) + len(freq["lt"]), len(golden)))
     return manifest
+
+
+def stage_guard(args):
+    """自造语料（../aigc-corpus/selfbuild/）逐字守卫：逐句比对 tests/corpus 那批真稿（含模板段），
+    有多少句/多少行命中，一目了然。训练侧读这些文件时调的是同一个 real_holdout_guard、同一份口径，
+    命中一句整行不进训练，这里只是把同一把尺子的读数印出来。
+    --pool 再多量一栏"与全体中文公共池逐字重复"（要把公共池全量过一遍切句，慢，约两分钟）。"""
+    norm = Normalizer(load_trad_table())
+    guard = real_holdout_guard(norm, args.repo)
+    print("真稿独立留出逐字句（tests/corpus，含模板段）：%d 条" % len(guard))
+    d = args.dir or SELFBUILD_DIR or os.path.join(args.data, "selfbuild")
+    pool = None
+    if args.pool:
+        rows, _ = rows_of(args.data, norm)
+        pool = set(r[4] for r in rows if r[1] not in SELFBUILD_LABEL)
+        print("全体中文公共池逐字句（rows_of 全量，已排除自造档自身）：%d 条" % len(pool))
+    for fn in sorted(f for f in os.listdir(d) if f.endswith(".jsonl")):
+        spec = next((s for s in CORPORA if str(s["file"]).endswith(fn)), None)
+        n = ns = hit = rhit = dup = 0
+        lens = []
+        for line in io.open(os.path.join(d, fn), encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            n += 1
+            cs = [c for c in (norm.compact(s) for s in split_sentences(row.get("text") or "")) if scoreable(c)]
+            ns += len(cs)
+            lens += [len(c) for c in cs]
+            h = sum(1 for c in cs if c in guard)
+            hit += h
+            rhit += 1 if h else 0
+            if pool is not None:
+                dup += sum(1 for c in cs if c in pool)
+        lens.sort()
+        extra = ("  与公共池逐字重复 %d（%.1f%%）" % (dup, 100.0 * dup / max(1, ns))) if pool is not None else ""
+        print("%-30s 行 %-5d 计分句 %-6d 真稿逐字命中 %-3d（含命中的行 %-3d）句长中位 %-4s %s%s" %
+              (fn, n, ns, hit, rhit, lens[len(lens) // 2] if lens else "-",
+               "code=" + spec["code"] if spec else "未接进 CORPORA：本轮不进训练", extra))
+    print("判定：真稿逐字命中必须为 0；不为 0 的那一档不许进训练。")
 
 
 def cache_bias(cache):
@@ -1509,7 +2259,9 @@ def cache_bias(cache):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("stage", choices=["fetch", "train", "compare", "external", "gate", "export", "all"])
+    ap.add_argument("stage", choices=["fetch", "train", "compare", "external", "gate", "export", "guard", "all"])
+    ap.add_argument("--dir", default="", help="guard：自造语料目录，默认 <data>/selfbuild")
+    ap.add_argument("--pool", action="store_true", help="guard：顺带量自造档与全体中文公共池的逐字重复（慢，约两分钟）")
     ap.add_argument("--file", default="", help="外部对照语料的本地路径（external 那一步用）")
     ap.add_argument("--data", default=DEFAULT_DATA)
     ap.add_argument("--repo", default=REPO)
@@ -1517,7 +2269,16 @@ def main():
     ap.add_argument("--redo", action="store_true")
     ap.add_argument("--configs", default="", help="只跑这些配置，逗号分隔；空=全跑")
     ap.add_argument("--no-lodo", action="store_true", help="跳过跨域留出（只用于快速调试）")
+    ap.add_argument("--pick", default="", help="train：强行指定写进 model-cache.pkl 的配置（默认按公共侧规则挑）")
+    ap.add_argument("--window", action="store_true", help="compare：连滑窗两栏一起量（每个配置多花约一分钟）")
+    ap.add_argument("--out", default="", help="export：导出目录；默认 app/src/main/assets/aigc，指别处就不碰 assets")
+    ap.add_argument("--model-version", default="", help="export：清单里的 model_version，默认沿用出厂那个")
+    ap.add_argument("--created", default="", help="export：清单里的 created，默认 %s" % CREATED)
+    ap.add_argument("--selfbuild", default="", help="自建档目录（钉版本用）：空=<data>/selfbuild，指到副本就读那份")
     a = ap.parse_args()
+    global SELFBUILD_DIR
+    SELFBUILD_DIR = os.path.abspath(a.selfbuild) if a.selfbuild else ""
+    print("自建档目录：%s" % (SELFBUILD_DIR or "<data>/selfbuild"))
     if a.stage in ("fetch", "all"):
         stage_fetch(a)
     if a.stage in ("train", "all"):
@@ -1526,6 +2287,8 @@ def main():
         stage_compare(a)
     if a.stage == "external":
         stage_external(a)
+    if a.stage == "guard":
+        stage_guard(a)
     if a.stage in ("gate", "all"):
         stage_gate(a)
     if a.stage in ("export", "all"):
