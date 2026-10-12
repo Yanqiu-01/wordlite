@@ -64,7 +64,11 @@ def main():
                     max(s["bbox"][2] for s in spans),
                     max(s["size"] for s in spans),
                     ",".join(sorted(set(s["font"] for s in spans))),
-                    " ".join(text.split())[:40],
+                    # No cap here. A line of a justified Chinese paragraph runs past 40 characters
+                    # routinely, and a truncated truth line silently drops exactly the tail where a
+                    # Latin token or a citation marker sits, which is the tail every break question
+                    # is about. tools/one-char-short.py found 6 of 90 possible pairs while this was on.
+                    " ".join(text.split()),
                 ))
         # One PDF line per visual row: spans sharing a baseline within 0.6 pt and overlapping x.
         found.sort(key=lambda r: (r[1], r[3]))
@@ -83,7 +87,7 @@ def main():
             f = set(hit[6].split(",")) | set(r[6].split(","))
             hit[6] = ",".join(sorted(f))
             if r[7] not in hit[7]:
-                hit[7] = (hit[7] + " " + r[7]).strip()[:40]
+                hit[7] = (hit[7] + " " + r[7]).strip()
         merged.sort(key=lambda m: (m[1], m[3]))
         all_pages.append(merged)
         for n, m in enumerate(merged):
