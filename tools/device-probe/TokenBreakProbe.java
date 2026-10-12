@@ -160,12 +160,24 @@ public class TokenBreakProbe {
             java.util.ArrayList<int[]> runs = slashRuns(src);
             SpannableStringBuilder g = new SpannableStringBuilder(src);
             for (int[] r0 : runs) g.setSpan(new Plain(), r0[0], r0[1], Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            int hits1 = 0, hits6 = 0, same = 0, widths = 0, hy1 = 0, hy6 = 0;
-            StringBuilder where = new StringBuilder(), wh = new StringBuilder();
+            // mode 8: the token split at every bare hyphen, one span per segment. The hypothesis under
+            // test is whether a span seam hands StaticLayout a break opportunity it did not have.
+            // There is a third trick -- put a real U+200B after the hyphen -- and it is deliberately not
+            // tried here: it would change the document's text to win 2 of 77 line ends.
+            java.util.ArrayList<int[]> hsegs = hyphenSegments(src);
+            SpannableStringBuilder g8 = new SpannableStringBuilder(src);
+            for (int[] r0 : hsegs)
+                g8.setSpan(new Plain(), r0[0], r0[1], Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            int hits1 = 0, hits6 = 0, same = 0, widths = 0, hy1 = 0, hy6 = 0, hy8 = 0;
+            String ink8 = "-";
+            StringBuilder where = new StringBuilder(), wh = new StringBuilder(), wh8 = new StringBuilder();
             for (int w = 520; w <= 575; w++) {
                 widths++;
                 String a = offsets(build(src, paint, w, Layout.BREAK_STRATEGY_HIGH_QUALITY), src);
                 String b = offsets(build(g, paint, w, Layout.BREAK_STRATEGY_HIGH_QUALITY), src);
+                String c8 = hsegs.isEmpty() ? "" : offsets(build(g8, paint, w, Layout.BREAK_STRATEGY_HIGH_QUALITY), src);
+                if (c8.contains("#")) { hy8++; if (wh8.length() < 200) wh8.append(w).append(' '); }
+                if (w == 567 && c8.length() > 0) { try { ink8 = c8.split("ink=")[1]; } catch (Exception ignored) { } }
                 boolean s1 = a.contains("*"), s6 = b.contains("*");
                 if (s1) hits1++;
                 if (s6) hits6++;
@@ -183,6 +195,11 @@ public class TokenBreakProbe {
                     + "), ReplacementSpan over the run " + hits6 + " widths");
             p("  line ends right after a hyphen -- no span " + hy1 + " widths (at "
                     + (wh.length() == 0 ? "-" : wh.toString().trim()) + "), with the span " + hy6);
+            if (!hsegs.isEmpty()) {
+                p("  line ends right after a hyphen -- split at hyphen, one span per segment: " + hy8
+                        + " widths (at " + (wh8.length() == 0 ? "-" : wh8.toString().trim())
+                        + ")  ink8=" + ink8);
+            }
             p("  column widths where the span left every line end where it was: " + same + " of " + widths
                     + "   (ink no span / with span: " + offsets(build(src, paint, 567,
                         Layout.BREAK_STRATEGY_HIGH_QUALITY), src).split("ink=")[1]
@@ -205,12 +222,55 @@ public class TokenBreakProbe {
                 }
                 p("  6 " + offsets(build(s6, paint, width, Layout.BREAK_STRATEGY_HIGH_QUALITY), src));
                 p("  7 " + offsets(build(s7, paint, width, Layout.BREAK_STRATEGY_HIGH_QUALITY), src));
+                SpannableStringBuilder s8 = new SpannableStringBuilder(src);
+                for (int[] r : hyphenSegments(src))
+                    s8.setSpan(new Plain(), r[0], r[1], Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                p("  8 " + offsets(build(s8, paint, width, Layout.BREAK_STRATEGY_HIGH_QUALITY), src));
             } catch (Throwable t) {
                 p("case " + name + " FAILED " + t);
             }
         }
         p("");
         p("DONE");
+    }
+
+    /**
+     * Split every token of [A-Za-z0-9-] that holds a "-" with a letter or digit on both sides into
+     * segments ending after each such hyphen. Tokens holding a slash are left alone: slashAtomicRuns
+     * owns those, and the document shows Word carrying all 9 of them whole.
+     */
+    static java.util.ArrayList<int[]> hyphenSegments(CharSequence t) {
+        java.util.ArrayList<int[]> out = new java.util.ArrayList<int[]>();
+        int i = 0;
+        while (i < t.length()) {
+            if (!isTokH(t.charAt(i))) { i++; continue; }
+            int a = i, b = i;
+            boolean slash = false;
+            while (b < t.length() && (isTokH(t.charAt(b)) || t.charAt(b) == '/')) {
+                if (t.charAt(b) == '/') slash = true;
+                b++;
+            }
+            while (b > a && t.charAt(b - 1) == '-') b--;          // a token closes on a letter or digit
+            if (!slash && b - a >= 3) {
+                int seg = a;
+                boolean cut = false;
+                for (int k = a + 1; k < b; k++) {
+                    if (t.charAt(k) == '-' && isTokH(t.charAt(k - 1))
+                            && k + 1 < b && isTokH(t.charAt(k + 1))) {
+                        out.add(new int[]{ seg, k + 1 });
+                        seg = k + 1;
+                        cut = true;
+                    }
+                }
+                if (cut && seg < b) out.add(new int[]{ seg, b });
+            }
+            i = Math.max(b, i + 1);
+        }
+        return out;
+    }
+
+    static boolean isTokH(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
     }
 
     static int[] slashes(CharSequence t) {

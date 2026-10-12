@@ -373,8 +373,16 @@ public final class DocxTextLayout {
         // outside the range and split a glyph down the middle.
         if (Character.isHighSurrogate(c)) return Math.min(end, start + 2);
         if (scriptKind(c) == 1) return start + 1;
+        // Stopping in front of a Chinese character matters as much as stopping at a blank. A thesis line
+        // opens on a Latin author name and then runs on with no blank at all, so "up to the next blank"
+        // was the whole line: the scan walked into a glued slash token inside its own range, called the
+        // line blocked, and retired the paragraph's 24 pt first-line indent without drawing a pixel of
+        // it. A break in front of a Chinese character is one Word takes itself -- cut_class latin|cjk
+        // appears in its own exported PDF -- so this prices a run the line could really have broken at.
+        // Measured: block 95's 16 line-end disagreements (the worst paragraph of 114) go to 0, and the
+        // whole document moves from 292/381 to 298/375 break points agreed.
         int i = start + 1;
-        while (i < end && !Character.isWhitespace(text.charAt(i))) i++;
+        while (i < end && !Character.isWhitespace(text.charAt(i)) && scriptKind(text.charAt(i)) != 1) i++;
         return i;
     }
 
