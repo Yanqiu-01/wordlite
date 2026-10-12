@@ -287,3 +287,32 @@ n-gram 模型在真稿独立留出上 **没过出厂门槛**（AUC 0.5556、真�
   那批词表不计分，但当改法是对的。
 - **改完必须重新落一条历史**：`EditorActivity.applyAigcRewrite` 以屏幕上这篇为准重新量，
   把前后对照写进新的 `ReportStore` 记录，报告中心与导出的 HTML 里那一格"降重之后重新量过"从此有字可查。
+
+## 14. 真机读数（探针，不靠 logcat）
+
+上面那些数都是 JVM 上量的。JVM 上 `assets` 打不开，判据表永远装不上，所以"表在手机上到底加载没加载"这件事
+回归测试一个字都没盖到。补了 `tools/build-aigc-probe.ps1` + `tools/device-probe/AigcProbeActivity.java`：
+单独一个 865 KB 的包（只带 `assets/aigc/`，不带字体），装成另一个 applicationId，跑的是编辑器同一个
+`AigcDetector.detect`，读数同时写进 logcat 和 `getExternalFilesDir()` 下的文件——华为 ROM 的 logcat 会吞行，
+**只认那个文件**。
+
+华为 CDY-AN90 实跑（`instrument-19-2026-10-12`，`ENGAGED true`）：
+
+| 样本 | 参与判定 | 倾向指数 | 判为可疑 |
+| --- | --- | --- | --- |
+| `real-prose.txt` 真人论文正文 | 19398 字 | 2.0 | 924 字 = 4.8% |
+| `aigc-label-machine-raw.txt` 机器稿 | 6806 字 | 6.6 | 5941 字 = 87.3% |
+| `aigc-label-machine-evasive.txt` 会躲的机器稿 | 2880 字 | 6.2 | 1785 字 = 62.0% |
+| `aigc-hard-human.txt` 难判的真人段落 | 583 字 | 3.0 | 整段不足 120 字 / 4 句，判不了 |
+
+真人正文那 4.8% 与出处行里"划线档真人误报 1.11%（按段）"不矛盾：分位线是按段算的，一篇 125 段的稿子里
+踩线那几段的字数一占比就有几个点。**这一格界面上跟着数一起印，不藏。**
+
+顺带一个坑，值记一笔：Windows 上的 aapt2 用反斜杠拼 `-A` 的子目录，资产条目会写成 `assets\aigc\x.tsv`，
+Android 的 `AssetManager` 只认 `/`，于是 `loadFromAssets` 抛 `FileNotFoundException`、判据表静默不装载、
+整条 AIGC 只剩"判据表没装载"那句话。`tools/build-host.ps1` 里的 normalize asset paths 早就在修这件事
+（3.0.7 装机包实测 0 个反斜杠条目），但探针抄的是另一条流水线，抄漏那一步就复现了一次"功能整条哑掉、
+界面上却只有一句解释"。现在探针也修 + 检一遍：包里只要还剩带反斜杠的条目就直接 throw。
+
+命令：`pwsh tools/build-aigc-probe.ps1 -Serial <序列号> -FileList artifacts/aigc-probe-files.txt`，
+读数落 `reports/current/aigc-device.log`。

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Standalone on-device AIGC probe. Separate applicationId so it never replaces the installed
+     Word Lite; built by tools/build-aigc-probe.ps1, purpose in tools/device-probe/AigcProbeActivity.java -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.rikkahub.wordlite.aigcprobe"
+    android:versionCode="1"
+    android:versionName="probe">
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="29" />
+    <application android:label="WordLiteAigc" android:debuggable="true">
+        <activity android:name="com.rikkahub.wordlite.AigcProbeActivity" android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
